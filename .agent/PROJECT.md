@@ -81,9 +81,12 @@ reset the main timer; manual secondary sends reset only the secondary timer.
 - Secondary delivery never resets or subtracts the main countdown.
 - A target is identity-validated immediately before every manual or automatic
   send.
+- D-Bus validation timeouts fail the event but remain transient; they never prove
+  identity loss or make the record sticky UNAVAILABLE.
 - A transport failure is returned to manual IPC callers after the consumed timer
   is reset; failed main delivery never advances rotation.
-- Notifications are optional and failure is non-fatal.
+- qdbus and notification subprocesses have finite per-call deadlines.
+- Notifications are optional and timeout/failure is non-fatal.
 
 ## Dependencies and platform assumptions
 
@@ -95,7 +98,7 @@ Runtime requirements:
 - a working `qdbus6`, `qdbus-qt6`, `qdbus`, Qt 5 fallback, or an executable named
   by `KEEPALIVE_QDBUS`;
 - `systemd --user` for supported installation/socket activation;
-- `flock`, coreutils/findutils-style utilities, `sed`, `grep`, `sort`, `awk`,
+- `flock`, GNU `timeout`, coreutils/findutils-style utilities, `sed`, `grep`, `sort`, `awk`,
   `readlink`, `tput`, and `stty`;
 - optional `notify-send` and optional Nerd Font glyph support.
 
@@ -110,13 +113,13 @@ is optional in the aggregate developer check.
 | `lib/common.sh` | Data-safe scalar I/O, atomic single-file writes, IDs, time/duration, sanitization. |
 | `lib/xdg.sh` | Persistent/runtime path resolution and private directory creation. |
 | `lib/icons.sh` | Central Nerd Font semantic glyph map and icon-free fallback. |
-| `lib/qdbus.sh` | qdbus executable selection and invocation. |
+| `lib/qdbus.sh` | qdbus executable selection and deadline-bounded invocation. |
 | `lib/classifier.sh` | Built-in/user AI signatures and `/proc` ancestry inspection. |
 | `lib/konsole.sh` | Session discovery, exact identity checks, `sendText` delivery. |
 | `lib/profile.sh` | One persistent profile, defaults, validation, copying, updates. |
 | `lib/logging.sh` | Per-UUID, runtime-only event histories. |
-| `lib/notifications.sh` | Optional `notify-send` wrappers. |
-| `lib/state.sh` | Daemon-owned discovery/target arrays, transitions, checkpoints, merged index. |
+| `lib/notifications.sh` | Optional deadline-bounded `notify-send` wrappers. |
+| `lib/state.sh` | Daemon-owned discovery/target arrays, transitions, strict checkpoint loading/quarantine, merged index. |
 | `lib/scheduler.sh` | Timer decrement, due-event ordering, validation, delivery, rotation. |
 | `lib/ipc.sh` | FIFO signal plus filesystem request/response protocol. |
 | `lib/service.sh` | Lock, startup/recovery, daemon loop, health/discovery cadence. |
@@ -164,6 +167,11 @@ ${XDG_RUNTIME_DIR:-/tmp/keepalive-$UID}/keepalive/
 │   ├── state.tsv
 │   ├── secondary_message
 │   └── messages/001, 002, ...
+├── quarantine/<safe basename>.<unique suffix>/
+│   ├── record
+│   ├── quarantine_reason
+│   ├── quarantined_at
+│   └── events.log                 when present
 ├── logs/<safe UUID>.log
 ├── requests/<request ID>/
 └── responses/<request ID>/
@@ -182,6 +190,10 @@ persistent config directory.
 | `XDG_STATE_HOME` | Resolved but unused | `$HOME/.local/state` |
 | `NO_COLOR` | Disable current client's colors when non-empty | unset |
 | `KEEPALIVE_QDBUS` | Explicit executable qdbus mock/override | auto-detect |
+| `KEEPALIVE_QDBUS_TIMEOUT` | Per-qdbus-call deadline, positive integer seconds | `2` |
+| `KEEPALIVE_NOTIFY_SEND` | Explicit executable notification helper override | `notify-send` |
+| `KEEPALIVE_NOTIFY_TIMEOUT` | Per-notification deadline, positive integer seconds | `2` |
+| `KEEPALIVE_MONOTONIC_FILE` | Injectable uptime source used by the daemon | `/proc/uptime` |
 | `KEEPALIVE_SUBMIT_SEQ` | Text used to submit a prompt | carriage return |
 | `KEEPALIVE_SEND_GAP` | Delay between message and submit | `0.15` seconds |
 | `KEEPALIVE_SUSPEND_GAP` | Elapsed time above which countdowns are preserved | `2` seconds |
@@ -223,6 +235,9 @@ name/pattern without adding another order slot.
 7. Runtime target bindings/logs vanish with a proper XDG login runtime lifecycle.
 8. Exactly one persistent default profile, with no retroactive propagation to peers.
 9. Long scheduling gaps preserve remaining time instead of catching up.
-10. Secondary due checks run before main due checks.
-11. Enter-only events do not advance main rotation.
-12. Every Bash function has an adjacent `# Role:` maintenance comment.
+10. Scheduling cadence uses monotonic uptime; backward readings preserve timers and reset anchors.
+11. Malformed runtime checkpoints are quarantined before in-memory registration.
+12. qdbus and notification helper calls have finite deadlines.
+13. Secondary due checks run before main due checks.
+14. Enter-only events do not advance main rotation.
+15. Every Bash function has an adjacent `# Role:` maintenance comment.

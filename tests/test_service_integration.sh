@@ -10,6 +10,7 @@ pid_file="$TEST_TMP/ai.pid"
 uuid_file="$TEST_TMP/uuid"
 send_log="$TEST_TMP/send.log"
 send_fail_file="$TEST_TMP/send.fail"
+qdbus_hang_file="$TEST_TMP/qdbus.hang"
 service_log="$TEST_TMP/service.log"
 old_uuid='aaaaaaaa-1111-4222-8333-bbbbbbbbbbbb'
 new_uuid='cccccccc-4444-4555-8666-dddddddddddd'
@@ -36,8 +37,8 @@ service_env() {
     printf '%s\0' \
         "HOME=$HOME" "XDG_CONFIG_HOME=$XDG_CONFIG_HOME" "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" "XDG_STATE_HOME=$XDG_STATE_HOME" \
         "KEEPALIVE_QDBUS=$TEST_ROOT/tests/fixtures/qdbus-mock" "FAKE_PID_FILE=$pid_file" "FAKE_UUID_FILE=$uuid_file" \
-        "FAKE_SEND_LOG=$send_log" "FAKE_SEND_FAIL_FILE=$send_fail_file" \
-        "KEEPALIVE_DISCOVERY_INTERVAL=1" "KEEPALIVE_HEALTH_INTERVAL=1" "PATH=/usr/bin:/bin"
+        "FAKE_SEND_LOG=$send_log" "FAKE_SEND_FAIL_FILE=$send_fail_file" "FAKE_QDBUS_HANG_FILE=$qdbus_hang_file" \
+        "KEEPALIVE_QDBUS_TIMEOUT=1" "KEEPALIVE_DISCOVERY_INTERVAL=1" "KEEPALIVE_HEALTH_INTERVAL=1" "PATH=/usr/bin:/bin"
 }
 
 # Role: Start a recognized fake Claude process in the requested project directory and wait for its PID file.
@@ -142,6 +143,17 @@ response=$(run_test_user env "${ENV_ARGS[@]}" bash "$helper_toggle" "$TEST_ROOT"
 assert_eq $'ERROR\tmain send failed' "$response" 'manual transport failure propagates through daemon IPC'
 assert_contains "$XDG_RUNTIME_DIR/keepalive/logs/$old_uuid.log" $'MAIN\tping\tFAILED · manual' 'daemon logs failed manual transport explicitly'
 rm -f -- "$send_fail_file"
+
+# A bounded validation timeout is an operation failure, not proof that the exact
+# target identity was lost. It must return ERROR while retaining ACTIVE state.
+touch "$qdbus_hang_file"
+response=$(run_test_user env "${ENV_ARGS[@]}" bash "$helper_toggle" "$TEST_ROOT" SEND_MAIN "$old_uuid")
+assert_eq $'ERROR\tmain send failed' "$response" 'bounded qdbus timeout propagates through daemon IPC'
+rm -f -- "$qdbus_hang_file"
+list=$(run_keepalive list)
+[[ $list == *Avela* && $list == *ACTIVE* ]]
+assert_eq 0 "$?" 'transient qdbus timeout does not make target sticky unavailable'
+assert_contains "$XDG_RUNTIME_DIR/keepalive/logs/$old_uuid.log" 'Konsole D-Bus validation timed out' 'daemon records transient validation timeout'
 
 # Kill original AI: service must retain target as sticky UNAVAILABLE.
 kill "$KA_FAKE_AI_PID" 2>/dev/null || true

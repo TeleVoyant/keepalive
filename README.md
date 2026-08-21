@@ -64,6 +64,7 @@ Runtime requirements:
 - a working `qdbus6`, `qdbus-qt6`, `qdbus`, or compatible qdbus binary.
 - `systemd --user` for normal service/socket activation.
 - `flock` from util-linux.
+- GNU `timeout` from coreutils.
 - normal core utilities (`grep`, `sed`, `sort`, `tail`, `find`, `readlink`, `cp`, `mv`).
 - `notify-send` is optional; keep-alives work without desktop notifications.
 - Nerd Font is optional; use `keepalive --no-icons` if glyphs are unavailable or misaligned.
@@ -246,6 +247,12 @@ Manual secondary sends follow the same rule.
 
 ## Pause, suspend, and restart behavior
 
+Daemon cadence and countdown arithmetic use monotonic uptime seconds from
+`/proc/uptime`, not wall-clock time. Changing the system date therefore cannot
+accelerate or freeze timers. If an injected/reinitialized monotonic source ever
+moves backward, the daemon preserves every countdown and resets all cadence
+anchors to the new value.
+
 ### Pause
 
 `p` freezes both main and secondary remaining durations exactly. Resume continues from the same values.
@@ -265,7 +272,16 @@ The preservation event is recorded in each applicable target's event log.
 
 ### Daemon crash/restart
 
-The daemon checkpoints target countdowns under `$XDG_RUNTIME_DIR`. If systemd restarts it in the same login session, the service validates the original identity and recovers the stored remaining timers.
+The daemon checkpoints target countdowns under `$XDG_RUNTIME_DIR`. If systemd
+restarts it in the same login session, the service first validates the complete
+checkpoint structure and then validates the original live identity before
+recovering the stored remaining timers. Malformed, inconsistent, or symlinked
+records are moved to runtime `quarantine/` with a reason and any matching event
+log; they never enter active daemon state.
+
+A D-Bus validation timeout is transient: recovery/health validation is deferred
+without making the target sticky UNAVAILABLE. An actual identity mismatch still
+follows the normal sticky-unavailable rule.
 
 No wall-clock catch-up is performed while the daemon was absent.
 
@@ -280,6 +296,11 @@ Each target is identified primarily by Konsole's `shellSessionId` UUID. The serv
 - foreground process ancestry.
 
 Before every input injection, all identity checks must pass.
+
+Each qdbus subprocess has a hard deadline (two seconds by default). A validation
+timeout fails that send attempt but retains the target identity for a later health
+check; a timed-out delivery is reported and logged like any other transport
+failure.
 
 If the AI process exits or the exact session can no longer be validated, the keep-alive becomes sticky **UNAVAILABLE**. It does not disappear.
 
@@ -462,6 +483,11 @@ $XDG_RUNTIME_DIR/keepalive/
 │   ├── state.tsv
 │   ├── secondary_message
 │   └── messages/
+├── quarantine/<record>.<suffix>/
+│   ├── record
+│   ├── quarantine_reason
+│   ├── quarantined_at
+│   └── events.log             when a matching log existed
 ├── logs/<UUID>.log
 ├── requests/
 └── responses/
@@ -496,6 +522,16 @@ When enabled for a target, desktop notifications are attempted for:
 - target loss/unavailable transition.
 
 `notify-send` failure is deliberately non-fatal.
+
+Both qdbus and `notify-send` are executed synchronously under finite subprocess
+deadlines, so a hung desktop helper cannot block the single daemon loop forever.
+The operational overrides are:
+
+| Variable | Meaning | Default |
+|---|---|---:|
+| `KEEPALIVE_QDBUS_TIMEOUT` | Per-qdbus-call deadline in positive integer seconds | `2` |
+| `KEEPALIVE_NOTIFY_TIMEOUT` | Per-notification deadline in positive integer seconds | `2` |
+| `KEEPALIVE_MONOTONIC_FILE` | Monotonic clock source; primarily for deterministic tests | `/proc/uptime` |
 
 ## Security and safety properties
 
@@ -539,10 +575,13 @@ The suite currently covers:
 - Enter-only queue preservation;
 - secondary/main independence;
 - suspend-gap preservation;
+- injected monotonic-clock reads and backward-clock preservation;
 - same-session daemon recovery;
+- strict checkpoint recovery validation, quarantine reasons, log preservation, and symlink rejection;
 - multi-request FIFO handling;
-- real daemon/client process boundary with mocked qdbus, including create/send/send-failure/loss/new-UUID behavior;
-- mocked Konsole D-Bus discovery/identity validation;
+- real daemon/client process boundary with mocked qdbus, including create/send/send-failure/timeout/loss/new-UUID behavior;
+- mocked Konsole D-Bus discovery/identity validation and bounded timeout behavior;
+- bounded optional notification-helper behavior;
 - no-icons/ASCII progress primitives;
 - enforcement of a `# Role:` maintenance comment for every function.
 

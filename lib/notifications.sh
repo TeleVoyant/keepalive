@@ -3,14 +3,34 @@
 
 # Role: Report whether desktop notifications can be attempted on this host.
 ka_notify_available() {
-    command -v notify-send >/dev/null 2>&1
+    if [[ -n ${KEEPALIVE_NOTIFY_SEND:-} ]]; then
+        [[ -x $KEEPALIVE_NOTIFY_SEND ]]
+    else
+        command -v notify-send >/dev/null 2>&1
+    fi
 }
 
-# Role: Send a non-blocking desktop notification; failures never stop keep-alive work.
+# Role: Return a validated positive notification subprocess timeout in integer seconds.
+ka_notify_timeout_seconds() {
+    local value=${KEEPALIVE_NOTIFY_TIMEOUT:-2}
+    ka_is_positive_int "$value" || value=2
+    printf '%s' "$value"
+}
+
+# Role: Invoke notify-send under a hard deadline and expose its transport status.
+ka_notify_call() {
+    ka_notify_available || return 127
+    command -v timeout >/dev/null 2>&1 || return 127
+    local command=${KEEPALIVE_NOTIFY_SEND:-notify-send} limit
+    limit=$(ka_notify_timeout_seconds)
+    timeout --kill-after=1s "${limit}s" "$command" "$@"
+}
+
+# Role: Send a bounded best-effort desktop notification; failures never stop keep-alive work.
 ka_notify() {
     local title=$1 body=$2 urgency=${3:-normal}
     ka_notify_available || return 0
-    notify-send -a 'Keep Alive' -u "$urgency" -t 4000 -- "$title" "$body" >/dev/null 2>&1 || true
+    ka_notify_call -a 'Keep Alive' -u "$urgency" -t 4000 -- "$title" "$body" >/dev/null 2>&1 || true
 }
 
 # Role: Notify after a successful automatic/manual keep-alive delivery when enabled.

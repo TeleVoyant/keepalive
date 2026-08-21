@@ -29,6 +29,10 @@ Do not merge changes that weaken these rules:
 10. Preserve literal messages: shell metacharacters are content, not syntax.
 11. Require main-message rotations to be contiguous non-empty `001..N` files.
 12. Never report a failed Konsole transport as IPC success.
+13. Use monotonic time for cadence; preserve countdowns across long or backward gaps.
+14. Keep qdbus and notification subprocesses bounded by explicit deadlines.
+15. Treat D-Bus validation timeouts as transient, never as proof of identity loss.
+16. Quarantine malformed recovery records before registering any in-memory target.
 
 ## Module responsibilities
 
@@ -92,6 +96,7 @@ If a new target field is added:
 5. unset it in `ka_state_delete_target`;
 6. expose it in `index.tsv` only if clients require it;
 7. add recovery/state tests.
+8. decide whether older checkpoints remain valid or must be quarantined, and test both paths.
 
 ## Useful commands
 
@@ -139,3 +144,5 @@ On the real KDE workstation:
 12. Delete old unavailable record; verify new terminal remains unaffected.
 13. Suspend laptop with known remaining time; resume and verify countdown preserved.
 14. Test `--no-icons`, `NO_COLOR=1`, and `--ascii` from another terminal emulator.
+15. Temporarily block the session bus/helper and confirm timeout failures do not make a valid target sticky UNAVAILABLE.
+16. Corrupt a disposable runtime checkpoint and confirm it moves to `quarantine/` with a reason rather than loading.

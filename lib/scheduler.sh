@@ -4,23 +4,39 @@
 # Role: Validate a target immediately before input injection, marking it unavailable on failure.
 ka_scheduler_validate_before_send() {
     local uuid=$1 rc reason
+    KA_SCHEDULER_VALIDATION_REASON=''
     [[ ${KA_T_STATUS[$uuid]-} != UNAVAILABLE ]] || return 1
     if ka_konsole_validate_target "${KA_T_SERVICE[$uuid]}" "${KA_T_PATH[$uuid]}" "$uuid" \
         "${KA_T_TERM_PID[$uuid]}" "${KA_T_AI_PID[$uuid]}" "${KA_T_AI_START[$uuid]}"; then
         return 0
+    else
+        rc=$?
     fi
-    rc=$?
     reason=$(ka_konsole_validation_reason "$rc")
+    KA_SCHEDULER_VALIDATION_REASON=$reason
+    if ka_konsole_validation_is_transient "$rc"; then
+        return 2
+    fi
     ka_state_mark_unavailable "$uuid" "$reason"
     return 1
 }
 
 # Role: Deliver one MAIN event using the selected target's current mode and message rotation.
 ka_scheduler_send_main() {
-    local uuid=$1 origin=${2:-AUTO} count index message detail delivery_failed=0
+    local uuid=$1 origin=${2:-AUTO} count index message detail delivery_failed=0 validation_rc
     ka_state_has_target "$uuid" || return 1
     [[ ${KA_T_STATUS[$uuid]} == ACTIVE || $origin == MANUAL ]] || return 2
-    ka_scheduler_validate_before_send "$uuid" || return 3
+    if ka_scheduler_validate_before_send "$uuid"; then :; else
+        validation_rc=$?
+        if ((validation_rc == 2)); then
+            detail=${KA_SCHEDULER_VALIDATION_REASON:-'Transient target validation failure'}
+            ka_log_event "$uuid" MAIN "$detail" "$([[ $origin == MANUAL ]] && printf 'FAILED · manual' || printf FAILED)"
+            ka_notify_send_failed "${KA_T_NOTIFY[$uuid]}" "${KA_T_NAME[$uuid]}" "$detail"
+            KA_T_MAIN_REMAIN[$uuid]=${KA_T_MAIN_INTERVAL[$uuid]}
+            ka_state_save_target "$uuid" || return
+        fi
+        return 3
+    fi
 
     count=$(ka_state_message_count "$uuid")
     ((count > 0)) || { ka_state_mark_unavailable "$uuid" 'No main messages remain in target state'; return 4; }
@@ -55,11 +71,21 @@ ka_scheduler_send_main() {
 
 # Role: Deliver one SECONDARY event while preserving the main countdown exactly.
 ka_scheduler_send_secondary() {
-    local uuid=$1 origin=${2:-AUTO} message detail delivery_failed=0
+    local uuid=$1 origin=${2:-AUTO} message detail delivery_failed=0 validation_rc
     ka_state_has_target "$uuid" || return 1
     [[ ${KA_T_SECONDARY_ENABLED[$uuid]} == 1 ]] || return 2
     [[ ${KA_T_STATUS[$uuid]} == ACTIVE || $origin == MANUAL ]] || return 3
-    ka_scheduler_validate_before_send "$uuid" || return 4
+    if ka_scheduler_validate_before_send "$uuid"; then :; else
+        validation_rc=$?
+        if ((validation_rc == 2)); then
+            detail=${KA_SCHEDULER_VALIDATION_REASON:-'Transient target validation failure'}
+            ka_log_event "$uuid" SECONDARY "$detail" "$([[ $origin == MANUAL ]] && printf 'FAILED · manual' || printf FAILED)"
+            ka_notify_send_failed "${KA_T_NOTIFY[$uuid]}" "${KA_T_NAME[$uuid]}" "$detail"
+            KA_T_SECONDARY_REMAIN[$uuid]=${KA_T_SECONDARY_INTERVAL[$uuid]}
+            ka_state_save_target "$uuid" || return
+        fi
+        return 4
+    fi
 
     message=${KA_T_SECONDARY_MESSAGE[$uuid]}
     if [[ ${KA_T_MODE[$uuid]} == ENTER_ONLY ]]; then detail='[ENTER]'; else detail=$message; fi
@@ -88,9 +114,22 @@ ka_scheduler_preserve_gap() {
     done
 }
 
+# Role: Preserve target countdowns explicitly when the monotonic source moves backward.
+ka_scheduler_preserve_clock_reset() {
+    local elapsed=$1 uuid backwards=$((-elapsed))
+    for uuid in "${KA_T_UUIDS[@]}"; do
+        [[ ${KA_T_STATUS[$uuid]} == UNAVAILABLE ]] && continue
+        ka_log_event "$uuid" TIMER "monotonic clock moved backward ${backwards}s; countdown preserved" PRESERVED
+    done
+}
+
 # Role: Decrement ACTIVE target timers by elapsed seconds and fire due events in priority order.
 ka_scheduler_tick() {
     local elapsed=$1 uuid
+    if ((elapsed < 0)); then
+        ka_scheduler_preserve_clock_reset "$elapsed"
+        return 0
+    fi
     ((elapsed > 0)) || return 0
     if ((elapsed > ${KEEPALIVE_SUSPEND_GAP:-2})); then
         ka_scheduler_preserve_gap "$elapsed"

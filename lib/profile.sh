@@ -59,6 +59,11 @@ ka_profile_validate_main_messages() {
         shopt -s nullglob
         local -a files=("$messages_dir"/[0-9][0-9][0-9])
         local file content expected index count
+
+        [[ -d $messages_dir && ! -L $messages_dir ]] || {
+            ka_error 'main messages path must be a regular directory'
+            return 1
+        }
         count=${#files[@]}
 
         ((count > 0)) || {
@@ -73,8 +78,8 @@ ka_profile_validate_main_messages() {
                 ka_error "main message files must be contiguous from 001 (missing $expected)"
                 return 1
             }
-            [[ -f $file && -s $file ]] || {
-                ka_error "main message $expected must be a non-empty regular file"
+            [[ -f $file && ! -L $file && -s $file ]] || {
+                ka_error "main message $expected must be a non-empty non-symlink regular file"
                 return 1
             }
             content=$(cat -- "$file") || {

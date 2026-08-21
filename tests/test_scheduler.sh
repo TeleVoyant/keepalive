@@ -15,8 +15,9 @@ KA_T_MAIN_INDEX[$uuid]=0; KA_T_SECONDARY_ENABLED[$uuid]=1; KA_T_SECONDARY_INTERV
 KA_T_SECONDARY_REMAIN[$uuid]=3; KA_T_SECONDARY_MESSAGE[$uuid]='nudge'; KA_T_LAST_SEEN[$uuid]=''; KA_T_REASON[$uuid]=''
 dir=$(ka_state_target_dir "$uuid"); mkdir -p "$dir/messages"; ka_write_scalar "$dir/messages/001" one; ka_write_scalar "$dir/messages/002" two
 
-# Role: Mock target validation so scheduler tests do not require live Konsole D-Bus.
-ka_konsole_validate_target() { return 0; }
+VALIDATION_RC=0
+# Role: Mock target validation so scheduler tests can select success or timeout.
+ka_konsole_validate_target() { return "$VALIDATION_RC"; }
 DELIVERIES=()
 DELIVERY_RC=0
 # Role: Capture scheduler deliveries in memory instead of sending D-Bus input.
@@ -53,7 +54,21 @@ assert_eq 5 "${KA_T_SECONDARY_REMAIN[$uuid]}" 'failed secondary transport resets
 
 DELIVERY_RC=0
 
+VALIDATION_RC=20
+KA_T_MAIN_REMAIN[$uuid]=1
+assert_false 'transient validation timeout returns failure without losing target identity' ka_scheduler_send_main "$uuid" MANUAL
+assert_eq ACTIVE "${KA_T_STATUS[$uuid]}" 'transient validation timeout leaves target active'
+assert_eq 10 "${KA_T_MAIN_REMAIN[$uuid]}" 'transient validation timeout resets consumed main event'
+assert_eq 1 "${KA_T_MAIN_INDEX[$uuid]}" 'transient validation timeout preserves main rotation'
+assert_contains "$(ka_log_path "$uuid")" 'Konsole D-Bus validation timed out' 'transient validation timeout is logged'
+VALIDATION_RC=0
+
 KA_T_MAIN_REMAIN[$uuid]=7; KA_T_SECONDARY_REMAIN[$uuid]=4
+ka_scheduler_tick -30
+assert_eq 7 "${KA_T_MAIN_REMAIN[$uuid]}" 'backward monotonic jump preserves main timer'
+assert_eq 4 "${KA_T_SECONDARY_REMAIN[$uuid]}" 'backward monotonic jump preserves secondary timer'
+assert_contains "$(ka_log_path "$uuid")" 'monotonic clock moved backward 30s' 'backward monotonic jump is recorded'
+
 ka_scheduler_tick 30
 assert_eq 7 "${KA_T_MAIN_REMAIN[$uuid]}" 'large suspend-like gap preserves main timer'
 assert_eq 4 "${KA_T_SECONDARY_REMAIN[$uuid]}" 'large suspend-like gap preserves secondary timer'

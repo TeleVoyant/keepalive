@@ -41,7 +41,11 @@ ka_service_recover_targets() {
         else
             local rc=$? reason
             reason=$(ka_konsole_validation_reason "$rc")
-            ka_state_mark_unavailable "$uuid" "$reason"
+            if ka_konsole_validation_is_transient "$rc"; then
+                ka_log_event "$uuid" SERVICE "daemon recovery validation deferred: $reason" "$old_status"
+            else
+                ka_state_mark_unavailable "$uuid" "$reason"
+            fi
         fi
     done
 }
@@ -49,7 +53,7 @@ ka_service_recover_targets() {
 # Role: Run the single-threaded daemon loop that interleaves IPC, timers, health, and discovery.
 ka_service_loop() {
     local now last_tick elapsed last_health last_discovery last_publish last_cleanup
-    last_tick=$(ka_now_epoch)
+    last_tick=$(ka_now_monotonic) || { ka_error 'monotonic clock source is unavailable'; return 1; }
     last_health=$last_tick
     last_discovery=$last_tick
     last_publish=$last_tick
@@ -60,9 +64,21 @@ ka_service_loop() {
             [[ -n ${KA_IPC_LINE:-} ]] && ka_ipc_handle_line "$KA_IPC_LINE" || true
         fi
 
-        now=$(ka_now_epoch)
+        if ! now=$(ka_now_monotonic); then
+            ka_warn 'monotonic clock read failed; countdowns remain preserved'
+            continue
+        fi
         elapsed=$((now - last_tick))
-        if ((elapsed > 0)); then
+        if ((elapsed < 0)); then
+            ka_scheduler_tick "$elapsed"
+            ka_warn "monotonic clock moved backward $((-elapsed))s; scheduler anchors reset"
+            last_tick=$now
+            last_health=$now
+            last_discovery=$now
+            last_publish=$now
+            last_cleanup=$now
+            continue
+        elif ((elapsed > 0)); then
             ka_scheduler_tick "$elapsed"
             last_tick=$now
         fi
@@ -101,6 +117,8 @@ ka_service_main() {
     ka_ensure_runtime_dirs
     ka_ensure_config_dirs
     ka_profile_init_defaults
+    ka_now_monotonic >/dev/null || { ka_error 'a valid monotonic clock source (/proc/uptime by default) is required'; return 1; }
+    command -v timeout >/dev/null 2>&1 || { ka_error 'GNU timeout is required for bounded D-Bus calls'; return 1; }
     ka_qdbus_find || { ka_error 'no qdbus tool found (qdbus6/qdbus required)'; return 1; }
     ka_classifier_init
     ka_state_init_arrays

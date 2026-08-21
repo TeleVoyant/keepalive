@@ -10,8 +10,8 @@ The release candidate passed:
 ```text
 Bash syntax:                 PASS
 Function-role comment lint:  PASS
-Dependency-free test files:  12 / 12 PASS
-Assertions:                  90 / 90 PASS
+Dependency-free test files:  13 / 13 PASS
+Assertions:                  126 / 126 PASS
 systemd-analyze verify:      PASS
 Installer layout simulation: PASS (non-root + mocked systemctl)
 Daemon/client integration:   PASS (real Bash processes/FIFO + mocked qdbus)
@@ -42,7 +42,12 @@ Run the same aggregate command with:
 - MESSAGE+ENTER advances rotation; ENTER_ONLY does not consume the queued message.
 - Secondary sends preserve the main remaining timer.
 - Large scheduler gaps preserve both timers.
+- An injectable monotonic source is parsed safely; backward readings preserve countdowns and reset cadence rather than freezing work.
+- Hung qdbus calls terminate at their configured deadline, return IPC failure, and do not turn a valid target sticky UNAVAILABLE.
+- Hung optional notification helpers terminate at their configured deadline without failing keep-alive work.
 - Same-login daemon recovery preserves main/secondary remaining time.
+- Recovery accepts fully valid checkpoints but quarantines malformed fields, out-of-range timers, UUID/path mismatches, missing files, broken rotations, and symlinked records/messages.
+- Quarantine records retain a precise rejection reason and preserve matching event logs without following rejected symlinks.
 - AI process loss becomes sticky UNAVAILABLE.
 - An old unavailable Avela UUID and a new same-directory Avela UUID coexist as separate UNAVAILABLE/AVAILABLE records; no auto-reattach occurs.
 - Delete removes only keep-alive runtime state/history.

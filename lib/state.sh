@@ -80,16 +80,39 @@ ka_state_save_target() {
     printf '%s' "${KA_T_SECONDARY_MESSAGE[$uuid]-}" | ka_atomic_write "$dir/secondary_message"
 }
 
-# Role: Load one persisted runtime target record without executing any stored content.
+# Role: Record a precise checkpoint-validation failure for quarantine diagnostics.
+ka_state_load_reject() {
+    KA_STATE_LOAD_ERROR=$1
+    return 1
+}
+
+# Role: Load and fully validate one persisted runtime target without executing data.
 ka_state_load_target_dir() {
     local dir=$1 file="$dir/state.tsv"
-    [[ -r $file ]] || return 1
-    local key value uuid=''
+    KA_STATE_LOAD_ERROR=''
+    [[ -f $file && ! -L $file ]] || { ka_state_load_reject 'state.tsv is missing or not a regular file'; return 1; }
+    local key value extra uuid=''
     local type='' name='' directory='' service='' path='' term_pid='' ai_pid='' ai_start=''
     local status='' mode='' notifications='' main_interval='' main_remaining='' main_index=''
     local secondary_enabled='' secondary_interval='' secondary_remaining='' last_seen='' reason=''
+    local parse_error='' secondary_message='' message_count=0 safe_uuid=''
+    local -A seen=()
 
-    while IFS=$'\t' read -r key value _; do
+    while IFS=$'\t' read -r key value extra; do
+        case $key in
+            uuid|type|name|directory|service|path|term_pid|ai_pid|ai_start|status|mode|notifications|main_interval|main_remaining|main_index|secondary_enabled|secondary_interval|secondary_remaining|last_seen|reason)
+                if [[ -n ${seen[$key]+x} ]]; then
+                    parse_error="duplicate state field: $key"
+                    continue
+                fi
+                if [[ -n $extra ]]; then
+                    parse_error="unexpected extra columns in state field: $key"
+                    continue
+                fi
+                seen[$key]=1
+                ;;
+            *) continue ;;
+        esac
         case $key in
             uuid) uuid=$value ;;
             type) type=$value ;;
@@ -114,16 +137,50 @@ ka_state_load_target_dir() {
         esac
     done <"$file"
 
-    [[ -n $uuid && -n $service && -n $path && $term_pid =~ ^[0-9]+$ && $ai_pid =~ ^[0-9]+$ ]] || return 1
-    ka_is_positive_int "$main_interval" || return 1
-    ka_is_uint "$main_remaining" || return 1
-    ka_is_uint "$main_index" || return 1
-    ka_is_positive_int "$secondary_interval" || return 1
-    ka_is_uint "$secondary_remaining" || return 1
-    [[ $status == ACTIVE || $status == PAUSED || $status == UNAVAILABLE ]] || status=UNAVAILABLE
-    [[ $mode == MESSAGE_ENTER || $mode == ENTER_ONLY ]] || mode=MESSAGE_ENTER
-    [[ $notifications == 0 || $notifications == 1 ]] || notifications=0
-    [[ $secondary_enabled == 0 || $secondary_enabled == 1 ]] || secondary_enabled=0
+    [[ -z $parse_error ]] || { ka_state_load_reject "$parse_error"; return 1; }
+    local required
+    for required in uuid type name directory service path term_pid ai_pid ai_start status mode notifications \
+        main_interval main_remaining main_index secondary_enabled secondary_interval secondary_remaining last_seen reason; do
+        [[ -n ${seen[$required]+x} ]] || { ka_state_load_reject "missing state field: $required"; return 1; }
+    done
+
+    [[ -n $uuid && ${#uuid} -le 256 ]] || { ka_state_load_reject 'uuid is empty or unreasonably long'; return 1; }
+    safe_uuid=$(ka_safe_id "$uuid")
+    [[ ${dir##*/} == "$safe_uuid" ]] || { ka_state_load_reject 'target directory does not match stored uuid'; return 1; }
+    [[ -n $type && -n $name && -n $directory ]] || { ka_state_load_reject 'type, name, and directory are required'; return 1; }
+    [[ $service =~ ^org\.kde\.konsole(-[0-9]+)?$ ]] || { ka_state_load_reject 'invalid Konsole D-Bus service'; return 1; }
+    [[ $path =~ ^/Sessions/[0-9]+$ ]] || { ka_state_load_reject 'invalid Konsole session path'; return 1; }
+    ka_is_positive_int "$term_pid" || { ka_state_load_reject 'term_pid must be positive'; return 1; }
+    ka_is_positive_int "$ai_pid" || { ka_state_load_reject 'ai_pid must be positive'; return 1; }
+    ka_is_positive_int "$ai_start" || { ka_state_load_reject 'ai_start must be positive'; return 1; }
+    [[ $status == ACTIVE || $status == PAUSED || $status == UNAVAILABLE ]] || { ka_state_load_reject 'invalid target status'; return 1; }
+    [[ $mode == MESSAGE_ENTER || $mode == ENTER_ONLY ]] || { ka_state_load_reject 'invalid delivery mode'; return 1; }
+    [[ $notifications == 0 || $notifications == 1 ]] || { ka_state_load_reject 'notifications must be 0 or 1'; return 1; }
+    [[ $secondary_enabled == 0 || $secondary_enabled == 1 ]] || { ka_state_load_reject 'secondary_enabled must be 0 or 1'; return 1; }
+    ka_is_positive_int "$main_interval" || { ka_state_load_reject 'main_interval must be positive'; return 1; }
+    ka_is_uint "$main_remaining" || { ka_state_load_reject 'main_remaining must be unsigned'; return 1; }
+    ((main_remaining <= main_interval)) || { ka_state_load_reject 'main_remaining exceeds main_interval'; return 1; }
+    ka_is_uint "$main_index" || { ka_state_load_reject 'main_index must be unsigned'; return 1; }
+    ka_is_positive_int "$secondary_interval" || { ka_state_load_reject 'secondary_interval must be positive'; return 1; }
+    ka_is_uint "$secondary_remaining" || { ka_state_load_reject 'secondary_remaining must be unsigned'; return 1; }
+    ((secondary_remaining <= secondary_interval)) || { ka_state_load_reject 'secondary_remaining exceeds secondary_interval'; return 1; }
+    [[ -f $dir/secondary_message && ! -L $dir/secondary_message ]] || {
+        ka_state_load_reject 'secondary_message is missing or not a regular file'
+        return 1
+    }
+    secondary_message=$(cat -- "$dir/secondary_message") || { ka_state_load_reject 'secondary_message could not be read'; return 1; }
+    if [[ $secondary_enabled == 1 ]]; then
+        [[ -n $secondary_message && $secondary_message != *$'\n'* ]] || {
+            ka_state_load_reject 'enabled secondary_message must be one non-empty logical line'
+            return 1
+        }
+    fi
+    ka_profile_validate_main_messages "$dir/messages" >/dev/null 2>&1 || {
+        ka_state_load_reject 'main message rotation is not contiguous non-empty 001..N'
+        return 1
+    }
+    message_count=$(ka_state_message_count "$uuid")
+    ((main_index < message_count)) || { ka_state_load_reject 'main_index exceeds message rotation'; return 1; }
 
     ka_state_register_uuid "$uuid"
     KA_T_TYPE[$uuid]=$type
@@ -143,20 +200,56 @@ ka_state_load_target_dir() {
     KA_T_SECONDARY_ENABLED[$uuid]=$secondary_enabled
     KA_T_SECONDARY_INTERVAL[$uuid]=$secondary_interval
     KA_T_SECONDARY_REMAIN[$uuid]=$secondary_remaining
-    KA_T_SECONDARY_MESSAGE[$uuid]=$(cat "$dir/secondary_message" 2>/dev/null || true)
+    KA_T_SECONDARY_MESSAGE[$uuid]=$secondary_message
     KA_T_LAST_SEEN[$uuid]=$last_seen
     KA_T_REASON[$uuid]=$reason
 }
 
-# Role: Restore all runtime target records after daemon restart within the same login.
+# Role: Move a malformed runtime record out of active targets and preserve its reason.
+ka_state_quarantine_target_dir() {
+    local source=$1 reason=$2 base safe_base destination log
+    base=${source##*/}
+    safe_base=$(ka_safe_id "$base")
+    [[ -n $safe_base ]] || safe_base=target
+    if ! destination=$(mktemp -d "$KA_QUARANTINE_DIR/${safe_base}.XXXXXXXX"); then
+        ka_warn "could not create quarantine destination for: $source"
+        return 1
+    fi
+    chmod 700 "$destination" 2>/dev/null || true
+    if ! mv -- "$source" "$destination/record"; then
+        rmdir -- "$destination" 2>/dev/null || true
+        ka_warn "could not quarantine invalid runtime target record: $source"
+        return 1
+    fi
+    ka_write_scalar "$destination/quarantine_reason" "$reason"
+    ka_write_scalar "$destination/quarantined_at" "$(ka_now_full)"
+    log="$KA_LOGS_DIR/$base.log"
+    if [[ -e $log || -L $log ]]; then
+        mv -- "$log" "$destination/events.log" || ka_warn "could not preserve quarantined event log: $log"
+    fi
+    ka_warn "quarantined invalid runtime target record $base: $reason"
+}
+
+# Role: Restore valid runtime targets and quarantine malformed records with reasons.
 ka_state_load_all_targets() {
-    local dir
-    shopt -s nullglob
+    local dir reason had_nullglob=0 had_dotglob=0
+    shopt -q nullglob && had_nullglob=1
+    shopt -q dotglob && had_dotglob=1
+    shopt -s nullglob dotglob
     for dir in "$KA_TARGETS_DIR"/*; do
-        [[ -d $dir ]] || continue
-        ka_state_load_target_dir "$dir" || ka_warn "ignoring invalid runtime target record: $dir"
+        if [[ ! -d $dir || -L $dir ]]; then
+            ka_state_quarantine_target_dir "$dir" 'target entry is not a regular directory' || true
+            continue
+        fi
+        if ka_state_load_target_dir "$dir"; then
+            :
+        else
+            reason=${KA_STATE_LOAD_ERROR:-'unknown checkpoint validation failure'}
+            ka_state_quarantine_target_dir "$dir" "$reason" || true
+        fi
     done
-    shopt -u nullglob
+    ((had_nullglob == 1)) || shopt -u nullglob
+    ((had_dotglob == 1)) || shopt -u dotglob
 }
 
 # Role: Clear and rebuild the current recognized Konsole AI-session discovery cache.
@@ -362,6 +455,7 @@ ka_state_validate_targets() {
             KA_T_LAST_SEEN[$uuid]=$(ka_now_full)
         else
             rc=$?
+            ka_konsole_validation_is_transient "$rc" && continue
             reason=$(ka_konsole_validation_reason "$rc")
             ka_state_mark_unavailable "$uuid" "$reason"
         fi

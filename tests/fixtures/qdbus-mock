@@ -9,6 +9,10 @@ if [[ -n ${FAKE_PID_FILE:-} && -r ${FAKE_PID_FILE:-} ]]; then IFS= read -r pid <
 if [[ -n ${FAKE_UUID_FILE:-} && -r ${FAKE_UUID_FILE:-} ]]; then IFS= read -r uuid <"$FAKE_UUID_FILE"; fi
 : "${pid:?FAKE_PID or FAKE_PID_FILE must provide a process ID}"
 
+if [[ -n ${FAKE_QDBUS_HANG_FILE:-} && -e ${FAKE_QDBUS_HANG_FILE:-} ]]; then
+    sleep "${FAKE_QDBUS_HANG_SECONDS:-5}"
+fi
+
 if (($# == 0)); then
     printf 'org.kde.konsole-100\norg.example.unrelated\n'
     exit 0

@@ -50,6 +50,12 @@ assert_eq 60 "${KA_T_MAIN_REMAIN[$uuid]}" 'pause preserves remaining time'
 ka_state_toggle_pause "$uuid"
 assert_eq ACTIVE "${KA_T_STATUS[$uuid]}" 'resume transition'
 
+# Role: Model a bounded qdbus timeout during periodic target health validation.
+ka_konsole_validate_target() { return 20; }
+ka_state_validate_targets
+assert_eq ACTIVE "${KA_T_STATUS[$uuid]}" 'transient health timeout does not make target unavailable'
+source "$TEST_ROOT/lib/konsole.sh"
+
 ka_state_mark_unavailable "$uuid" 'AI process exited'
 assert_eq UNAVAILABLE "${KA_T_STATUS[$uuid]}" 'target loss is sticky unavailable'
 assert_contains "$(ka_log_path "$uuid")" 'UNAVAILABLE' 'unavailable event is logged per target'

@@ -23,4 +23,18 @@ assert_eq "$$" "$term_pid" 'discovery records terminal PID'
 assert_true 'strict target validator accepts exact mocked identity' ka_konsole_validate_target "$service" "$path" "$uuid" "$term_pid" "$ai_pid" "$ai_start"
 assert_false 'strict target validator rejects replacement UUID' ka_konsole_validate_target "$service" "$path" 'different-uuid' "$term_pid" "$ai_pid" "$ai_start"
 
+hang_file="$TEST_TMP/qdbus.hang"
+touch "$hang_file"
+export FAKE_QDBUS_HANG_FILE=$hang_file
+export KEEPALIVE_QDBUS_TIMEOUT=1
+if ka_konsole_validate_target "$service" "$path" "$uuid" "$term_pid" "$ai_pid" "$ai_start"; then timeout_rc=0; else timeout_rc=$?; fi
+assert_eq 20 "$timeout_rc" 'bounded qdbus validation reports a transient timeout'
+
+export KEEPALIVE_NOTIFY_SEND=$KEEPALIVE_QDBUS
+export KEEPALIVE_NOTIFY_TIMEOUT=1
+if ka_notify_call 'title' 'body'; then notify_rc=0; else notify_rc=$?; fi
+assert_eq 124 "$notify_rc" 'desktop notification subprocess is terminated at its deadline'
+rm -f -- "$hang_file"
+unset FAKE_QDBUS_HANG_FILE KEEPALIVE_QDBUS_TIMEOUT KEEPALIVE_NOTIFY_SEND KEEPALIVE_NOTIFY_TIMEOUT
+
 test_finish

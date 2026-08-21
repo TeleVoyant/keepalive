@@ -71,19 +71,31 @@ ka_konsole_discover() {
 # Role: Verify that a target still refers to the exact original Konsole/AI process tree.
 ka_konsole_validate_target() {
     local service=$1 path=$2 expected_uuid=$3 expected_term_pid=$4 expected_ai_pid=$5 expected_ai_start=$6
-    local uuid term_pid fgpid start
+    local uuid term_pid fgpid start rc
 
-    uuid=$(ka_konsole_get "$service" "$path" shellSessionId 2>/dev/null || true)
+    if uuid=$(ka_konsole_get "$service" "$path" shellSessionId 2>/dev/null); then :; else
+        rc=$?
+        ka_qdbus_status_is_timeout "$rc" && return 20
+        return 10
+    fi
     [[ $uuid == "$expected_uuid" ]] || return 10
 
-    term_pid=$(ka_konsole_get "$service" "$path" processId 2>/dev/null || true)
+    if term_pid=$(ka_konsole_get "$service" "$path" processId 2>/dev/null); then :; else
+        rc=$?
+        ka_qdbus_status_is_timeout "$rc" && return 20
+        return 11
+    fi
     [[ $term_pid == "$expected_term_pid" ]] || return 11
 
     [[ -d /proc/$expected_ai_pid ]] || return 12
     start=$(ka_proc_starttime "$expected_ai_pid" 2>/dev/null || true)
     [[ $start == "$expected_ai_start" ]] || return 13
 
-    fgpid=$(ka_konsole_get "$service" "$path" foregroundProcessId 2>/dev/null || true)
+    if fgpid=$(ka_konsole_get "$service" "$path" foregroundProcessId 2>/dev/null); then :; else
+        rc=$?
+        ka_qdbus_status_is_timeout "$rc" && return 20
+        return 14
+    fi
     [[ $fgpid =~ ^[0-9]+$ ]] || return 14
     ka_process_is_descendant_of "$fgpid" "$expected_ai_pid" || return 15
     return 0
@@ -98,8 +110,14 @@ ka_konsole_validation_reason() {
         13) printf 'AI PID was reused by another process' ;;
         14) printf 'Konsole foreground process is unavailable' ;;
         15) printf 'AI process no longer owns the foreground process tree' ;;
+        20) printf 'Konsole D-Bus validation timed out' ;;
         *)  printf 'Target validation failed' ;;
     esac
+}
+
+# Role: Identify target-validation failures that should not make identity sticky unavailable.
+ka_konsole_validation_is_transient() {
+    [[ ${1-} == 20 ]]
 }
 
 # Role: Send raw text to a specific Konsole session through its D-Bus sendText method.

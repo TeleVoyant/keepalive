@@ -11,6 +11,7 @@ ka_xdg_init() {
     KA_PROFILE_DIR="$KA_CONFIG_DIR/profile"
     KA_RUNTIME_DIR="$KA_RUNTIME_BASE/keepalive"
     KA_TARGETS_DIR="$KA_RUNTIME_DIR/targets"
+    KA_QUARANTINE_DIR="$KA_RUNTIME_DIR/quarantine"
     KA_DISCOVERY_DIR="$KA_RUNTIME_DIR/discovery"
     KA_REQUESTS_DIR="$KA_RUNTIME_DIR/requests"
     KA_RESPONSES_DIR="$KA_RUNTIME_DIR/responses"
@@ -23,9 +24,9 @@ ka_xdg_init() {
 # Role: Create private runtime directories used only for the current login session.
 ka_ensure_runtime_dirs() {
     umask 077
-    mkdir -p "$KA_RUNTIME_DIR" "$KA_TARGETS_DIR" "$KA_DISCOVERY_DIR" \
+    mkdir -p "$KA_RUNTIME_DIR" "$KA_TARGETS_DIR" "$KA_QUARANTINE_DIR" "$KA_DISCOVERY_DIR" \
         "$KA_REQUESTS_DIR" "$KA_RESPONSES_DIR" "$KA_LOGS_DIR"
-    chmod 700 "$KA_RUNTIME_DIR" "$KA_TARGETS_DIR" "$KA_DISCOVERY_DIR" \
+    chmod 700 "$KA_RUNTIME_DIR" "$KA_TARGETS_DIR" "$KA_QUARANTINE_DIR" "$KA_DISCOVERY_DIR" \
         "$KA_REQUESTS_DIR" "$KA_RESPONSES_DIR" "$KA_LOGS_DIR" 2>/dev/null || true
 }
 

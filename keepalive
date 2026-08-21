@@ -98,6 +98,7 @@ ka_cli_doctor() {
 
     if ka_qdbus_find; then printf '%-30s OK (%s)\n' 'qdbus' "$KA_QDBUS"; else printf '%-30s FAIL\n' 'qdbus'; ((failures += 1)); fi
     if command -v flock >/dev/null 2>&1; then printf '%-30s OK\n' 'flock'; else printf '%-30s FAIL\n' 'flock'; ((failures += 1)); fi
+    if command -v timeout >/dev/null 2>&1; then printf '%-30s OK\n' 'timeout'; else printf '%-30s FAIL\n' 'timeout'; ((failures += 1)); fi
     if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
         printf '%-30s OK\n' 'systemd --user'
     else

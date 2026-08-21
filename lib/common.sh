@@ -47,6 +47,15 @@ ka_now_epoch() {
     printf '%(%s)T' -1
 }
 
+# Role: Read integer monotonic seconds from procfs or an injectable test clock file.
+ka_now_monotonic() {
+    local source=${KEEPALIVE_MONOTONIC_FILE:-/proc/uptime} seconds='' _rest=''
+    [[ -r $source ]] || return 1
+    read -r seconds _rest <"$source" || true
+    [[ $seconds =~ ^[0-9]+([.][0-9]+)?$ ]] || return 1
+    printf '%s' "${seconds%%.*}"
+}
+
 # Role: Return a compact local timestamp suitable for per-target event history.
 ka_now_hms() {
     printf '%(%H:%M:%S)T' -1

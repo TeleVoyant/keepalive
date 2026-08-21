@@ -24,7 +24,7 @@ Konsole user-session D-Bus objects
 ```
 
 The daemon is single-threaded. It interleaves one FIFO read (up to 0.20 seconds),
-wall-clock timer work, target validation, discovery, index publication, and stale
+monotonic timer work, target validation, discovery, index publication, and stale
 IPC cleanup. `flock -n` on `manager.lock` prevents two daemon instances from
 owning the same runtime state.
 
@@ -39,18 +39,20 @@ request from profile/target files client-side; the daemon validates and applies 
 1. Reject effective UID 0.
 2. Resolve XDG paths and create private runtime/config directories.
 3. Initialize profile defaults for any missing profile files.
-4. Find qdbus or abort.
-5. Initialize classifier registry and empty state arrays.
-6. Acquire the non-blocking manager lock.
-7. Open the FIFO read/write, creating it if systemd did not.
-8. Install cleanup and signal traps.
-9. Load all runtime target directories as data.
-10. Discover current recognized Konsole sessions.
-11. Strictly validate restored non-unavailable targets.
-12. Preserve valid target statuses/countdowns and log `SERVICE` recovery; mark
-    invalid ones sticky `UNAVAILABLE`.
-13. Publish the merged index and service status.
-14. Enter the permanent loop.
+4. Require a valid monotonic source and GNU `timeout`.
+5. Find qdbus or abort.
+6. Initialize classifier registry and empty state arrays.
+7. Acquire the non-blocking manager lock.
+8. Open the FIFO read/write, creating it if systemd did not.
+9. Install cleanup and signal traps.
+10. Fully validate runtime target directories, loading valid records and
+    quarantining invalid ones.
+11. Discover current recognized Konsole sessions.
+12. Strictly validate restored non-unavailable targets.
+13. Preserve valid target statuses/countdowns and log `SERVICE` recovery; defer
+    D-Bus timeouts and mark definite identity failures sticky `UNAVAILABLE`.
+14. Publish the merged index and service status.
+15. Enter the permanent loop.
 
 The service status checkpoint contains four TSV rows: `state`, `pid`, `version`,
 and `updated`. Normal/signaled exit writes `state=stopped`. Target checkpoints are
@@ -106,11 +108,14 @@ dynamic condition: current foreground PID descends from the AI PID
 | `13` | AI PID start-time differs (PID reuse). |
 | `14` | Current foreground PID is unavailable/non-numeric. |
 | `15` | Foreground PID no longer descends from remembered AI PID. |
+| `20` | A bounded Konsole D-Bus validation call timed out. |
 
 Health validation runs every two seconds by default, and the exact same validation
-runs immediately before every send. Any failure transitions an `ACTIVE` or
-`PAUSED` record to sticky `UNAVAILABLE`, saves it, logs the reason, and optionally
-notifies. Discovery never reverses this state.
+runs immediately before every send. Definite identity/process failures transition
+an `ACTIVE` or `PAUSED` record to sticky `UNAVAILABLE`, save it, log the reason,
+and optionally notify. Return 20 is deliberately transient: health/recovery retry
+later, while a due/manual send fails and resets only its consumed timer. Discovery
+never reverses a definite unavailable state.
 
 ## In-memory collections
 
@@ -188,11 +193,18 @@ The secondary prompt is a separate literal `secondary_message` file. Main
 messages are literal numbered files under `messages/`, and `main_index` is
 zero-based.
 
-Load-time validation requires non-empty UUID/service/path, numeric terminal and AI
-PIDs, positive intervals, and unsigned remaining durations/index. Unknown status
-falls back to `UNAVAILABLE`; unknown mode, booleans, and notification values fall
-back to safe defaults. `ai_start`, restored-runtime message continuity, and the
-directory-name/UUID relationship are not currently validated at load time.
+Load-time validation is fail-closed before array registration. It requires every
+known field exactly once; rejects extra columns in known rows; validates non-empty
+identity/display fields, service/path shape, positive PID/start-time/interval
+values, exact enums/booleans, remaining-time bounds, and `main_index`; binds the
+stored UUID to the target-directory basename; and requires non-symlink state,
+secondary, message-directory, and canonical contiguous message files. Unknown
+field names remain ignorable for forward compatibility.
+
+Any rejected top-level target entry is moved into a uniquely created
+`quarantine/<safe basename>.<suffix>/record` wrapper before the daemon loop starts.
+The wrapper also receives `quarantine_reason`, `quarantined_at`, and the matching
+event log when one exists. The loader never follows target/message symlinks.
 
 `state.tsv`, scalar profile fields, `secondary_message`, service state, and the
 merged index use same-directory temporary-file rename. Message-directory and
@@ -294,8 +306,9 @@ implemented in the IPC switch.
 
 ## Scheduler
 
-The loop timestamps work with Bash's wall-clock epoch seconds. When elapsed time
-becomes positive:
+The loop reads integer monotonic uptime seconds from `/proc/uptime` (or the
+injectable `KEEPALIVE_MONOTONIC_FILE` used by tests). Wall-clock date corrections
+therefore do not affect scheduling. When elapsed time becomes positive:
 
 1. If elapsed is greater than `KEEPALIVE_SUSPEND_GAP` (default 2), do not subtract
    anything; log a `PRESERVED` gap event for every non-unavailable target.
@@ -305,6 +318,11 @@ becomes positive:
 5. If the target remains active and main is due, attempt it and reset main.
 6. Save the target checkpoint.
 
+If the monotonic reading moves backward, every countdown is preserved, a timer
+event is logged, and all loop cadence anchors are reset to the new reading. A
+temporarily unreadable source also preserves countdowns rather than substituting
+wall time.
+
 When both timers reach zero in one tick, secondary is delivered first and main is
 then also eligible in that same tick. “Preempts” means ordering, not suppression of
 the main event.
@@ -313,8 +331,12 @@ Main delivery selects `messages/<main_index+1 padded to 3 digits>`. Successful
 `MESSAGE_ENTER` advances modulo the count of non-empty numbered files. Enter-only
 does not advance. Main and secondary timers are reset after a delivery attempt,
 including a transport failure. Transport failure is logged/notified, checkpointed,
-and returned nonzero to manual IPC callers; identity-validation failure instead
-marks the target unavailable.
+and returned nonzero to manual IPC callers. A transient validation timeout follows
+the same consumed-event timer policy but does not advance rotation or mark the
+target unavailable; a definite identity-validation failure does.
+
+All qdbus calls use GNU `timeout`, defaulting to two seconds per subprocess.
+Optional notifications use the same bounded pattern and remain best-effort.
 
 ## End-to-end create flow
 
@@ -341,8 +363,9 @@ TUI reloads row as ACTIVE
 ```text
 timer due or SEND_* IPC
   -> check target/feature/status rules
-  -> strict Konsole UUID/PID/starttime/ancestry validation
-     -> failure: sticky UNAVAILABLE + log + optional notification
+  -> strict Konsole UUID/PID/starttime/ancestry validation under a per-call deadline
+     -> timeout: failed event + timer reset; identity retained for retry
+     -> definite mismatch: sticky UNAVAILABLE + log + optional notification
   -> select message or [ENTER]
   -> qdbus sendText(message), optional 0.15 s gap, sendText(carriage return)
   -> log SENT or FAILED; optional notification
@@ -357,9 +380,11 @@ The message and carriage return are two D-Bus calls, not one atomic operation.
 ## Recovery and lifetime
 
 The service never computes catch-up time from checkpoint timestamps. On a daemon
-restart in the same login, it loads stored remaining values, validates exact
-identity, and resumes them unchanged. This intentionally treats daemon downtime
-like a preserved gap.
+restart in the same login, it first rejects/quarantines malformed records, then
+live-validates structurally sound records and resumes their remaining values
+unchanged. A D-Bus timeout defers live validation without changing prior status;
+a definite identity mismatch becomes sticky UNAVAILABLE. This intentionally
+treats daemon downtime like a preserved gap.
 
 Under a normal systemd user session, `$XDG_RUNTIME_DIR` is removed at full logout,
 so active bindings and logs disappear. Persistent profile/classifier files remain.

@@ -12,12 +12,13 @@ maintainer or coding agent needs in order to continue safely.
 
 - Repository: `TeleVoyant/keepalive`
 - Branch: `master`
-- Reviewed commit: `1e67c2b1e303a45acfa7ce09f2208c027765e8aa`
+- Reviewed baseline commit: `55c8f72` (`fix(keepalive): propagate send failures and enforce canonical message rotations`)
 - Product version: `0.1.0`
 - Implementation: Bash 5+, Linux `/proc`, Konsole D-Bus, `systemd --user`
 - History at review time: one implementation commit
-- Follow-up worktree fixes: transport failures propagate through IPC; submitted
-  main-message rotations must be contiguous non-empty `001..N` files.
+- Current worktree hardening: monotonic/injectable scheduling with backward-clock
+  preservation; bounded qdbus/notification subprocesses with transient timeout
+  semantics; strict checkpoint recovery with diagnostic quarantine.
 - Working tree before this directory was added: clean and aligned with
   `origin/master`
 

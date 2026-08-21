@@ -117,13 +117,17 @@ secondary_remaining
 
 Only ACTIVE targets decrement.
 
-A scheduler gap above `KEEPALIVE_SUSPEND_GAP` defaults to preservation rather than subtraction, preventing sleep/resume catch-up bursts.
+Cadence uses integer monotonic uptime from `/proc/uptime`; wall-clock corrections
+do not affect countdowns. A scheduler gap above `KEEPALIVE_SUSPEND_GAP` defaults
+to preservation rather than subtraction, preventing sleep/resume catch-up bursts.
+An unexpected backward monotonic reading also preserves all countdowns and resets
+timer, health, discovery, publication, and cleanup anchors.
 
 Secondary events are checked before main when both become due on the same tick.
 
 ## Message rotation
 
-Main messages live as literal numbered files:
+Main messages live as literal, non-symlink numbered files:
 
 ```text
 targets/<UUID>/messages/001
@@ -139,9 +143,30 @@ but returns failure to manual IPC callers and never advances main rotation.
 
 ## Runtime recovery
 
-Target state is atomically checkpointed under `$XDG_RUNTIME_DIR`. A daemon restart in the same login reads those records, validates their exact identity, and continues with stored remaining durations.
+Target state is atomically checkpointed under `$XDG_RUNTIME_DIR`. On same-login
+restart, the daemon accepts a record only after validating all required fields,
+enums, booleans, numeric/range constraints, UUID-to-directory binding, Konsole
+service/path shape, required files, canonical message rotation, and message index.
+Symlinked target entries, message directories/files, and scalar files are rejected.
+
+Rejected records are moved from `targets/` to a uniquely created runtime
+`quarantine/` wrapper containing the original record, a precise reason, a
+timestamp, and its matching event log when present. Only structurally valid
+records proceed to live identity validation and resume with stored durations.
+
+A bounded D-Bus timeout during recovery or periodic health validation is treated
+as transient and leaves the prior ACTIVE/PAUSED status intact for retry. Definite
+UUID/PID/start-time/ancestry mismatches still become sticky UNAVAILABLE.
 
 No durable active binding is restored after full logout/reboot.
+
+## Bounded external processes
+
+Every qdbus invocation runs under GNU `timeout` with a two-second per-call default.
+The same boundary applies to optional `notify-send` calls. A pre-send validation
+timeout fails and consumes only that scheduled/manual timer event without changing
+target identity or main rotation; a sendText timeout is a normal transport failure.
+Notification timeout/failure is always non-fatal.
 
 ## Persistent profile
 

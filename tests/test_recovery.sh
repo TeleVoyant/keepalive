@@ -17,12 +17,18 @@ KA_T_SECONDARY_REMAIN[$uuid]=81; KA_T_SECONDARY_MESSAGE[$uuid]='nudge'; KA_T_LAS
 dir=$(ka_state_target_dir "$uuid"); mkdir -p "$dir/messages"; ka_write_scalar "$dir/messages/001" ping
 ka_state_save_target "$uuid"
 
-# Role: Mock strict validation success to model same-login daemon crash recovery.
-ka_konsole_validate_target() { return 0; }
+VALIDATION_RC=0
+# Role: Mock strict validation outcomes for same-login daemon crash recovery.
+ka_konsole_validate_target() { return "$VALIDATION_RC"; }
 ka_service_recover_targets
 assert_eq ACTIVE "${KA_T_STATUS[$uuid]}" 'service recovery preserves active state'
 assert_eq 317 "${KA_T_MAIN_REMAIN[$uuid]}" 'service recovery preserves main remaining time'
 assert_eq 81 "${KA_T_SECONDARY_REMAIN[$uuid]}" 'service recovery preserves secondary remaining time'
 assert_contains "$(ka_log_path "$uuid")" 'daemon recovered; countdown preserved' 'same-session recovery is recorded in target log'
+
+VALIDATION_RC=20
+ka_service_recover_targets
+assert_eq ACTIVE "${KA_T_STATUS[$uuid]}" 'transient recovery validation timeout does not make target unavailable'
+assert_contains "$(ka_log_path "$uuid")" 'recovery validation deferred' 'transient recovery validation timeout is logged as deferred'
 
 test_finish

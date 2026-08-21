@@ -3,9 +3,9 @@
 ## Repository state at review
 
 - Branch `master` tracked `origin/master` with no pre-existing changes.
-- HEAD was the repository's only commit:
-  `1e67c2b feat(keepalive): implement persistent multi-session Konsole keep-alive manager`.
-- The committed tree contained 45 files and roughly 4,475 lines.
+- Current baseline HEAD is `55c8f72 fix(keepalive): propagate send failures and
+  enforce canonical message rotations`, following the original implementation
+  commit `1e67c2b`.
 - `VALIDATION.md` and `docs/VALIDATION.md` were byte-identical.
 - `.agents/` and `.codex/` existed as empty read-only environment directories;
   there was no repository `AGENTS.md`.
@@ -31,6 +31,10 @@
 11. Preserve independent target behavior: configuring one target must not alter
     any other active target.
 12. Long scheduler gaps must preserve, not consume, countdowns.
+13. Loop cadence uses monotonic uptime; a negative reading must preserve timers and reset every cadence anchor.
+14. qdbus and notification helpers must remain deadline-bounded.
+15. A validation timeout is transient; only definite identity loss becomes sticky UNAVAILABLE.
+16. Runtime checkpoints must pass complete validation before array registration; quarantine failures with diagnostic evidence.
 
 The module source order in `keepalive` matters because functions share global
 variables rather than namespaced objects. New modules should be sourced before
@@ -65,8 +69,7 @@ Do not run installer, uninstaller, or daemon as root.
 On 2026-08-21 with Bash 5.2.37:
 
 - all Bash source/test files passed `bash -n`;
-- all 12 test files passed;
-- all 12 test files and all 90 assertions passed after the follow-up fixes;
+- all 13 test files and all 126 assertions passed after the robustness fixes;
 - entrypoint version/help/icon-test smoke checks passed;
 - ShellCheck was not installed;
 - the working tree was clean before `.agent/` was created.
@@ -94,18 +97,19 @@ bus was available during this review.
 
 | Test | Actual focus |
 |---|---|
-| `test_common.sh` | Duration, safe IDs, literal metacharacters, no-newline scalar read. |
+| `test_common.sh` | Duration, safe IDs, literal metacharacters, no-newline scalar read, injectable monotonic clock. |
 | `test_classifier.sh` | Claude/Gemini/Aider signatures, shell negative, ancestry basics. |
 | `test_profile.sh` | Defaults, profile update, literal stored message, contiguous numbering. |
-| `test_state.sh` | Mutation-free malformed CREATE/CONFIGURE rejection, create, pause/resume, unavailable, replacement UUID, cleanup. |
-| `test_scheduler.sh` | Main rotation, transport failures, enter-only preservation, timer independence, long-gap preservation. |
-| `test_recovery.sh` | Valid same-login checkpoint recovery with unchanged durations. |
+| `test_state.sh` | Mutation-free malformed CREATE/CONFIGURE rejection, create, pause/resume, transient health timeout, unavailable, replacement UUID, cleanup. |
+| `test_scheduler.sh` | Main rotation, transport/validation timeout failures, enter-only preservation, timer independence, long/backward-gap preservation. |
+| `test_recovery.sh` | Valid same-login recovery with unchanged durations and transient validation deferral. |
+| `test_recovery_validation.sh` | Strict checkpoint validation, range/message/symlink rejection, quarantine reasons/log preservation. |
 | `test_ipc.sh` | Two request IDs through one FIFO with independent responses. |
-| `test_konsole_mock.sh` | Discovery columns and exact-vs-replacement UUID validation. |
+| `test_konsole_mock.sh` | Discovery/identity validation, qdbus timeout classification, notification deadline. |
 | `test_tui_primitives.sh` | ASCII progress/urgency and icon-free state label. |
 | `test_function_comments.sh` | Adjacent `# Role:` convention. |
 | `test_install_layout.sh` | Non-root install/uninstall with mocked systemctl. |
-| `test_service_integration.sh` | Cross-process daemon/client lifecycle, mocked sendText success/failure. |
+| `test_service_integration.sh` | Cross-process daemon/client lifecycle, mocked sendText success/failure/timeout. |
 
 Each test calls `test_env_setup`, which creates isolated temporary `HOME` and XDG
 directories. Root-based CI attempts to run installation/integration behavior as
@@ -115,9 +119,9 @@ directories. Root-based CI attempts to run installation/integration behavior as
 
 Automated tests do not drive the full interactive wizard/detail/log loops, test
 resize/control-sequence behavior, simulate multiple simultaneous mutating clients,
-exercise malformed/corrupt checkpoints deeply, or use real systemd socket
-activation. There is no CI workflow file in the repository. See `RISKS.md` for
-specific recommended regressions.
+inject crashes between multi-file checkpoint/profile writes, or use real systemd
+socket activation. There is no CI workflow file in the repository. See `RISKS.md`
+for specific recommended regressions.
 
 The repository explicitly leaves these to live-host qualification:
 

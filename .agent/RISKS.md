@@ -22,9 +22,38 @@ Only three-digit numbered files are copied into profile and target state. Reject
 CREATE and CONFIGURE operations are tested to leave monitored target state and the
 persistent profile unchanged.
 
-Runtime checkpoint loading still does not revalidate message-directory continuity;
-corrupting an already-created runtime directory externally remains a recovery
-hardening opportunity rather than an accepted configuration path.
+## Resolved on 2026-08-21: scheduler uses monotonic time and handles rollback
+
+The service loop now derives countdown and cadence elapsed time from integer
+`/proc/uptime` readings rather than wall-clock epoch seconds. The source is
+injectable for deterministic testing. A negative reading explicitly preserves all
+countdowns, logs the anomaly, and resets timer/health/discovery/publication/cleanup
+anchors so work cannot freeze while a clock catches up.
+
+Regression coverage includes source parsing and negative scheduler movement.
+
+## Resolved on 2026-08-21: external desktop helpers are deadline-bounded
+
+Every qdbus subprocess and optional `notify-send` call now runs under GNU
+`timeout`, with independent positive-integer overrides and a two-second default.
+Validation timeouts have a dedicated transient status: health/recovery defer,
+while a due/manual send fails its consumed event without making identity sticky
+UNAVAILABLE. Delivery timeout remains a logged transport failure.
+
+Coverage includes hung qdbus validation, hung notification execution, periodic and
+recovery validation deferral, and a real daemon/FIFO timeout response.
+
+## Resolved on 2026-08-21: recovery rejects and quarantines corrupt records
+
+Runtime loading now validates the complete known checkpoint schema, duplicate and
+extra columns, enums/booleans, numeric ranges, UUID/directory binding, Konsole
+address shape, required secondary data, canonical rotation/index, and non-symlink
+record/message paths before registering arrays. Invalid target entries move to a
+unique runtime quarantine wrapper with a reason, timestamp, and matching event log.
+
+Regression coverage restores a valid record while quarantining corrupt start time,
+timer range, required-file, UUID binding, message rotation, message symlink, and
+top-level target-symlink cases without following the latter.
 
 ## Medium priority: multi-file operations are not transactions
 
@@ -46,18 +75,6 @@ Recommended direction: stage complete versioned target/profile directories and
 rename/swap them, or introduce a generation/version marker and recovery rules.
 At minimum, document “atomic files/snapshots” rather than whole-save transaction
 semantics and add interruption/corruption tests.
-
-## Medium priority: scheduler uses wall-clock time
-
-`ka_now_epoch` uses wall-clock epoch seconds. A large forward adjustment is treated
-as a preserved suspend gap, which is safe against bursts. A backward clock jump,
-however, makes elapsed and every cadence delta negative; `last_tick`, health,
-discovery, and publication timestamps are not updated until wall time catches up.
-That can freeze timers and target health for the size of the adjustment.
-
-Recommended fix: use a monotonic/boot clock source appropriate to the desired
-suspend semantics, or explicitly detect negative elapsed and reset cadence anchors
-without subtracting countdowns. Add forward/backward clock-jump tests.
 
 ## Medium priority: `/tmp` fallback conflicts with stated lifecycle and service isolation
 
@@ -134,17 +151,6 @@ All runtime directories are private to the user, which reduces cross-user impact
 Still, explicit bounds, UUID validation, collision-safe directory creation, and
 complete terminal-control filtering would make the data contracts stronger.
 
-## Lower priority: synchronous helpers can stall the single loop
-
-qdbus and `notify-send` have no timeout. Notifications are failure-tolerant but are
-not actually launched asynchronously. A slow D-Bus process can delay all targets.
-If total elapsed exceeds the two-second suspend threshold, the next scheduler tick
-preserves the gap, treating operational slowness like suspend.
-
-Recommended fix: add bounded command execution and measure behavior under slow or
-hung qdbus/notification mocks. Consider whether the default suspend threshold is
-too close to plausible workload latency.
-
 ## Lower priority: UI edge cases are mostly untested
 
 - The manager rejects widths below 52, but its decorative header is much wider and
@@ -173,12 +179,14 @@ them down:
    Confirm this is desired UX.
 3. A transport failure resets the consumed timer while returning IPC failure. This
    policy is now explicit and covered; revisit only if retry cadence should change.
-4. `last_seen` updates in memory on successful health checks but is not checkpointed
+4. A transient validation timeout also resets a consumed send event but retains
+   ACTIVE/PAUSED identity; health and recovery merely retry later.
+5. `last_seen` updates in memory on successful health checks but is not checkpointed
    each health cycle; index is current, crash checkpoint may be older until recovery.
-5. Creating from a discovery row does not revalidate it inside CREATE; the first
+6. Creating from a discovery row does not revalidate it inside CREATE; the first
    health/pre-send check catches staleness. Consider validating at creation for
    faster feedback.
-6. `UNAVAILABLE` records remain so even if the exact original target were to become
+7. `UNAVAILABLE` records remain so even if the exact original target were to become
    valid again. This appears intentionally sticky and should remain explicit.
 
 ## Existing documented limitations
@@ -195,13 +203,10 @@ The repository already acknowledges:
 
 In priority order:
 
-1. Restored runtime targets with corrupt message rotations, plus `000` and unusual
-   non-numbered extras.
-2. Exact index encode/decode round trip with internal/trailing empty fields.
-3. Both timers due simultaneously, including secondary failure/identity loss.
-4. Negative and large-positive clock movement with injectable time source.
-5. Crash/failure between target/profile/message update stages.
-6. Multiple concurrent CREATE/CONFIGURE/DELETE requests for one UUID.
-7. Real systemd socket activation in an isolated user manager.
-8. Slow/hung qdbus and notify-send timeout behavior.
-9. Pseudo-terminal-driven TUI key/resize/cancel cleanup tests.
+1. Exact index encode/decode round trip with internal/trailing empty fields.
+2. Both timers due simultaneously, including secondary failure/identity loss.
+3. Large-positive injected monotonic movement through the full service loop.
+4. Crash/failure between target/profile/message update stages.
+5. Multiple concurrent CREATE/CONFIGURE/DELETE requests for one UUID.
+6. Real systemd socket activation in an isolated user manager.
+7. Pseudo-terminal-driven TUI key/resize/cancel cleanup tests.
