@@ -188,7 +188,7 @@ ka_state_copy_request_messages() {
     rm -rf -- "$target_dir/messages"
     mkdir -p "$target_dir/messages"
     chmod 700 "$target_dir/messages" 2>/dev/null || true
-    cp -f -- "$request_dir/messages"/* "$target_dir/messages/"
+    cp -f -- "$request_dir/messages"/[0-9][0-9][0-9] "$target_dir/messages/"
     chmod 600 "$target_dir/messages"/* 2>/dev/null || true
 }
 
@@ -431,5 +431,5 @@ ka_state_copy_target_to_request() {
     ka_write_scalar "$request_dir/delivery_mode" "$(ka_state_read_field "$uuid" mode)"
     rm -rf -- "$request_dir/messages"
     mkdir -p "$request_dir/messages"
-    cp -f -- "$dir/messages"/* "$request_dir/messages/" 2>/dev/null || true
+    cp -f -- "$dir/messages"/[0-9][0-9][0-9] "$request_dir/messages/" 2>/dev/null || true
 }

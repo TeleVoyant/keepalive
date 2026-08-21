@@ -201,6 +201,10 @@ The guided six-step form configures:
 
 The new keep-alive starts ACTIVE with full countdowns.
 
+The daemon accepts main-message rotations only in canonical contiguous form
+(`001`, `002`, ... with no gaps or empty slots). Malformed request data is rejected
+before target or profile state is changed.
+
 ### Single-profile behavior
 
 There is exactly one persistent profile.
@@ -229,6 +233,10 @@ Every Enter-only event is still logged, for example:
 ```text
 13:14:06  MAIN  [ENTER]  SENT
 ```
+
+If Konsole transport fails, the event is logged/notified as failed and a manual
+caller receives an error. The relevant timer is still reset because the scheduled
+event was consumed, and a failed main send does not advance message rotation.
 
 ## Secondary prompt semantics
 
@@ -523,15 +531,17 @@ The suite currently covers:
 - utility/data safety;
 - AI classifier signatures;
 - persistent profile behavior;
+- canonical contiguous main-message validation and mutation-free CREATE/CONFIGURE rejection;
 - target creation/state transitions;
 - sticky unavailable + different-UUID replacement behavior;
 - timer/send semantics;
+- main/secondary transport failure propagation and failure logging;
 - Enter-only queue preservation;
 - secondary/main independence;
 - suspend-gap preservation;
 - same-session daemon recovery;
 - multi-request FIFO handling;
-- real daemon/client process boundary with mocked qdbus, including create/send/loss/new-UUID behavior;
+- real daemon/client process boundary with mocked qdbus, including create/send/send-failure/loss/new-UUID behavior;
 - mocked Konsole D-Bus discovery/identity validation;
 - no-icons/ASCII progress primitives;
 - enforcement of a `# Role:` maintenance comment for every function.

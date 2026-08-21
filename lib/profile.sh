@@ -29,7 +29,7 @@ ka_profile_copy_to_request() {
     ka_write_scalar "$request_dir/delivery_mode" "$(ka_read_first_line "$KA_PROFILE_DIR/delivery_mode" MESSAGE_ENTER)"
     rm -rf -- "$request_dir/messages"
     mkdir -p "$request_dir/messages"
-    cp -f -- "$KA_PROFILE_DIR/messages"/* "$request_dir/messages/" 2>/dev/null || true
+    cp -f -- "$KA_PROFILE_DIR/messages"/[0-9][0-9][0-9] "$request_dir/messages/" 2>/dev/null || true
 }
 
 # Role: Replace the single persistent profile with validated values from one request.
@@ -49,7 +49,44 @@ ka_profile_update_from_request() {
     rm -rf -- "$KA_PROFILE_DIR/messages"
     mkdir -p "$KA_PROFILE_DIR/messages"
     chmod 700 "$KA_PROFILE_DIR/messages" 2>/dev/null || true
-    cp -f -- "$request_dir/messages"/* "$KA_PROFILE_DIR/messages/" 2>/dev/null || true
+    cp -f -- "$request_dir/messages"/[0-9][0-9][0-9] "$KA_PROFILE_DIR/messages/"
+}
+
+# Role: Validate that main messages form a non-empty contiguous 001..N rotation.
+ka_profile_validate_main_messages() {
+    local messages_dir=$1
+    (
+        shopt -s nullglob
+        local -a files=("$messages_dir"/[0-9][0-9][0-9])
+        local file content expected index count
+        count=${#files[@]}
+
+        ((count > 0)) || {
+            ka_error 'at least one non-empty main message is required'
+            return 1
+        }
+
+        for ((index=1; index<=count; index++)); do
+            printf -v expected '%03d' "$index"
+            file="$messages_dir/$expected"
+            [[ -e $file ]] || {
+                ka_error "main message files must be contiguous from 001 (missing $expected)"
+                return 1
+            }
+            [[ -f $file && -s $file ]] || {
+                ka_error "main message $expected must be a non-empty regular file"
+                return 1
+            }
+            content=$(cat -- "$file") || {
+                ka_error "main message $expected could not be read"
+                return 1
+            }
+            [[ -n $content && $content != *$'\n'* ]] || {
+                ka_error "main message $expected must be one non-empty logical line"
+                return 1
+            }
+        done
+    )
 }
 
 # Role: Validate configuration files supplied by a TUI create/configure request.
@@ -75,16 +112,7 @@ ka_profile_validate_request() {
         [[ $secondary_content != *$'\n'* ]] || { ka_error 'secondary message must be one logical line'; return 1; }
     fi
 
-    local count=0 file content
-    shopt -s nullglob
-    for file in "$request_dir/messages"/[0-9][0-9][0-9]; do
-        [[ -s $file ]] || continue
-        content=$(cat "$file")
-        [[ -n $content && $content != *$'\n'* ]] || { shopt -u nullglob; ka_error 'main messages must be non-empty single lines'; return 1; }
-        ((count += 1))
-    done
-    shopt -u nullglob
-    ((count > 0)) || { ka_error 'at least one non-empty main message is required'; return 1; }
+    ka_profile_validate_main_messages "$request_dir/messages"
 }
 
 # Role: Print the persistent profile in human-readable maintenance form.

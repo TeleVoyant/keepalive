@@ -18,8 +18,9 @@ dir=$(ka_state_target_dir "$uuid"); mkdir -p "$dir/messages"; ka_write_scalar "$
 # Role: Mock target validation so scheduler tests do not require live Konsole D-Bus.
 ka_konsole_validate_target() { return 0; }
 DELIVERIES=()
+DELIVERY_RC=0
 # Role: Capture scheduler deliveries in memory instead of sending D-Bus input.
-ka_konsole_deliver() { DELIVERIES+=("$3:$4"); return 0; }
+ka_konsole_deliver() { DELIVERIES+=("$3:$4"); return "$DELIVERY_RC"; }
 # Role: Suppress desktop notifications during scheduler unit tests.
 ka_notify_sent() { :; }
 
@@ -35,6 +36,22 @@ KA_T_MAIN_REMAIN[$uuid]=7
 ka_scheduler_send_secondary "$uuid" MANUAL
 assert_eq 7 "${KA_T_MAIN_REMAIN[$uuid]}" 'secondary send preserves main remaining time'
 assert_eq 5 "${KA_T_SECONDARY_REMAIN[$uuid]}" 'secondary send resets only secondary timer'
+
+KA_T_MODE[$uuid]=MESSAGE_ENTER
+KA_T_MAIN_REMAIN[$uuid]=1
+DELIVERY_RC=1
+assert_false 'failed main transport returns failure to its caller' ka_scheduler_send_main "$uuid" MANUAL
+assert_eq 10 "${KA_T_MAIN_REMAIN[$uuid]}" 'failed main transport still resets its consumed timer event'
+assert_eq 1 "${KA_T_MAIN_INDEX[$uuid]}" 'failed main transport does not advance message rotation'
+assert_contains "$(ka_log_path "$uuid")" $'MAIN\ttwo\tFAILED · manual' 'failed main transport is logged explicitly'
+
+KA_T_MAIN_REMAIN[$uuid]=7
+KA_T_SECONDARY_REMAIN[$uuid]=1
+assert_false 'failed secondary transport returns failure to its caller' ka_scheduler_send_secondary "$uuid" MANUAL
+assert_eq 7 "${KA_T_MAIN_REMAIN[$uuid]}" 'failed secondary transport still preserves main remaining time'
+assert_eq 5 "${KA_T_SECONDARY_REMAIN[$uuid]}" 'failed secondary transport resets only its consumed timer event'
+
+DELIVERY_RC=0
 
 KA_T_MAIN_REMAIN[$uuid]=7; KA_T_SECONDARY_REMAIN[$uuid]=4
 ka_scheduler_tick 30

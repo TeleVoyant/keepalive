@@ -20,10 +20,10 @@ Each `test_*.sh` receives an isolated temporary `HOME`, `XDG_CONFIG_HOME`, and `
 
 - `test_common.sh`: duration helpers, scalar safety, shell-metacharacter literal handling.
 - `test_classifier.sh`: recognized wrapper signatures, negative matching, ancestry basics.
-- `test_profile.sh`: default profile, updates, literal messages.
-- `test_state.sh`: create/pause/resume/unavailable/delete, independent log cleanup, new-UUID no-reattach behavior.
-- `test_service_integration.sh`: real background daemon + FIFO + public client processes with mocked qdbus; covers create/send/loss/replacement UUID end-to-end.
-- `test_scheduler.sh`: main rotation, Enter-only queue preservation, secondary/main independence, suspend-gap preservation.
+- `test_profile.sh`: default profile, updates, literal messages, canonical contiguous message numbering.
+- `test_state.sh`: mutation-free malformed CREATE/CONFIGURE rejection, create/pause/resume/unavailable/delete, independent log cleanup, new-UUID no-reattach behavior.
+- `test_service_integration.sh`: real background daemon + FIFO + public client processes with mocked qdbus; covers create/send/send-failure/loss/replacement UUID end-to-end.
+- `test_scheduler.sh`: main rotation, Enter-only queue preservation, main/secondary transport failures, timer independence, suspend-gap preservation.
 - `test_recovery.sh`: same-login daemon restart countdown recovery.
 - `test_install_layout.sh`: non-root install/uninstall layout with mocked systemctl.
 - `test_ipc.sh`: multiple request IDs through one FIFO and responses.

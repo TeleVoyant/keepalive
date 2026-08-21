@@ -9,6 +9,7 @@ mkdir -p "$work" "$bin"
 pid_file="$TEST_TMP/ai.pid"
 uuid_file="$TEST_TMP/uuid"
 send_log="$TEST_TMP/send.log"
+send_fail_file="$TEST_TMP/send.fail"
 service_log="$TEST_TMP/service.log"
 old_uuid='aaaaaaaa-1111-4222-8333-bbbbbbbbbbbb'
 new_uuid='cccccccc-4444-4555-8666-dddddddddddd'
@@ -35,7 +36,8 @@ service_env() {
     printf '%s\0' \
         "HOME=$HOME" "XDG_CONFIG_HOME=$XDG_CONFIG_HOME" "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" "XDG_STATE_HOME=$XDG_STATE_HOME" \
         "KEEPALIVE_QDBUS=$TEST_ROOT/tests/fixtures/qdbus-mock" "FAKE_PID_FILE=$pid_file" "FAKE_UUID_FILE=$uuid_file" \
-        "FAKE_SEND_LOG=$send_log" "KEEPALIVE_DISCOVERY_INTERVAL=1" "KEEPALIVE_HEALTH_INTERVAL=1" "PATH=/usr/bin:/bin"
+        "FAKE_SEND_LOG=$send_log" "FAKE_SEND_FAIL_FILE=$send_fail_file" \
+        "KEEPALIVE_DISCOVERY_INTERVAL=1" "KEEPALIVE_HEALTH_INTERVAL=1" "PATH=/usr/bin:/bin"
 }
 
 # Role: Start a recognized fake Claude process in the requested project directory and wait for its PID file.
@@ -132,6 +134,14 @@ chmod +x "$helper_toggle"
 response=$(run_test_user env "${ENV_ARGS[@]}" bash "$helper_toggle" "$TEST_ROOT" SEND_MAIN "$old_uuid")
 assert_eq $'OK\tok' "$response" 'manual main send executes through daemon IPC'
 assert_contains "$send_log" 'ping' 'daemon sends configured message through mocked Konsole sendText'
+
+# A transport error must cross the real daemon/IPC boundary as ERROR, while the
+# failed event remains recorded in the selected target's independent log.
+touch "$send_fail_file"
+response=$(run_test_user env "${ENV_ARGS[@]}" bash "$helper_toggle" "$TEST_ROOT" SEND_MAIN "$old_uuid")
+assert_eq $'ERROR\tmain send failed' "$response" 'manual transport failure propagates through daemon IPC'
+assert_contains "$XDG_RUNTIME_DIR/keepalive/logs/$old_uuid.log" $'MAIN\tping\tFAILED · manual' 'daemon logs failed manual transport explicitly'
+rm -f -- "$send_fail_file"
 
 # Kill original AI: service must retain target as sticky UNAVAILABLE.
 kill "$KA_FAKE_AI_PID" 2>/dev/null || true

@@ -11,7 +11,7 @@ The release candidate passed:
 Bash syntax:                 PASS
 Function-role comment lint:  PASS
 Dependency-free test files:  12 / 12 PASS
-Assertions:                  71 / 71 PASS
+Assertions:                  90 / 90 PASS
 systemd-analyze verify:      PASS
 Installer layout simulation: PASS (non-root + mocked systemctl)
 Daemon/client integration:   PASS (real Bash processes/FIFO + mocked qdbus)
@@ -29,6 +29,7 @@ Run the same aggregate command with:
 - Literal message strings containing shell metacharacters remain data and are never executed.
 - Scalar files without trailing newlines are read correctly.
 - Profile updates do not require sourcing configuration.
+- Main-message requests must be contiguous non-empty `001..N` rotations; malformed CREATE/CONFIGURE data is rejected before target/profile mutation.
 - Claude/Gemini/Aider wrapper signatures are recognized while an ordinary shell remains unclassified.
 - Mocked Konsole discovery records the expected `shellSessionId`, service, path, and PID.
 - Strict identity validation rejects a different session UUID.
@@ -36,6 +37,8 @@ Run the same aggregate command with:
 - A real background service process can be controlled by a separate public `keepalive` client process.
 - CREATE crosses the real FIFO/request-directory boundary and produces ACTIVE target state.
 - Manual MAIN sends cross daemon IPC and invoke mocked Konsole `sendText`.
+- Main and secondary transport failures return failure after logging/checkpointing while preserving the defined timer and rotation semantics.
+- A mocked qdbus transport failure crosses the real daemon/FIFO boundary as `ERROR`, not a false success.
 - MESSAGE+ENTER advances rotation; ENTER_ONLY does not consume the queued message.
 - Secondary sends preserve the main remaining timer.
 - Large scheduler gaps preserve both timers.

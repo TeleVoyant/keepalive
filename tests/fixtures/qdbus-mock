@@ -23,6 +23,7 @@ case $method in
     org.kde.konsole.Session.processId) printf '%s\n' "$pid" ;;
     org.kde.konsole.Session.foregroundProcessId) printf '%s\n' "$pid" ;;
     org.kde.konsole.Session.sendText)
+        if [[ -n ${FAKE_SEND_FAIL_FILE:-} && -e ${FAKE_SEND_FAIL_FILE:-} ]]; then exit 1; fi
         if [[ -n ${FAKE_SEND_LOG:-} ]]; then printf '%s\n' "${4-}" >>"$FAKE_SEND_LOG"; fi
         exit 0
         ;;

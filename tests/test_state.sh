@@ -17,6 +17,14 @@ KA_D_TERM_PID[$uuid]=$$
 KA_D_AI_PID[$uuid]=$$
 KA_D_AI_START[$uuid]=$(ka_proc_starttime $$)
 
+bad_req="$TEST_TMP/gapped-config"
+ka_profile_copy_to_request "$bad_req"
+ka_write_scalar "$bad_req/main_interval" 42
+mv -- "$bad_req/messages/001" "$bad_req/messages/002"
+assert_false 'CREATE rejects a non-canonical main-message rotation' ka_state_create_target "$uuid" "$bad_req"
+assert_false 'rejected CREATE leaves no monitored target state' ka_state_has_target "$uuid"
+assert_eq 1500 "$(ka_read_first_line "$KA_PROFILE_DIR/main_interval")" 'rejected CREATE leaves the persistent profile unchanged'
+
 req="$TEST_TMP/config"
 ka_profile_copy_to_request "$req"
 ka_write_scalar "$req/main_interval" 60
@@ -27,6 +35,14 @@ assert_eq 60 "${KA_T_MAIN_REMAIN[$uuid]}" 'new target countdown starts at interv
 assert_eq 'Avela' "${KA_T_NAME[$uuid]}" 'directory basename name is retained'
 assert_eq 'continue; $(do-not-run)' "$(ka_state_message_at "$uuid" 0)" 'target message remains literal data'
 assert_file "$(ka_state_target_dir "$uuid")/state.tsv" 'target checkpoint written'
+
+bad_update="$TEST_TMP/gapped-update"
+ka_state_copy_target_to_request "$uuid" "$bad_update"
+ka_write_scalar "$bad_update/main_interval" 99
+mv -- "$bad_update/messages/001" "$bad_update/messages/002"
+assert_false 'CONFIGURE rejects a non-canonical main-message rotation' ka_state_configure_target "$uuid" "$bad_update"
+assert_eq 60 "${KA_T_MAIN_INTERVAL[$uuid]}" 'rejected CONFIGURE leaves selected target settings unchanged'
+assert_eq 60 "$(ka_read_first_line "$KA_PROFILE_DIR/main_interval")" 'rejected CONFIGURE leaves persistent profile unchanged'
 
 ka_state_toggle_pause "$uuid"
 assert_eq PAUSED "${KA_T_STATUS[$uuid]}" 'pause transition'

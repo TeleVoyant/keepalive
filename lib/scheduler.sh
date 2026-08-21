@@ -17,7 +17,7 @@ ka_scheduler_validate_before_send() {
 
 # Role: Deliver one MAIN event using the selected target's current mode and message rotation.
 ka_scheduler_send_main() {
-    local uuid=$1 origin=${2:-AUTO} count index message detail
+    local uuid=$1 origin=${2:-AUTO} count index message detail delivery_failed=0
     ka_state_has_target "$uuid" || return 1
     [[ ${KA_T_STATUS[$uuid]} == ACTIVE || $origin == MANUAL ]] || return 2
     ka_scheduler_validate_before_send "$uuid" || return 3
@@ -44,14 +44,18 @@ ka_scheduler_send_main() {
     else
         ka_log_event "$uuid" MAIN "$detail" "$([[ $origin == MANUAL ]] && printf 'FAILED · manual' || printf FAILED)"
         ka_notify_send_failed "${KA_T_NOTIFY[$uuid]}" "${KA_T_NAME[$uuid]}" "$detail"
+        delivery_failed=1
     fi
     KA_T_MAIN_REMAIN[$uuid]=${KA_T_MAIN_INTERVAL[$uuid]}
-    ka_state_save_target "$uuid"
+    ka_state_save_target "$uuid" || return
+    # A failed transport attempt still consumes this timer event, but callers must
+    # receive failure rather than an incorrect IPC success response.
+    ((delivery_failed == 0)) || return 5
 }
 
 # Role: Deliver one SECONDARY event while preserving the main countdown exactly.
 ka_scheduler_send_secondary() {
-    local uuid=$1 origin=${2:-AUTO} message detail
+    local uuid=$1 origin=${2:-AUTO} message detail delivery_failed=0
     ka_state_has_target "$uuid" || return 1
     [[ ${KA_T_SECONDARY_ENABLED[$uuid]} == 1 ]] || return 2
     [[ ${KA_T_STATUS[$uuid]} == ACTIVE || $origin == MANUAL ]] || return 3
@@ -66,9 +70,13 @@ ka_scheduler_send_secondary() {
     else
         ka_log_event "$uuid" SECONDARY "$detail" "$([[ $origin == MANUAL ]] && printf 'FAILED · manual' || printf FAILED)"
         ka_notify_send_failed "${KA_T_NOTIFY[$uuid]}" "${KA_T_NAME[$uuid]}" "$detail"
+        delivery_failed=1
     fi
     KA_T_SECONDARY_REMAIN[$uuid]=${KA_T_SECONDARY_INTERVAL[$uuid]}
-    ka_state_save_target "$uuid"
+    ka_state_save_target "$uuid" || return
+    # Match MAIN semantics: reset after an attempted event, while returning a
+    # transport error so manual IPC callers are not told the send succeeded.
+    ((delivery_failed == 0)) || return 5
 }
 
 # Role: Preserve all countdowns when a large scheduler gap indicates suspend or process stall.

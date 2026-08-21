@@ -133,6 +133,10 @@ targets/<UUID>/messages/002
 
 `main_index` is zero-based. MESSAGE+ENTER success advances it modulo message count. ENTER_ONLY does not advance because no queued message was consumed.
 
+Configuration validation requires a non-empty contiguous `001..N` sequence before
+any target/profile mutation. Transport failure resets the consumed event's timer
+but returns failure to manual IPC callers and never advances main rotation.
+
 ## Runtime recovery
 
 Target state is atomically checkpointed under `$XDG_RUNTIME_DIR`. A daemon restart in the same login reads those records, validates their exact identity, and continues with stored remaining durations.

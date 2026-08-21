@@ -27,6 +27,8 @@ Do not merge changes that weaken these rules:
 8. Never subtract a detected long suspend/stall gap from countdowns.
 9. Keep FIFO commands small; large data belongs in request directories.
 10. Preserve literal messages: shell metacharacters are content, not syntax.
+11. Require main-message rotations to be contiguous non-empty `001..N` files.
+12. Never report a failed Konsole transport as IPC success.
 
 ## Module responsibilities
 
