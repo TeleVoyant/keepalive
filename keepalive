@@ -1,0 +1,195 @@
+#!/usr/bin/env bash
+# Keep Alive Manager public entrypoint.
+# This one command acts as the TUI client, maintenance CLI, and hidden systemd daemon.
+set -Eeuo pipefail
+
+KEEPALIVE_VERSION='0.1.0'
+export KEEPALIVE_VERSION
+
+# Resolve symlinks so an installed ~/.local/bin/keepalive can find its lib/ directory.
+KA_ENTRYPOINT=$(readlink -f -- "${BASH_SOURCE[0]}")
+KA_PROJECT_ROOT=${KA_ENTRYPOINT%/*}
+
+# shellcheck source=lib/common.sh
+source "$KA_PROJECT_ROOT/lib/common.sh"
+source "$KA_PROJECT_ROOT/lib/xdg.sh"
+source "$KA_PROJECT_ROOT/lib/icons.sh"
+source "$KA_PROJECT_ROOT/lib/qdbus.sh"
+source "$KA_PROJECT_ROOT/lib/classifier.sh"
+source "$KA_PROJECT_ROOT/lib/konsole.sh"
+source "$KA_PROJECT_ROOT/lib/profile.sh"
+source "$KA_PROJECT_ROOT/lib/logging.sh"
+source "$KA_PROJECT_ROOT/lib/notifications.sh"
+source "$KA_PROJECT_ROOT/lib/state.sh"
+source "$KA_PROJECT_ROOT/lib/scheduler.sh"
+source "$KA_PROJECT_ROOT/lib/ipc.sh"
+source "$KA_PROJECT_ROOT/lib/service.sh"
+source "$KA_PROJECT_ROOT/lib/tui/screen.sh"
+source "$KA_PROJECT_ROOT/lib/tui/wizard.sh"
+source "$KA_PROJECT_ROOT/lib/tui/tui.sh"
+
+ka_xdg_init
+
+# Role: Print command reference for operators and maintainers.
+ka_cli_help() {
+    cat <<'HELP'
+Keep Alive Manager
+
+Usage:
+  keepalive [--no-icons] [--no-color] [--ascii]   Open attachable TUI
+  keepalive list                                  List discovered/managed AI sessions
+  keepalive status                                Check user service availability
+  keepalive refresh                               Force immediate Konsole discovery
+  keepalive profile                               Show the single persistent default profile
+  keepalive logs UUID                             Print one target's runtime event log
+  keepalive doctor                                Diagnose dependencies/session integration
+  keepalive --icons-test                          Verify Nerd Font glyph rendering
+  keepalive --version                             Print version
+  keepalive --help                                Show this help
+
+Internal/systemd command:
+  keepalive --service                             Run the persistent user daemon
+
+Presentation controls affect only the current TUI client. They never change daemon state.
+NO_COLOR=1 is also honored.
+HELP
+}
+
+# Role: Initialize presentation flags shared by normal TUI commands.
+ka_cli_init_presentation() {
+    KA_ICONS_ENABLED=${KA_ICONS_ENABLED:-1}
+    KA_COLOR_ENABLED=${KA_COLOR_ENABLED:-1}
+    KA_ASCII_MODE=${KA_ASCII_MODE:-0}
+    [[ -n ${NO_COLOR:-} ]] && KA_COLOR_ENABLED=0
+    ka_icons_init
+    ka_tui_style_init
+}
+
+# Role: Ensure the daemon is activated and refresh current discovery before read-only CLI output.
+ka_cli_ensure_service() {
+    local response
+    response=$(ka_ipc_call PING '' 2>/dev/null || true)
+    [[ $response == OK$'\t'* ]] || { ka_error "service unavailable: ${response#*$'\t'}"; return 1; }
+}
+
+# Role: Print a stable plain-text session list useful for scripts and maintenance.
+ka_cli_list() {
+    ka_cli_ensure_service || return
+    ka_ipc_call REFRESH '' >/dev/null 2>&1 || true
+    ka_tui_load_index
+    printf '%-3s %-16s %-24s %-13s %-10s %-10s\n' '#' TYPE SESSION STATE MAIN NUDGE
+    local i main nudge
+    for i in "${!KA_R_UUID[@]}"; do
+        if [[ ${KA_R_STATUS[$i]} == ACTIVE || ${KA_R_STATUS[$i]} == PAUSED ]]; then
+            main=$(ka_format_duration "${KA_R_MAIN_REMAIN[$i]}")
+            [[ ${KA_R_SEC_ENABLED[$i]} == 1 ]] && nudge=$(ka_format_duration "${KA_R_SEC_REMAIN[$i]}") || nudge='—'
+        else main='—'; nudge='—'; fi
+        printf '%-3d %-16s %-24s %-13s %-10s %-10s\n' "$((i + 1))" "${KA_R_TYPE[$i]}" \
+            "$(ka_tui_truncate "${KA_R_NAME[$i]}" 24)" "${KA_R_STATUS[$i]}" "$main" "$nudge"
+    done
+}
+
+# Role: Run deterministic diagnostics for Bash, systemd-user, qdbus, Konsole, and notifications.
+ka_cli_doctor() {
+    local failures=0 services=0
+    printf 'Keep Alive doctor %s\n\n' "$KEEPALIVE_VERSION"
+    printf '%-30s %s\n' 'Bash >= 5' "$([[ ${BASH_VERSINFO[0]} -ge 5 ]] && printf OK || printf FAIL)"
+    [[ ${BASH_VERSINFO[0]} -ge 5 ]] || ((failures += 1))
+
+    if ka_qdbus_find; then printf '%-30s OK (%s)\n' 'qdbus' "$KA_QDBUS"; else printf '%-30s FAIL\n' 'qdbus'; ((failures += 1)); fi
+    if command -v flock >/dev/null 2>&1; then printf '%-30s OK\n' 'flock'; else printf '%-30s FAIL\n' 'flock'; ((failures += 1)); fi
+    if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
+        printf '%-30s OK\n' 'systemd --user'
+    else
+        printf '%-30s WARN (user manager unavailable)\n' 'systemd --user'
+    fi
+    printf '%-30s %s\n' 'XDG_RUNTIME_DIR' "${XDG_RUNTIME_DIR:-fallback: $KA_RUNTIME_BASE}"
+
+    if [[ -n ${KA_QDBUS:-} ]]; then services=$(ka_qdbus_konsole_services | grep -c . || true); fi
+    printf '%-30s %s\n' 'Konsole D-Bus services' "$services"
+    printf '%-30s %s\n' 'notify-send' "$([[ $(command -v notify-send 2>/dev/null || true) ]] && printf OK || printf 'optional/missing')"
+    printf '%-30s %s\n' 'control FIFO' "$([[ -p $KA_CONTROL_FIFO ]] && printf READY || printf 'not active yet')"
+    printf '\n'
+    if ((failures == 0)); then printf 'Critical checks passed.\n'; else printf '%d critical check(s) failed.\n' "$failures"; fi
+    return "$failures"
+}
+
+# Role: Print a small glyph sample so users can decide whether --no-icons is needed.
+ka_cli_icons_test() {
+    KA_ICONS_ENABLED=1
+    ka_icons_init
+    cat <<EOF2
+Keep Alive Nerd Font test
+
+$KA_I_AI AI        $KA_I_TIMER timer      $KA_I_MESSAGE message
+$KA_I_ENTER enter     $KA_I_NOTIFY notify     $KA_I_LOG history
+$KA_I_ACTIVE active    $KA_I_PAUSED paused     $KA_I_AVAILABLE available
+$KA_I_WARN warning   $KA_I_UNAVAILABLE lost       $KA_I_CONFIG config
+
+If these glyphs are missing or misaligned, launch: keepalive --no-icons
+EOF2
+}
+
+# Role: Parse public command-line options and dispatch to TUI/service/maintenance functions.
+ka_cli_main() {
+    if ((${BASH_VERSINFO[0]} < 5)); then
+        ka_error 'Bash 5 or newer is required'
+        return 1
+    fi
+
+    case ${1-} in
+        --service)
+            shift
+            (($# == 0)) || { ka_error '--service accepts no arguments'; return 2; }
+            ka_service_main
+            return
+            ;;
+        --version|-V)
+            printf 'keepalive %s\n' "$KEEPALIVE_VERSION"
+            return
+            ;;
+        --help|-h)
+            ka_cli_help
+            return
+            ;;
+        --icons-test)
+            ka_cli_icons_test
+            return
+            ;;
+    esac
+
+    KA_ICONS_ENABLED=1
+    KA_COLOR_ENABLED=1
+    KA_ASCII_MODE=0
+    [[ -n ${NO_COLOR:-} ]] && KA_COLOR_ENABLED=0
+    local -a args=()
+    while (($#)); do
+        case $1 in
+            --no-icons) KA_ICONS_ENABLED=0 ;;
+            --no-color) KA_COLOR_ENABLED=0 ;;
+            --ascii) KA_ASCII_MODE=1; KA_ICONS_ENABLED=0 ;;
+            *) args+=("$1") ;;
+        esac
+        shift
+    done
+    ka_cli_init_presentation
+    ka_ensure_runtime_dirs
+    ka_profile_init_defaults
+
+    case ${args[0]-} in
+        '') ka_tui_main ;;
+        list) ka_cli_list ;;
+        status) ka_cli_ensure_service && printf 'Keep Alive service: online\n' ;;
+        refresh) ka_cli_ensure_service && ka_ipc_call REFRESH '' ;;
+        profile) ka_profile_print ;;
+        logs)
+            [[ -n ${args[1]-} ]] || { ka_error 'usage: keepalive logs UUID'; return 2; }
+            ka_log_all "${args[1]}"
+            ;;
+        doctor) ka_cli_doctor ;;
+        help) ka_cli_help ;;
+        *) ka_error "unknown command: ${args[*]}"; ka_cli_help >&2; return 2 ;;
+    esac
+}
+
+ka_cli_main "$@"

@@ -1,0 +1,11 @@
+# Release artifacts
+*.zip
+*.sha256
+
+# Editor/OS noise
+*~
+*.swp
+.DS_Store
+
+# Local validation output
+*.log

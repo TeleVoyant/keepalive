@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+# Konsole D-Bus discovery, identity validation, and input delivery.
+
+# Role: List /Sessions/N object paths exported by one Konsole D-Bus service.
+ka_konsole_session_paths() {
+    local service=$1
+    ka_qdbus_call "$service" | grep -oE '/Sessions/[0-9]+$' || true
+}
+
+# Role: Fetch one scalar method from a Konsole session object.
+ka_konsole_get() {
+    local service=$1 path=$2 method=$3
+    ka_qdbus_call "$service" "$path" "org.kde.konsole.Session.$method"
+}
+
+# Role: Return a human-readable command string for one process.
+ka_konsole_process_label() {
+    local pid=$1 label
+    label=$(ka_proc_cmdline "$pid" 2>/dev/null || true)
+    [[ -n $label ]] || label=$(ka_proc_comm "$pid" 2>/dev/null || true)
+    [[ -n $label ]] || label='(unknown)'
+    ka_strip_controls "$label"
+}
+
+# Role: Resolve a project display name from the AI process working-directory basename.
+ka_konsole_session_name() {
+    local ai_pid=$1 fgpid=$2 cwd=''
+    if [[ $ai_pid =~ ^[0-9]+$ && -e /proc/$ai_pid/cwd ]]; then
+        cwd=$(readlink "/proc/$ai_pid/cwd" 2>/dev/null || true)
+    fi
+    if [[ -z $cwd && $fgpid =~ ^[0-9]+$ && -e /proc/$fgpid/cwd ]]; then
+        cwd=$(readlink "/proc/$fgpid/cwd" 2>/dev/null || true)
+    fi
+    [[ -n $cwd ]] || cwd='?'
+    local name=${cwd##*/}
+    [[ -n $name && $name != '?' ]] || name='unknown'
+    printf '%s\t%s\n' "$(ka_single_line "$name")" "$(ka_single_line "$cwd")"
+}
+
+# Role: Discover recognized AI CLI sessions across all live Konsole services.
+# Output columns: UUID, AI type, display name, cwd, service, path, terminal PID,
+# foreground PID, AI PID, AI PID starttime, foreground command.
+ka_konsole_discover() {
+    local service path uuid term_pid fgpid class ai_type ai_pid ai_start name_info name cwd cmd
+    while IFS= read -r service; do
+        [[ -n $service ]] || continue
+        while IFS= read -r path; do
+            [[ -n $path ]] || continue
+            uuid=$(ka_konsole_get "$service" "$path" shellSessionId 2>/dev/null || true)
+            term_pid=$(ka_konsole_get "$service" "$path" processId 2>/dev/null || true)
+            fgpid=$(ka_konsole_get "$service" "$path" foregroundProcessId 2>/dev/null || true)
+            [[ -n $uuid && $term_pid =~ ^[0-9]+$ && $fgpid =~ ^[0-9]+$ ]] || continue
+
+            class=$(ka_classifier_from_process_tree "$fgpid" 2>/dev/null || true)
+            [[ -n $class ]] || continue
+            IFS=$'\t' read -r ai_type ai_pid <<<"$class"
+            ai_start=$(ka_proc_starttime "$ai_pid" 2>/dev/null || true)
+            [[ -n $ai_start ]] || continue
+
+            name_info=$(ka_konsole_session_name "$ai_pid" "$fgpid")
+            IFS=$'\t' read -r name cwd <<<"$name_info"
+            cmd=$(ka_konsole_process_label "$fgpid")
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+                "$(ka_single_line "$uuid")" "$(ka_single_line "$ai_type")" \
+                "$name" "$cwd" "$(ka_single_line "$service")" "$(ka_single_line "$path")" \
+                "$term_pid" "$fgpid" "$ai_pid" "$ai_start" "$(ka_single_line "$cmd")"
+        done < <(ka_konsole_session_paths "$service")
+    done < <(ka_qdbus_konsole_services)
+}
+
+# Role: Verify that a target still refers to the exact original Konsole/AI process tree.
+ka_konsole_validate_target() {
+    local service=$1 path=$2 expected_uuid=$3 expected_term_pid=$4 expected_ai_pid=$5 expected_ai_start=$6
+    local uuid term_pid fgpid start
+
+    uuid=$(ka_konsole_get "$service" "$path" shellSessionId 2>/dev/null || true)
+    [[ $uuid == "$expected_uuid" ]] || return 10
+
+    term_pid=$(ka_konsole_get "$service" "$path" processId 2>/dev/null || true)
+    [[ $term_pid == "$expected_term_pid" ]] || return 11
+
+    [[ -d /proc/$expected_ai_pid ]] || return 12
+    start=$(ka_proc_starttime "$expected_ai_pid" 2>/dev/null || true)
+    [[ $start == "$expected_ai_start" ]] || return 13
+
+    fgpid=$(ka_konsole_get "$service" "$path" foregroundProcessId 2>/dev/null || true)
+    [[ $fgpid =~ ^[0-9]+$ ]] || return 14
+    ka_process_is_descendant_of "$fgpid" "$expected_ai_pid" || return 15
+    return 0
+}
+
+# Role: Translate target-validation return codes into operator-facing reason text.
+ka_konsole_validation_reason() {
+    case ${1:-1} in
+        10) printf 'Konsole session UUID no longer matches' ;;
+        11) printf 'Konsole terminal process changed' ;;
+        12) printf 'AI process exited' ;;
+        13) printf 'AI PID was reused by another process' ;;
+        14) printf 'Konsole foreground process is unavailable' ;;
+        15) printf 'AI process no longer owns the foreground process tree' ;;
+        *)  printf 'Target validation failed' ;;
+    esac
+}
+
+# Role: Send raw text to a specific Konsole session through its D-Bus sendText method.
+ka_konsole_send_raw() {
+    local service=$1 path=$2 text=$3
+    ka_qdbus_call "$service" "$path" org.kde.konsole.Session.sendText "$text" >/dev/null
+}
+
+# Role: Deliver one keep-alive event in MESSAGE+ENTER or ENTER_ONLY mode.
+ka_konsole_deliver() {
+    local service=$1 path=$2 mode=$3 message=${4-}
+    local submit_seq=${KEEPALIVE_SUBMIT_SEQ:-$'\r'}
+    local send_gap=${KEEPALIVE_SEND_GAP:-0.15}
+
+    case $mode in
+        ENTER_ONLY)
+            ka_konsole_send_raw "$service" "$path" "$submit_seq"
+            ;;
+        MESSAGE_ENTER)
+            ka_konsole_send_raw "$service" "$path" "$message" || return
+            sleep "$send_gap"
+            ka_konsole_send_raw "$service" "$path" "$submit_seq"
+            ;;
+        *)
+            ka_error "unknown delivery mode: $mode"
+            return 2
+            ;;
+    esac
+}

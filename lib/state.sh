@@ -1,0 +1,435 @@
+#!/usr/bin/env bash
+# Authoritative daemon state for monitored targets and current Konsole discovery.
+# Runtime state is data-only: no target/config file is ever sourced or eval'd.
+
+# Role: Initialize all in-memory target and discovery collections used by the daemon.
+ka_state_init_arrays() {
+    declare -ga KA_T_UUIDS=()
+    declare -gA KA_T_TYPE=() KA_T_NAME=() KA_T_DIR=() KA_T_SERVICE=() KA_T_PATH=()
+    declare -gA KA_T_TERM_PID=() KA_T_AI_PID=() KA_T_AI_START=() KA_T_STATUS=()
+    declare -gA KA_T_MODE=() KA_T_NOTIFY=() KA_T_MAIN_INTERVAL=() KA_T_MAIN_REMAIN=()
+    declare -gA KA_T_MAIN_INDEX=() KA_T_SECONDARY_ENABLED=() KA_T_SECONDARY_INTERVAL=()
+    declare -gA KA_T_SECONDARY_REMAIN=() KA_T_SECONDARY_MESSAGE=() KA_T_LAST_SEEN=()
+    declare -gA KA_T_REASON=()
+
+    declare -ga KA_D_UUIDS=()
+    declare -gA KA_D_TYPE=() KA_D_NAME=() KA_D_DIR=() KA_D_SERVICE=() KA_D_PATH=()
+    declare -gA KA_D_TERM_PID=() KA_D_FG_PID=() KA_D_AI_PID=() KA_D_AI_START=() KA_D_CMD=()
+}
+
+# Role: Return the private runtime directory used to persist one monitored target.
+ka_state_target_dir() {
+    local uuid=$1
+    printf '%s/%s' "$KA_TARGETS_DIR" "$(ka_safe_id "$uuid")"
+}
+
+# Role: Return true when the daemon currently has a monitored record for a UUID.
+ka_state_has_target() {
+    local uuid=$1
+    [[ -n ${KA_T_STATUS[$uuid]+x} ]]
+}
+
+# Role: Add one UUID to the target-order array when it is not already present.
+ka_state_register_uuid() {
+    local uuid=$1 existing
+    for existing in "${KA_T_UUIDS[@]}"; do
+        [[ $existing == "$uuid" ]] && return 0
+    done
+    KA_T_UUIDS+=("$uuid")
+}
+
+# Role: Remove one UUID from the target-order array without disturbing other targets.
+ka_state_unregister_uuid() {
+    local uuid=$1 item
+    local -a next=()
+    for item in "${KA_T_UUIDS[@]}"; do
+        [[ $item == "$uuid" ]] || next+=("$item")
+    done
+    KA_T_UUIDS=("${next[@]}")
+}
+
+# Role: Save one monitored target's mutable scalar state using atomic file replacement.
+ka_state_save_target() {
+    local uuid=$1 dir file
+    dir=$(ka_state_target_dir "$uuid")
+    mkdir -p "$dir/messages"
+    chmod 700 "$dir" "$dir/messages" 2>/dev/null || true
+    file="$dir/state.tsv"
+    {
+        printf 'uuid\t%s\n' "$(ka_single_line "$uuid")"
+        printf 'type\t%s\n' "$(ka_single_line "${KA_T_TYPE[$uuid]}")"
+        printf 'name\t%s\n' "$(ka_single_line "${KA_T_NAME[$uuid]}")"
+        printf 'directory\t%s\n' "$(ka_single_line "${KA_T_DIR[$uuid]}")"
+        printf 'service\t%s\n' "$(ka_single_line "${KA_T_SERVICE[$uuid]}")"
+        printf 'path\t%s\n' "$(ka_single_line "${KA_T_PATH[$uuid]}")"
+        printf 'term_pid\t%s\n' "${KA_T_TERM_PID[$uuid]}"
+        printf 'ai_pid\t%s\n' "${KA_T_AI_PID[$uuid]}"
+        printf 'ai_start\t%s\n' "${KA_T_AI_START[$uuid]}"
+        printf 'status\t%s\n' "${KA_T_STATUS[$uuid]}"
+        printf 'mode\t%s\n' "${KA_T_MODE[$uuid]}"
+        printf 'notifications\t%s\n' "${KA_T_NOTIFY[$uuid]}"
+        printf 'main_interval\t%s\n' "${KA_T_MAIN_INTERVAL[$uuid]}"
+        printf 'main_remaining\t%s\n' "${KA_T_MAIN_REMAIN[$uuid]}"
+        printf 'main_index\t%s\n' "${KA_T_MAIN_INDEX[$uuid]}"
+        printf 'secondary_enabled\t%s\n' "${KA_T_SECONDARY_ENABLED[$uuid]}"
+        printf 'secondary_interval\t%s\n' "${KA_T_SECONDARY_INTERVAL[$uuid]}"
+        printf 'secondary_remaining\t%s\n' "${KA_T_SECONDARY_REMAIN[$uuid]}"
+        printf 'last_seen\t%s\n' "$(ka_single_line "${KA_T_LAST_SEEN[$uuid]-}")"
+        printf 'reason\t%s\n' "$(ka_single_line "${KA_T_REASON[$uuid]-}")"
+    } | ka_atomic_write "$file"
+    printf '%s' "${KA_T_SECONDARY_MESSAGE[$uuid]-}" | ka_atomic_write "$dir/secondary_message"
+}
+
+# Role: Load one persisted runtime target record without executing any stored content.
+ka_state_load_target_dir() {
+    local dir=$1 file="$dir/state.tsv"
+    [[ -r $file ]] || return 1
+    local key value uuid=''
+    local type='' name='' directory='' service='' path='' term_pid='' ai_pid='' ai_start=''
+    local status='' mode='' notifications='' main_interval='' main_remaining='' main_index=''
+    local secondary_enabled='' secondary_interval='' secondary_remaining='' last_seen='' reason=''
+
+    while IFS=$'\t' read -r key value _; do
+        case $key in
+            uuid) uuid=$value ;;
+            type) type=$value ;;
+            name) name=$value ;;
+            directory) directory=$value ;;
+            service) service=$value ;;
+            path) path=$value ;;
+            term_pid) term_pid=$value ;;
+            ai_pid) ai_pid=$value ;;
+            ai_start) ai_start=$value ;;
+            status) status=$value ;;
+            mode) mode=$value ;;
+            notifications) notifications=$value ;;
+            main_interval) main_interval=$value ;;
+            main_remaining) main_remaining=$value ;;
+            main_index) main_index=$value ;;
+            secondary_enabled) secondary_enabled=$value ;;
+            secondary_interval) secondary_interval=$value ;;
+            secondary_remaining) secondary_remaining=$value ;;
+            last_seen) last_seen=$value ;;
+            reason) reason=$value ;;
+        esac
+    done <"$file"
+
+    [[ -n $uuid && -n $service && -n $path && $term_pid =~ ^[0-9]+$ && $ai_pid =~ ^[0-9]+$ ]] || return 1
+    ka_is_positive_int "$main_interval" || return 1
+    ka_is_uint "$main_remaining" || return 1
+    ka_is_uint "$main_index" || return 1
+    ka_is_positive_int "$secondary_interval" || return 1
+    ka_is_uint "$secondary_remaining" || return 1
+    [[ $status == ACTIVE || $status == PAUSED || $status == UNAVAILABLE ]] || status=UNAVAILABLE
+    [[ $mode == MESSAGE_ENTER || $mode == ENTER_ONLY ]] || mode=MESSAGE_ENTER
+    [[ $notifications == 0 || $notifications == 1 ]] || notifications=0
+    [[ $secondary_enabled == 0 || $secondary_enabled == 1 ]] || secondary_enabled=0
+
+    ka_state_register_uuid "$uuid"
+    KA_T_TYPE[$uuid]=$type
+    KA_T_NAME[$uuid]=$name
+    KA_T_DIR[$uuid]=$directory
+    KA_T_SERVICE[$uuid]=$service
+    KA_T_PATH[$uuid]=$path
+    KA_T_TERM_PID[$uuid]=$term_pid
+    KA_T_AI_PID[$uuid]=$ai_pid
+    KA_T_AI_START[$uuid]=$ai_start
+    KA_T_STATUS[$uuid]=$status
+    KA_T_MODE[$uuid]=$mode
+    KA_T_NOTIFY[$uuid]=$notifications
+    KA_T_MAIN_INTERVAL[$uuid]=$main_interval
+    KA_T_MAIN_REMAIN[$uuid]=$main_remaining
+    KA_T_MAIN_INDEX[$uuid]=$main_index
+    KA_T_SECONDARY_ENABLED[$uuid]=$secondary_enabled
+    KA_T_SECONDARY_INTERVAL[$uuid]=$secondary_interval
+    KA_T_SECONDARY_REMAIN[$uuid]=$secondary_remaining
+    KA_T_SECONDARY_MESSAGE[$uuid]=$(cat "$dir/secondary_message" 2>/dev/null || true)
+    KA_T_LAST_SEEN[$uuid]=$last_seen
+    KA_T_REASON[$uuid]=$reason
+}
+
+# Role: Restore all runtime target records after daemon restart within the same login.
+ka_state_load_all_targets() {
+    local dir
+    shopt -s nullglob
+    for dir in "$KA_TARGETS_DIR"/*; do
+        [[ -d $dir ]] || continue
+        ka_state_load_target_dir "$dir" || ka_warn "ignoring invalid runtime target record: $dir"
+    done
+    shopt -u nullglob
+}
+
+# Role: Clear and rebuild the current recognized Konsole AI-session discovery cache.
+ka_state_refresh_discovery() {
+    KA_D_UUIDS=()
+    KA_D_TYPE=() KA_D_NAME=() KA_D_DIR=() KA_D_SERVICE=() KA_D_PATH=()
+    KA_D_TERM_PID=() KA_D_FG_PID=() KA_D_AI_PID=() KA_D_AI_START=() KA_D_CMD=()
+
+    local uuid type name directory service path term_pid fgpid ai_pid ai_start cmd
+    while IFS=$'\t' read -r uuid type name directory service path term_pid fgpid ai_pid ai_start cmd; do
+        [[ -n $uuid ]] || continue
+        KA_D_UUIDS+=("$uuid")
+        KA_D_TYPE[$uuid]=$type
+        KA_D_NAME[$uuid]=$name
+        KA_D_DIR[$uuid]=$directory
+        KA_D_SERVICE[$uuid]=$service
+        KA_D_PATH[$uuid]=$path
+        KA_D_TERM_PID[$uuid]=$term_pid
+        KA_D_FG_PID[$uuid]=$fgpid
+        KA_D_AI_PID[$uuid]=$ai_pid
+        KA_D_AI_START[$uuid]=$ai_start
+        KA_D_CMD[$uuid]=$cmd
+    done < <(ka_konsole_discover)
+}
+
+# Role: Copy a validated wizard request's message rotation into a target runtime directory.
+ka_state_copy_request_messages() {
+    local request_dir=$1 target_dir=$2
+    rm -rf -- "$target_dir/messages"
+    mkdir -p "$target_dir/messages"
+    chmod 700 "$target_dir/messages" 2>/dev/null || true
+    cp -f -- "$request_dir/messages"/* "$target_dir/messages/"
+    chmod 600 "$target_dir/messages"/* 2>/dev/null || true
+}
+
+# Role: Count non-empty stored main messages for one monitored target.
+ka_state_message_count() {
+    local uuid=$1 dir file count=0
+    dir=$(ka_state_target_dir "$uuid")
+    shopt -s nullglob
+    for file in "$dir/messages"/[0-9][0-9][0-9]; do
+        [[ -s $file ]] && ((count += 1))
+    done
+    shopt -u nullglob
+    printf '%d' "$count"
+}
+
+# Role: Return one zero-based message by rotation index for a monitored target.
+ka_state_message_at() {
+    local uuid=$1 index=$2 dir file number
+    dir=$(ka_state_target_dir "$uuid")
+    number=$((index + 1))
+    printf -v file '%s/messages/%03d' "$dir" "$number"
+    [[ -r $file ]] || return 1
+    cat -- "$file"
+}
+
+# Role: Create a new ACTIVE keep-alive from a currently AVAILABLE discovered session.
+ka_state_create_target() {
+    local uuid=$1 request_dir=$2
+    ka_state_has_target "$uuid" && { ka_error 'target already has a keep-alive'; return 1; }
+    [[ -n ${KA_D_TYPE[$uuid]+x} ]] || { ka_error 'selected Konsole session is no longer available'; return 1; }
+    ka_profile_validate_request "$request_dir" || return 1
+
+    local target_dir main_interval secondary_interval
+    target_dir=$(ka_state_target_dir "$uuid")
+    mkdir -p "$target_dir"
+    main_interval=$(ka_read_first_line "$request_dir/main_interval")
+    secondary_interval=$(ka_read_first_line "$request_dir/secondary_interval")
+
+    ka_state_register_uuid "$uuid"
+    KA_T_TYPE[$uuid]=${KA_D_TYPE[$uuid]}
+    KA_T_NAME[$uuid]=${KA_D_NAME[$uuid]}
+    KA_T_DIR[$uuid]=${KA_D_DIR[$uuid]}
+    KA_T_SERVICE[$uuid]=${KA_D_SERVICE[$uuid]}
+    KA_T_PATH[$uuid]=${KA_D_PATH[$uuid]}
+    KA_T_TERM_PID[$uuid]=${KA_D_TERM_PID[$uuid]}
+    KA_T_AI_PID[$uuid]=${KA_D_AI_PID[$uuid]}
+    KA_T_AI_START[$uuid]=${KA_D_AI_START[$uuid]}
+    KA_T_STATUS[$uuid]=ACTIVE
+    KA_T_MODE[$uuid]=$(ka_read_first_line "$request_dir/delivery_mode")
+    KA_T_NOTIFY[$uuid]=$(ka_read_first_line "$request_dir/notifications")
+    KA_T_MAIN_INTERVAL[$uuid]=$main_interval
+    KA_T_MAIN_REMAIN[$uuid]=$main_interval
+    KA_T_MAIN_INDEX[$uuid]=0
+    KA_T_SECONDARY_ENABLED[$uuid]=$(ka_read_first_line "$request_dir/secondary_enabled")
+    KA_T_SECONDARY_INTERVAL[$uuid]=$secondary_interval
+    KA_T_SECONDARY_REMAIN[$uuid]=$secondary_interval
+    KA_T_SECONDARY_MESSAGE[$uuid]=$(cat "$request_dir/secondary_message")
+    KA_T_LAST_SEEN[$uuid]=$(ka_now_full)
+    KA_T_REASON[$uuid]=''
+
+    ka_state_copy_request_messages "$request_dir" "$target_dir"
+    ka_state_save_target "$uuid"
+    ka_profile_update_from_request "$request_dir"
+    ka_log_event "$uuid" CREATED "${KA_T_TYPE[$uuid]} / ${KA_T_NAME[$uuid]}" ACTIVE
+}
+
+# Role: Reconfigure one existing available target and update the single global profile.
+# Applying configuration deliberately resets that target's main/secondary countdowns.
+ka_state_configure_target() {
+    local uuid=$1 request_dir=$2
+    ka_state_has_target "$uuid" || { ka_error 'unknown keep-alive target'; return 1; }
+    [[ ${KA_T_STATUS[$uuid]} != UNAVAILABLE ]] || { ka_error 'unavailable targets cannot be reconfigured'; return 1; }
+    ka_profile_validate_request "$request_dir" || return 1
+
+    local target_dir
+    target_dir=$(ka_state_target_dir "$uuid")
+    KA_T_MODE[$uuid]=$(ka_read_first_line "$request_dir/delivery_mode")
+    KA_T_NOTIFY[$uuid]=$(ka_read_first_line "$request_dir/notifications")
+    KA_T_MAIN_INTERVAL[$uuid]=$(ka_read_first_line "$request_dir/main_interval")
+    KA_T_MAIN_REMAIN[$uuid]=${KA_T_MAIN_INTERVAL[$uuid]}
+    KA_T_MAIN_INDEX[$uuid]=0
+    KA_T_SECONDARY_ENABLED[$uuid]=$(ka_read_first_line "$request_dir/secondary_enabled")
+    KA_T_SECONDARY_INTERVAL[$uuid]=$(ka_read_first_line "$request_dir/secondary_interval")
+    KA_T_SECONDARY_REMAIN[$uuid]=${KA_T_SECONDARY_INTERVAL[$uuid]}
+    KA_T_SECONDARY_MESSAGE[$uuid]=$(cat "$request_dir/secondary_message")
+    ka_state_copy_request_messages "$request_dir" "$target_dir"
+    ka_state_save_target "$uuid"
+    ka_profile_update_from_request "$request_dir"
+    ka_log_event "$uuid" CONFIG 'configuration updated; countdowns reset' OK
+}
+
+# Role: Permanently remove one keep-alive runtime record and its independent event history.
+ka_state_delete_target() {
+    local uuid=$1 dir
+    ka_state_has_target "$uuid" || return 1
+    dir=$(ka_state_target_dir "$uuid")
+    rm -rf -- "$dir"
+    ka_log_delete "$uuid"
+    ka_state_unregister_uuid "$uuid"
+    unset 'KA_T_TYPE[$uuid]' 'KA_T_NAME[$uuid]' 'KA_T_DIR[$uuid]' 'KA_T_SERVICE[$uuid]'
+    unset 'KA_T_PATH[$uuid]' 'KA_T_TERM_PID[$uuid]' 'KA_T_AI_PID[$uuid]' 'KA_T_AI_START[$uuid]'
+    unset 'KA_T_STATUS[$uuid]' 'KA_T_MODE[$uuid]' 'KA_T_NOTIFY[$uuid]' 'KA_T_MAIN_INTERVAL[$uuid]'
+    unset 'KA_T_MAIN_REMAIN[$uuid]' 'KA_T_MAIN_INDEX[$uuid]' 'KA_T_SECONDARY_ENABLED[$uuid]'
+    unset 'KA_T_SECONDARY_INTERVAL[$uuid]' 'KA_T_SECONDARY_REMAIN[$uuid]' 'KA_T_SECONDARY_MESSAGE[$uuid]'
+    unset 'KA_T_LAST_SEEN[$uuid]' 'KA_T_REASON[$uuid]'
+}
+
+# Role: Toggle ACTIVE/PAUSED while preserving each countdown exactly.
+ka_state_toggle_pause() {
+    local uuid=$1
+    ka_state_has_target "$uuid" || return 1
+    case ${KA_T_STATUS[$uuid]} in
+        ACTIVE)
+            KA_T_STATUS[$uuid]=PAUSED
+            ka_log_event "$uuid" STATE paused PAUSED
+            ;;
+        PAUSED)
+            KA_T_STATUS[$uuid]=ACTIVE
+            ka_log_event "$uuid" STATE resumed ACTIVE
+            ;;
+        *)
+            return 2
+            ;;
+    esac
+    ka_state_save_target "$uuid"
+}
+
+# Role: Toggle the whole target between MESSAGE+ENTER and ENTER_ONLY delivery.
+ka_state_toggle_mode() {
+    local uuid=$1 old new
+    ka_state_has_target "$uuid" || return 1
+    [[ ${KA_T_STATUS[$uuid]} != UNAVAILABLE ]] || return 2
+    old=${KA_T_MODE[$uuid]}
+    if [[ $old == MESSAGE_ENTER ]]; then new=ENTER_ONLY; else new=MESSAGE_ENTER; fi
+    KA_T_MODE[$uuid]=$new
+    ka_state_save_target "$uuid"
+    ka_log_event "$uuid" MODE "$old -> $new" OK
+}
+
+# Role: Reset only the selected target's main countdown to its configured interval.
+ka_state_reset_main() {
+    local uuid=$1
+    ka_state_has_target "$uuid" || return 1
+    [[ ${KA_T_STATUS[$uuid]} != UNAVAILABLE ]] || return 2
+    KA_T_MAIN_REMAIN[$uuid]=${KA_T_MAIN_INTERVAL[$uuid]}
+    ka_state_save_target "$uuid"
+    ka_log_event "$uuid" TIMER 'main timer reset' OK
+}
+
+# Role: Transition a target to sticky UNAVAILABLE state while retaining all state/logs.
+ka_state_mark_unavailable() {
+    local uuid=$1 reason=$2 previous
+    ka_state_has_target "$uuid" || return 1
+    previous=${KA_T_STATUS[$uuid]}
+    [[ $previous == UNAVAILABLE ]] && return 0
+    KA_T_STATUS[$uuid]=UNAVAILABLE
+    KA_T_REASON[$uuid]=$reason
+    KA_T_LAST_SEEN[$uuid]=$(ka_now_full)
+    ka_state_save_target "$uuid"
+    ka_log_event "$uuid" TARGET "$reason" UNAVAILABLE
+    ka_notify_target_lost "${KA_T_NOTIFY[$uuid]}" "${KA_T_NAME[$uuid]}" "$reason"
+}
+
+# Role: Validate every non-unavailable monitored target and update last-seen metadata.
+ka_state_validate_targets() {
+    local uuid rc reason
+    for uuid in "${KA_T_UUIDS[@]}"; do
+        [[ ${KA_T_STATUS[$uuid]} != UNAVAILABLE ]] || continue
+        if ka_konsole_validate_target "${KA_T_SERVICE[$uuid]}" "${KA_T_PATH[$uuid]}" "$uuid" \
+            "${KA_T_TERM_PID[$uuid]}" "${KA_T_AI_PID[$uuid]}" "${KA_T_AI_START[$uuid]}"; then
+            KA_T_LAST_SEEN[$uuid]=$(ka_now_full)
+        else
+            rc=$?
+            reason=$(ka_konsole_validation_reason "$rc")
+            ka_state_mark_unavailable "$uuid" "$reason"
+        fi
+    done
+}
+
+# Role: Publish one atomic merged index containing monitored and currently AVAILABLE sessions.
+ka_state_publish_index() {
+    local tmp uuid status
+    tmp="$KA_RUNTIME_DIR/.index.tmp.$$.$RANDOM"
+    : >"$tmp"
+    chmod 600 "$tmp" 2>/dev/null || true
+
+    for uuid in "${KA_T_UUIDS[@]}"; do
+        status=${KA_T_STATUS[$uuid]}
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$uuid" "$(ka_single_line "${KA_T_TYPE[$uuid]}")" "$(ka_single_line "${KA_T_NAME[$uuid]}")" \
+            "$(ka_single_line "${KA_T_DIR[$uuid]}")" "$status" "${KA_T_MAIN_REMAIN[$uuid]}" \
+            "${KA_T_MAIN_INTERVAL[$uuid]}" "${KA_T_SECONDARY_ENABLED[$uuid]}" \
+            "${KA_T_SECONDARY_REMAIN[$uuid]}" "${KA_T_SECONDARY_INTERVAL[$uuid]}" \
+            "${KA_T_MODE[$uuid]}" "${KA_T_NOTIFY[$uuid]}" "$(ka_single_line "${KA_T_LAST_SEEN[$uuid]-}")" \
+            "$(ka_single_line "${KA_T_REASON[$uuid]-}")" >>"$tmp"
+    done
+
+    for uuid in "${KA_D_UUIDS[@]}"; do
+        ka_state_has_target "$uuid" && continue
+        printf '%s\t%s\t%s\t%s\tAVAILABLE\t0\t0\t0\t0\t0\t\t0\t\t\n' \
+            "$uuid" "$(ka_single_line "${KA_D_TYPE[$uuid]}")" "$(ka_single_line "${KA_D_NAME[$uuid]}")" \
+            "$(ka_single_line "${KA_D_DIR[$uuid]}")" >>"$tmp"
+    done
+    mv -f -- "$tmp" "$KA_INDEX_FILE"
+}
+
+# Role: Find one indexed target/available row by UUID for TUI and CLI readers.
+ka_state_index_row() {
+    local uuid=$1
+    [[ -r $KA_INDEX_FILE ]] || return 1
+    awk -F '\t' -v id="$uuid" '$1 == id { print; exit }' "$KA_INDEX_FILE"
+}
+
+# Role: Read one scalar field from a persisted target state file for client-side rendering.
+ka_state_read_field() {
+    local uuid=$1 wanted=$2 dir file key value
+    dir=$(ka_state_target_dir "$uuid")
+    file="$dir/state.tsv"
+    [[ -r $file ]] || return 1
+    while IFS=$'\t' read -r key value _; do
+        if [[ $key == "$wanted" ]]; then
+            printf '%s' "$value"
+            return 0
+        fi
+    done <"$file"
+    return 1
+}
+
+# Role: Seed a configuration request directory from one existing monitored target.
+ka_state_copy_target_to_request() {
+    local uuid=$1 request_dir=$2 dir
+    dir=$(ka_state_target_dir "$uuid")
+    [[ -r $dir/state.tsv ]] || return 1
+    mkdir -p "$request_dir/messages"
+    ka_write_scalar "$request_dir/main_interval" "$(ka_state_read_field "$uuid" main_interval)"
+    ka_write_scalar "$request_dir/secondary_enabled" "$(ka_state_read_field "$uuid" secondary_enabled)"
+    ka_write_scalar "$request_dir/secondary_interval" "$(ka_state_read_field "$uuid" secondary_interval)"
+    cp -f -- "$dir/secondary_message" "$request_dir/secondary_message"
+    ka_write_scalar "$request_dir/notifications" "$(ka_state_read_field "$uuid" notifications)"
+    ka_write_scalar "$request_dir/delivery_mode" "$(ka_state_read_field "$uuid" mode)"
+    rm -rf -- "$request_dir/messages"
+    mkdir -p "$request_dir/messages"
+    cp -f -- "$dir/messages"/* "$request_dir/messages/" 2>/dev/null || true
+}

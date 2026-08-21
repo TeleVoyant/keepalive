@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Resolve dynamic test identity from files when integration tests need to change it
+# while a daemon is already running; unit tests can keep using simple environment values.
+pid=${FAKE_PID:-}
+uuid=${FAKE_UUID:-12345678-1234-4123-8123-123456789abc}
+if [[ -n ${FAKE_PID_FILE:-} && -r ${FAKE_PID_FILE:-} ]]; then IFS= read -r pid <"$FAKE_PID_FILE"; fi
+if [[ -n ${FAKE_UUID_FILE:-} && -r ${FAKE_UUID_FILE:-} ]]; then IFS= read -r uuid <"$FAKE_UUID_FILE"; fi
+: "${pid:?FAKE_PID or FAKE_PID_FILE must provide a process ID}"
+
+if (($# == 0)); then
+    printf 'org.kde.konsole-100\norg.example.unrelated\n'
+    exit 0
+fi
+if [[ $1 == org.kde.konsole-100 && $# == 1 ]]; then
+    printf '/Sessions/1\n/MainWindow_1\n'
+    exit 0
+fi
+service=$1 path=$2 method=${3-}
+case $method in
+    org.kde.konsole.Session.shellSessionId) printf '%s\n' "$uuid" ;;
+    org.kde.konsole.Session.processId) printf '%s\n' "$pid" ;;
+    org.kde.konsole.Session.foregroundProcessId) printf '%s\n' "$pid" ;;
+    org.kde.konsole.Session.sendText)
+        if [[ -n ${FAKE_SEND_LOG:-} ]]; then printf '%s\n' "${4-}" >>"$FAKE_SEND_LOG"; fi
+        exit 0
+        ;;
+    *) exit 1 ;;
+esac

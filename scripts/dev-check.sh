@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# Run maintainability, syntax, unit/mock-integration, and systemd unit checks.
+set -Eeuo pipefail
+ROOT=$(cd "${BASH_SOURCE[0]%/*}/.." && pwd)
+
+# Role: Print a consistent validation section heading.
+section() { printf '\n==> %s\n' "$*"; }
+
+# Role: Validate Bash syntax for every executable/source/test script in the project.
+check_syntax() {
+    section 'Bash syntax'
+    local file
+    while IFS= read -r -d '' file; do
+        bash -n "$file"
+        printf 'ok  %s\n' "${file#$ROOT/}"
+    done < <(find "$ROOT" -type f \( -name '*.sh' -o -name keepalive \) -print0 | sort -z)
+}
+
+# Role: Run ShellCheck when installed while remaining usable on dependency-minimal hosts.
+check_shellcheck() {
+    section 'ShellCheck (optional)'
+    if ! command -v shellcheck >/dev/null 2>&1; then
+        printf 'skip: shellcheck is not installed\n'
+        return 0
+    fi
+    local -a files=()
+    mapfile -d '' -t files < <(find "$ROOT" -type f \( -name '*.sh' -o -name keepalive \) -print0)
+    shellcheck -x "${files[@]}"
+}
+
+# Role: Run the complete dependency-free project test suite.
+check_tests() {
+    section 'Tests'
+    "$ROOT/tests/run.sh"
+}
+
+# Role: Statically verify systemd units, creating only a temporary expected ExecStart symlink if needed.
+check_systemd_units() {
+    section 'systemd units'
+    if ! command -v systemd-analyze >/dev/null 2>&1; then
+        printf 'skip: systemd-analyze is not installed\n'
+        return 0
+    fi
+    local expected="$HOME/.local/bin/keepalive" created=0
+    mkdir -p "$HOME/.local/bin"
+    if [[ ! -e $expected && ! -L $expected ]]; then
+        ln -s "$ROOT/keepalive" "$expected"
+        created=1
+    fi
+    # Ensure the temporary verification symlink is removed even if verification fails.
+    if ! SYSTEMD_COLORS=0 TERM=dumb systemd-analyze verify "$ROOT/systemd/keepalive.socket" "$ROOT/systemd/keepalive.service"; then
+        ((created == 0)) || rm -f -- "$expected"
+        return 1
+    fi
+    ((created == 0)) || rm -f -- "$expected"
+    printf 'ok  keepalive.socket / keepalive.service\n'
+}
+
+# Role: Execute all validation stages and report an explicit final success marker.
+main() {
+    check_syntax
+    check_shellcheck
+    check_tests
+    check_systemd_units
+    section 'Result'
+    printf 'ALL VALIDATION CHECKS PASSED\n'
+}
+
+main "$@"

@@ -1,0 +1,19 @@
+[Unit]
+Description=Keep Alive Manager per-user daemon
+Documentation=file:%h/.local/share/keepalive-manager/README.md
+PartOf=graphical-session.target
+After=graphical-session.target keepalive.socket
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/keepalive --service
+Restart=on-failure
+RestartSec=2s
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+# This service is intentionally user-scoped. Do not install it in /etc/systemd/system.
+
+[Install]
+WantedBy=graphical-session.target
