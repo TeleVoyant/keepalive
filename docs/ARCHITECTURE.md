@@ -10,6 +10,34 @@ Keep Alive uses one per-user daemon and any number of disposable clients.
 
 Only the daemon writes authoritative target state. This is the central concurrency rule.
 
+## Terminal rendering
+
+The client enters the terminal's alternate screen and tracks the active renderer
+as a view identity. The first frame, a change between manager/detail/wizard/log
+renderers, or a `WINCH` resize emits a home plus full visible-screen erase before
+drawing. Repeated frames from the same renderer only return home, and the frame
+footer erases unused cells below the new content. This removes differently shaped
+previous views without introducing a full-screen flash on every manager refresh.
+
+Terminal dimensions are cached and refreshed only on those same transitions, and
+every frame derives its rules, columns, and truncation budgets from that cached
+width. There are no fixed-width frame literals.
+
+The manager repaints only when the published index content, the selection, the
+toast, the resize flag, or the displayed clock second changes. Key polling stays
+at 0.25 s for responsiveness while an idle client performs no rendering work.
+
+Presentation degrades in defined steps rather than breaking: a colored segment
+bar with powerline glyphs when icons and color are available, colored segments
+without wedges under `--no-icons` or `--ascii`, and a plain boxed header when
+color is unavailable. `--ascii` selects a 7-bit glyph set for the entire frame.
+
+Key decoding distinguishes a bare `Esc` from a control sequence. Unrecognized
+sequences are consumed through their terminating byte and reported as `UNKNOWN`,
+which no view acts on, so function and keypad keys cannot exit a screen. A
+non-sequence byte read past an `Esc` is queued for the next read rather than
+discarded.
+
 ## Why a user service
 
 Konsole targets live on the user's session D-Bus. A root service would create unnecessary identity/session/privilege problems. The units are intentionally installed under `~/.config/systemd/user` and associated with `graphical-session.target`.

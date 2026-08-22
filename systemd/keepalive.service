@@ -10,8 +10,28 @@ ExecStart=%h/.local/bin/keepalive --service
 Restart=on-failure
 RestartSec=2s
 UMask=0077
+
+# Hardening here is deliberately limited to directives that do NOT place the
+# daemon in a private mount namespace.
+#
+# Discovery resolves /proc/PID/cwd (session display name/directory) and
+# /proc/PID/exe (classifier signature) for AI processes the daemon does not own.
+# Those are magic symlinks: the kernel resolves them against the *reader's* mount
+# namespace, so any namespace-creating option makes them fail with ENOENT while
+# comm/cmdline/stat keep working. The visible result is every session rendering
+# as name "unknown" / directory "?" with the exe component silently dropped from
+# classification.
+#
+# Do not add PrivateTmp, PrivateDevices, ProtectSystem, ProtectHome, ProtectProc,
+# ProtectKernelTunables, ProtectKernelModules, or ProtectKernelLogs here. Each one
+# reintroduces that bug. The options below are seccomp/prctl based and safe.
 NoNewPrivileges=yes
-PrivateTmp=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX
 
 # This service is intentionally user-scoped. Do not install it in /etc/systemd/system.
 

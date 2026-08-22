@@ -29,7 +29,7 @@ Each `test_*.sh` receives an isolated temporary `HOME`, `XDG_CONFIG_HOME`, and `
 - `test_install_layout.sh`: non-root install/uninstall layout with mocked systemctl.
 - `test_ipc.sh`: multiple request IDs through one FIFO and responses.
 - `test_konsole_mock.sh`: mocked Konsole service/path/UUID/PID discovery, strict validation, qdbus timeout classification, and notification deadline.
-- `test_tui_primitives.sh`: ASCII/no-icon progress/status output.
+- `test_tui_primitives.sh`: ASCII/no-icon progress and status output; first-frame, view-transition, same-view, and resize clearing; width-exact frame rules and safe truncation; control-byte stripping; non-collapsing TSV column splitting; 7-bit glyph selection; segment-bar width accounting and fallback; and terminal key decoding including unrecognized escape sequences and Escape pushback.
 - `test_function_comments.sh`: every function has a `# Role:` maintenance comment.
 
 ## What automated tests cannot prove here

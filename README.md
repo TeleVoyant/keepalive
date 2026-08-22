@@ -151,15 +151,47 @@ Timer bars are depletion gauges: more bar means more time remains. Urgency progr
 Manager:
 
 ```text
-↑ / ↓      move selection
-j / k      move selection
-1–9        directly open that dynamically numbered row
-Enter      open selected target / configure AVAILABLE target
-r          force discovery refresh
-q / Esc    close only this TUI client
+↑ / ↓          move selection
+j / k          move selection
+PgUp / PgDn    move a page
+Home / End     jump to first/last row
+1–9            directly open that dynamically numbered row
+Enter          open selected target / configure AVAILABLE target
+r              force discovery refresh
+q / Esc        close only this TUI client
 ```
 
 Closing the UI never stops the service or timers.
+
+Only a bare `Esc` means back/cancel. Arrow, function, keypad, and other escape
+sequences the client does not recognize are ignored rather than being treated as
+`Esc`, and a key typed immediately after `Esc` is preserved instead of being
+swallowed.
+
+### Rendering
+
+The alternate-screen renderer fully clears the visible terminal on first draw,
+between manager/detail/wizard/log views, and after resize. Steady redraws within
+one view reuse the screen to avoid visible flashing, and a frame is only redrawn
+when the published index, the selection, or the clock actually changes — an idle
+manager does not repaint continuously.
+
+Every frame is sized from the live terminal, so headers, section rules, columns,
+and truncation adapt from the 52-column minimum upward with no wrapped borders.
+
+Where the terminal supports color, the manager and target detail draw their
+header as a colored segment bar; with a Nerd Font it uses powerline caps and
+wedges. Legacy presentation modes are complete, not degraded stubs:
+
+| Mode | Header | Frame glyphs |
+|---|---|---|
+| default | powerline segment bar | Unicode box drawing |
+| `--no-icons` | colored segments, no wedges | Unicode box drawing |
+| `--no-color` / `NO_COLOR=1` | plain boxed header | Unicode box drawing |
+| `--ascii` | colored segments, no wedges | 7-bit `+ - \|` frame |
+
+`--ascii` now covers the whole interface — frame, selection markers, ellipsis and
+progress bars — not only the progress bars.
 
 Target detail:
 
@@ -582,7 +614,10 @@ The suite currently covers:
 - real daemon/client process boundary with mocked qdbus, including create/send/send-failure/timeout/loss/new-UUID behavior;
 - mocked Konsole D-Bus discovery/identity validation and bounded timeout behavior;
 - bounded optional notification-helper behavior;
-- no-icons/ASCII progress primitives;
+- no-icons/ASCII progress primitives, 7-bit frame glyphs, and artifact-free view-transition/resize clearing;
+- terminal key decoding, including unrecognized escape sequences that must not act as `Esc`;
+- width-exact frame rules and truncation that never overruns a narrow terminal;
+- literal control bytes stripped from rendered messages, directories, and process labels;
 - enforcement of a `# Role:` maintenance comment for every function.
 
 See [`docs/TESTING.md`](docs/TESTING.md) and the current [`docs/VALIDATION.md`](docs/VALIDATION.md).

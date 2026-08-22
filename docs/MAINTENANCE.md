@@ -33,6 +33,18 @@ Do not merge changes that weaken these rules:
 14. Keep qdbus and notification subprocesses bounded by explicit deadlines.
 15. Treat D-Bus validation timeouts as transient, never as proof of identity loss.
 16. Quarantine malformed recovery records before registering any in-memory target.
+17. Clear the visible alternate screen when TUI view identity or dimensions change.
+18. Size every frame from the live terminal width; never add a fixed-width frame literal.
+19. Only a bare `Esc` may mean back/cancel; unrecognized escape sequences must be ignored.
+20. Strip control bytes from user/filesystem text before it reaches the screen.
+21. Keep `--no-icons`, `--no-color`, `NO_COLOR`, and `--ascii` complete interfaces, not degraded ones.
+22. Never let a failed user action escape a TUI loop; `set -e` turns that into a client exit.
+23. Never give `keepalive.service` a private mount namespace. `PrivateTmp`,
+    `PrivateDevices`, `ProtectSystem`, `ProtectHome`, `ProtectProc`, and the
+    `ProtectKernel*` family all break `/proc/PID/cwd` and `/proc/PID/exe` resolution
+    for processes the daemon does not own, silently reducing every session to
+    `unknown`/`?` while all tests still pass. Restrict hardening to seccomp/prctl
+    directives.
 
 ## Module responsibilities
 
@@ -146,3 +158,9 @@ On the real KDE workstation:
 14. Test `--no-icons`, `NO_COLOR=1`, and `--ascii` from another terminal emulator.
 15. Temporarily block the session bus/helper and confirm timeout failures do not make a valid target sticky UNAVAILABLE.
 16. Corrupt a disposable runtime checkpoint and confirm it moves to `quarantine/` with a reason rather than loading.
+17. Navigate manager → detail → logs/wizard → back and resize each view; confirm no previous-view cells remain.
+18. Confirm `keepalive list` shows real project directory names rather than `unknown`/`?`; a regression here means the service unit gained a mount-namespace directive.
+19. Press Right/Left arrow, a function key, and a keypad key in the manager; the client must ignore them and stay open.
+20. Open the wizard and cancel with `Esc` from step 1 and from a later step; the manager must return, not exit.
+21. Resize the terminal from very wide down to 52 columns in each view; no line may wrap and no border may overrun.
+22. Compare the default, `--no-icons`, `NO_COLOR=1`, and `--ascii` renderings of the manager and target detail.

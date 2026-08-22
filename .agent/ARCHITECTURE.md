@@ -405,11 +405,106 @@ in `RISKS.md`.
 
 - `ExecStart=%h/.local/bin/keepalive --service`;
 - `Restart=on-failure`, two-second delay;
-- `UMask=0077`, `NoNewPrivileges=yes`, `PrivateTmp=yes`;
+- `UMask=0077`;
+- namespace-free hardening only: `NoNewPrivileges=yes`, `RestrictSUIDSGID=yes`,
+  `RestrictRealtime=yes`, `RestrictNamespaces=yes`, `LockPersonality=yes`,
+  `SystemCallArchitectures=native`, `RestrictAddressFamilies=AF_UNIX`;
 - user/graphical-session scoped.
 
 Installation enables only the socket. Stopping the daemon leaves on-demand socket
 activation available; stopping/disabling the socket ends that entrypoint.
+
+### Mount-namespace constraint on the daemon
+
+The daemon must run in the caller's mount namespace. Discovery resolves
+`/proc/PID/cwd` for the session display name/directory and `/proc/PID/exe` for the
+classifier signature, on processes it does not own. Both are magic symlinks that the
+kernel resolves against the *reader's* mount namespace, so any namespace-creating
+directive makes them fail with `ENOENT` while `comm`, `cmdline`, and `stat` continue
+to work — a silent, partial failure rather than a crash.
+
+`PrivateTmp`, `PrivateDevices`, `ProtectSystem`, `ProtectHome`, `ProtectProc`,
+`ProtectKernelTunables`, `ProtectKernelModules`, and `ProtectKernelLogs` all trigger
+this. `PrivateTmp=yes` shipped until 2026-08-22; see `RISKS.md` for the observed
+symptom. Seccomp/prctl-based directives are safe and are what the unit uses.
+
+## TUI frame lifecycle
+
+`ka_tui_enter` initializes an empty active-view marker and a pending resize clear.
+`ka_tui_frame_begin` derives its identity from the direct renderer in Bash's
+`FUNCNAME` stack. First draw, a different renderer, or `WINCH` emits `HOME` plus
+`ED 2` before content; a repeat frame emits only `HOME`. `ka_tui_frame_end` retains
+`ED 0` to erase unused content below the completed frame. This central rule covers
+manager, detail, logs, delete confirmation, and each wizard step without coupling
+navigation code to terminal cleanup.
+
+`ka_tui_frame_begin` is also the only place terminal size is refreshed, via one
+`stty size` call, because those transitions are exactly when dimensions can change.
+`KA_TUI_COLS`/`KA_TUI_LINES` back `ka_tui_cols`/`ka_tui_lines`, which used to fork
+`tput` on every query.
+
+## TUI layout model
+
+No frame literal has a fixed width. `ka_tui_box_top`/`ka_tui_box_mid`/
+`ka_tui_box_bottom` build on `ka_tui_box_rule`, which computes fill from
+`KA_TUI_COLS` minus the measured label and trailer. `ka_tui_hrule` draws an
+indented plain rule sized to the remaining width. `ka_tui_field_width` derives a
+content budget with a floor, so a narrow terminal can never yield a non-positive
+truncation width — the old failure mode, because `printf '%.*s'` treats a negative
+precision as omitted and printed the whole untruncated string.
+
+`ka_tui_truncate` strips control bytes inline, clamps non-positive budgets to
+nothing, and uses the active ellipsis glyph. Width is counted in characters, not
+cells; wide CJK/emoji still under-count. `ka_tui_status_width` reports the rendered
+cell count of a status label including its icon, which is what column padding must
+use.
+
+## TUI presentation tiers
+
+`ka_tui_palette_init` caches `setaf`/`setab` for colors 0-7 once. `ka_tui_glyphs_init`
+selects box, marker, and powerline glyph sets. Powerline wedges follow icon mode
+rather than ASCII mode and are written as `\u` escapes.
+
+```text
+color + icons        powerline segment bar with caps/wedges
+color, no icons      colored segments, no wedges (backgrounds still separate them)
+color + --ascii      colored segments, 7-bit frame elsewhere
+no color             plain boxed header
+```
+
+`ka_tui_bar_add` tracks visible width as it accumulates; `ka_tui_bar_flush` refuses
+to print a bar wider than the terminal and returns non-zero so the caller renders
+its boxed fallback instead of emitting a wrapped bar.
+
+## TUI repaint policy
+
+`ka_tui_index_changed` slurps `index.tsv` with `read -r -d ''` — no command
+substitution, so an unchanged poll costs no fork — and compares it to the copy the
+client last parsed. `ka_tui_main` repaints only when that content changed, the
+selection or offset moved, a toast is live, a resize is pending, or the displayed
+clock second advanced. Key polling stays at 0.25 s. Measured on the review
+workstation: an idle poll fell from a full ~26 ms load-and-render to ~0.08 ms.
+
+## TUI key decoding
+
+`ka_tui_read_key` reads byte by byte. A bare `Esc` (nothing within a 0.05 s
+inter-byte window) is `ESC`. `[` or `O` introduces a CSI/SS3 sequence, consumed
+through its terminating byte and mapped to `UP`/`DOWN`/`LEFT`/`RIGHT`/`HOME`/`END`/
+`PGUP`/`PGDN`, or to `UNKNOWN` when unrecognized. `UNKNOWN` matches no view's case
+statement and is therefore ignored.
+
+Any other byte following `Esc` means `Esc` was its own keypress, so that byte is
+stored in `KA_TUI_PENDING_KEY` and delivered by the next call rather than dropped.
+
+## TUI checkpoint and index reads
+
+`ka_tui_load_target_fields` parses one target `state.tsv` once into `KA_F_*`. The
+detail view previously called a per-field accessor a dozen times, each a command
+substitution reparsing the whole file. `ka_tui_split_tsv` splits index rows without
+`read`, because tab is IFS whitespace and `read` silently merges adjacent empty
+columns and shifts every later field. `ka_tui_load_index` streams its sort through
+one pipeline instead of a runtime temp file that leaked whenever a client was
+interrupted mid-frame.
 
 ## Event logging
 

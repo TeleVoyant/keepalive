@@ -3,9 +3,10 @@
 ## Repository state at review
 
 - Branch `master` tracked `origin/master` with no pre-existing changes.
-- Current baseline HEAD is `55c8f72 fix(keepalive): propagate send failures and
-  enforce canonical message rotations`, following the original implementation
-  commit `1e67c2b`.
+- Current baseline HEAD is `d75123f fix(keepalive): harden scheduling, subprocess
+  deadlines, and runtime recovery`, following `55c8f72 fix(keepalive): propagate
+  send failures and enforce canonical message rotations` and the original
+  implementation commit `1e67c2b`.
 - `VALIDATION.md` and `docs/VALIDATION.md` were byte-identical.
 - `.agents/` and `.codex/` existed as empty read-only environment directories;
   there was no repository `AGENTS.md`.
@@ -35,6 +36,20 @@
 14. qdbus and notification helpers must remain deadline-bounded.
 15. A validation timeout is transient; only definite identity loss becomes sticky UNAVAILABLE.
 16. Runtime checkpoints must pass complete validation before array registration; quarantine failures with diagnostic evidence.
+17. Never add a mount-namespace directive to `keepalive.service`. It silently breaks
+    `/proc/PID/cwd` and `/proc/PID/exe` resolution for processes the daemon does not
+    own, which is how session names and part of the classifier signature are derived.
+18. Size every TUI frame from `KA_TUI_COLS`; never introduce a fixed-width frame literal.
+19. Never let a user action's non-zero status escape a TUI loop. The client runs under
+    `set -e`, so that exits the whole TUI. Use `ka_tui_guard_action`/`ka_tui_open_row`
+    or an explicit `|| true`.
+20. Only a bare `Esc` may mean back/cancel. Unrecognized escape sequences must decode to
+    `UNKNOWN`, and a non-sequence byte read past an `Esc` must be queued, not dropped.
+21. Strip control bytes from any user or filesystem text before rendering it.
+22. Keep every presentation tier complete: powerline, colored-segment, plain-box, and
+    fully 7-bit `--ascii`.
+23. Prefer `REPLY`-setting helpers over command substitution in per-row render paths; a
+    fork costs about 0.5-1 ms here and rows call these several times each.
 
 The module source order in `keepalive` matters because functions share global
 variables rather than namespaced objects. New modules should be sourced before
@@ -69,7 +84,7 @@ Do not run installer, uninstaller, or daemon as root.
 On 2026-08-21 with Bash 5.2.37:
 
 - all Bash source/test files passed `bash -n`;
-- all 13 test files and all 126 assertions passed after the robustness fixes;
+- all 13 test files and all 131 assertions passed after the TUI transition fix;
 - entrypoint version/help/icon-test smoke checks passed;
 - ShellCheck was not installed;
 - the working tree was clean before `.agent/` was created.
@@ -90,8 +105,68 @@ No such file or directory
 
 The repository's `scripts/dev-check.sh` handles a normal uninstalled checkout by
 temporarily creating that expected symlink before verification. The committed
-validation report records a passing systemd verification. No live Plasma/Konsole
-bus was available during this review.
+validation report records a passing systemd verification.
+
+## Validation performed on 2026-08-22
+
+This review ran **on the real KDE workstation with a live Plasma session, a live
+Konsole D-Bus bus, and an installed daemon that had been running for 24 hours**.
+Earlier `.agent/` notes were written without that access; do not carry forward the
+old "no live bus available" caveat.
+
+- `./scripts/dev-check.sh` reported `ALL VALIDATION CHECKS PASSED`;
+- 13/13 test files and 131/131 assertions passed;
+- `systemd-analyze verify` passed here, including the amended `keepalive.service`;
+- ShellCheck is still not installed and remains the only skipped stage;
+- `keepalive --version|--help|--icons-test|doctor|status|list` all worked live;
+- live `keepalive doctor` reported all critical checks passing against `qdbus6`.
+
+Two defects were found that mocked tests structurally cannot reach, because both
+depend on the real unit sandbox and the real bus population:
+
+1. `PrivateTmp=yes` breaking `/proc/PID/cwd` and `/proc/PID/exe`. Fixed; see
+   `RISKS.md` and the mount-namespace constraint in `ARCHITECTURE.md`.
+2. Discovery cost scaling with total Konsole sessions rather than monitored targets,
+   measured at 57% of one core with zero keep-alives configured. Still open; see
+   `RISKS.md`.
+
+The same session then ran a full TUI overhaul. Validation for it:
+
+- 240 render combinations (15 widths x 3 target states x 4 presentation modes) with
+  ANSI stripped; no line exceeded its terminal width;
+- 17 pseudo-terminal key scenarios, including every key class that previously exited
+  the client, each ending in a clean exit status 0;
+- the previously flaky `open wizard, cancel, quit` sequence passed 10/10 at both fast
+  and human typing speeds after the Escape-pushback fix;
+- suite grew from 131 to 184 assertions across the same 13 files.
+
+Useful live probes for future work on this workstation:
+
+```bash
+# Does the daemon resolve real session names, or fall back to unknown/?
+keepalive list
+cat -A "$XDG_RUNTIME_DIR/keepalive/index.tsv"
+
+# Sustained daemon CPU cost since start
+systemctl --user show keepalive.service -p CPUUsageNSec -p ActiveEnterTimestamp
+
+# Reproduce discovery outside the unit to compare against what the daemon publishes
+source lib/common.sh; source lib/xdg.sh; source lib/qdbus.sh
+source lib/classifier.sh; source lib/konsole.sh
+ka_xdg_init; ka_classifier_init; ka_qdbus_find; ka_konsole_discover
+
+# Test a candidate unit sandbox without touching the installed unit
+systemd-run --user --pipe -p PrivateTmp=yes /bin/bash -c 'readlink /proc/PID/cwd'
+```
+
+Remember that `scripts/install.sh` does not restart a running daemon. After changing
+unit files or sourced modules, deploy and restart explicitly:
+
+```bash
+cp -f systemd/keepalive.service ~/.config/systemd/user/keepalive.service
+systemctl --user daemon-reload
+systemctl --user restart keepalive.service
+```
 
 ## Test inventory
 
@@ -106,7 +181,7 @@ bus was available during this review.
 | `test_recovery_validation.sh` | Strict checkpoint validation, range/message/symlink rejection, quarantine reasons/log preservation. |
 | `test_ipc.sh` | Two request IDs through one FIFO with independent responses. |
 | `test_konsole_mock.sh` | Discovery/identity validation, qdbus timeout classification, notification deadline. |
-| `test_tui_primitives.sh` | ASCII progress/urgency and icon-free state label. |
+| `test_tui_primitives.sh` | ASCII progress/urgency, icon-free state, view-aware clear and resize sequences, width-exact frame rules, truncation safety and control stripping, non-collapsing TSV split, 7-bit glyph set, status cell width, segment-bar width/fallback, and key decoding (arrows, page/home/end, unrecognized sequences, Escape pushback). |
 | `test_function_comments.sh` | Adjacent `# Role:` convention. |
 | `test_install_layout.sh` | Non-root install/uninstall with mocked systemctl. |
 | `test_service_integration.sh` | Cross-process daemon/client lifecycle, mocked sendText success/failure/timeout. |
@@ -117,8 +192,8 @@ directories. Root-based CI attempts to run installation/integration behavior as
 
 ## Important uncovered areas
 
-Automated tests do not drive the full interactive wizard/detail/log loops, test
-resize/control-sequence behavior, simulate multiple simultaneous mutating clients,
+Automated tests do not drive full wizard/detail/log loops through a pseudo-terminal,
+validate terminal-specific wrapping/cell widths, simulate multiple simultaneous mutating clients,
 inject crashes between multi-file checkpoint/profile writes, or use real systemd
 socket activation. There is no CI workflow file in the repository. See `RISKS.md`
 for specific recommended regressions.
@@ -131,6 +206,23 @@ The repository explicitly leaves these to live-host qualification:
 - KDE notification delivery;
 - Nerd Font glyph cell width;
 - actual suspend/resume behavior.
+
+Three further blind spots are now known to hide real defects, because all were found
+live on 2026-08-22 after the mocked suite had passed:
+
+- **Unit sandbox effects.** Tests exercise the daemon as a plain background process,
+  never under the shipped `keepalive.service` sandbox, so a hardening directive can
+  silently disable `/proc` magic-symlink resolution with every test still green.
+- **Cost at realistic bus population.** Tests use one mocked Konsole service with one
+  session. Discovery cost scales with total sessions on the bus, so the suite cannot
+  observe the polling model's real CPU behavior on a desktop with many Konsole
+  windows.
+- **Interactive behavior.** No committed test drives the client through a
+  pseudo-terminal, so key handling, navigation, and `set -e` escapes from loop bodies
+  were invisible to the suite. Three real TUI defects hid behind a fully green run:
+  unrecognized escape sequences quitting the client, a swallowed key after `Esc`, and
+  a cancelled wizard exiting with status 1. Unit-level key decoding is now covered;
+  driving a real pty is still an open gap. See `RISKS.md`.
 
 ## Safe change checklist by area
 
@@ -191,6 +283,39 @@ Update both `ka_state_publish_index` and both read stages in
 `ka_tui_load_index`. Test empty fields explicitly because tab is IFS whitespace in
 Bash. Test narrow terminals, no colors, no icons, ASCII bars, and multi-client
 refresh with selection retained by UUID.
+
+### TUI change
+
+The suite cannot see layout, key handling, or `set -e` escapes. Check all of:
+
+1. Render each affected view at 52, 64, 80, 100, and 200 columns and confirm no line
+   exceeds the width. Strip ANSI before measuring, or escape bytes inflate the count.
+2. Render in all four presentation tiers: default, `--no-icons`, `NO_COLOR=1`, `--ascii`.
+3. Exercise `ACTIVE`, `PAUSED`, and `UNAVAILABLE`, which render different blocks.
+4. Confirm no user action can return non-zero into a loop body.
+5. Drive the real client through a pseudo-terminal: arrows, function keys, keypad,
+   `Esc`, `Esc` followed immediately by another key, wizard cancel from step 1 and
+   from a later step. The client must never exit except on `q`/`Esc` at the manager.
+6. Confirm no scratch file survives an interrupted client.
+
+A minimal Python pty driver is enough: `pty.fork()`, `TIOCSWINSZ` for the size, write
+keys with a settle delay, and read the master until the child exits.
+
+### systemd unit change
+
+`systemd-analyze verify` and the whole test suite pass regardless of sandbox
+directives, so neither one can qualify this area. Always verify on a live session:
+
+1. Confirm the directive is not mount-namespace based. When unsure, test it in
+   isolation before editing the unit:
+   `systemd-run --user --pipe -p <Directive> /bin/bash -c 'readlink /proc/<a foreign PID>/cwd'`
+2. Deploy the unit, `daemon-reload`, and restart the service explicitly; the
+   installer will not restart a running daemon for you.
+3. Confirm `keepalive list` still shows real project names, not `unknown`/`?`.
+4. Confirm classification still recognizes an installed AI CLI, since
+   `ka_proc_exe_basename` contributes to `ka_proc_signature`.
+5. Confirm delivery still works, and that optional `notify-send` is not blocked by a
+   new seccomp or address-family restriction.
 
 ## Install, update, uninstall
 

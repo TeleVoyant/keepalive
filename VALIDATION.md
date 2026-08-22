@@ -1,6 +1,6 @@
 # Validation Report
 
-Date: 2026-08-21
+Date: 2026-08-22
 Version: 0.1.0
 
 ## Automated result
@@ -11,7 +11,7 @@ The release candidate passed:
 Bash syntax:                 PASS
 Function-role comment lint:  PASS
 Dependency-free test files:  13 / 13 PASS
-Assertions:                  126 / 126 PASS
+Assertions:                  184 / 184 PASS
 systemd-analyze verify:      PASS
 Installer layout simulation: PASS (non-root + mocked systemctl)
 Daemon/client integration:   PASS (real Bash processes/FIFO + mocked qdbus)
@@ -52,18 +52,31 @@ Run the same aggregate command with:
 - An old unavailable Avela UUID and a new same-directory Avela UUID coexist as separate UNAVAILABLE/AVAILABLE records; no auto-reattach occurs.
 - Delete removes only keep-alive runtime state/history.
 - `--no-icons`/ASCII timer primitives remain semantically readable.
+- First TUI draw, renderer transitions, and terminal resize clear the visible screen while same-view refresh avoids repeated full erases.
+- Every frame is sized from live terminal width: verified across 15 widths from 52 to 200 columns, three target states, and four presentation modes with no line exceeding the terminal.
+- Truncation never overruns: non-positive derived widths yield nothing instead of printing the untruncated string.
+- Control bytes in messages, directories, and process labels are stripped before reaching the screen.
+- Index rows decode faithfully, including empty columns that Bash `read` would otherwise collapse.
+- `--ascii` renders a fully 7-bit interface, frame glyphs included, not only ASCII progress bars.
+- Colored segment headers degrade to plain boxed headers when color is unavailable or the bar would not fit.
+- Only a bare `Esc` cancels: arrows, function keys, keypad keys, and bracketed-paste markers are ignored rather than exiting the client.
+- A key typed immediately after `Esc` is preserved rather than swallowed.
+- A cancelled wizard or a rejected daemon action returns to the previous screen instead of terminating the client.
+- Client scratch directories and index sort files do not survive an interrupted TUI.
 - User installer places source, symlink, and systemd units correctly and enables the socket entrypoint.
 - `keepalive.socket` and `keepalive.service` pass `systemd-analyze verify`.
 
 ## Remaining live-host qualification gate
 
-This environment does not expose the target workstation's real Plasma graphical session or Konsole user D-Bus. The following therefore remain runtime qualification items rather than automated claims:
+This report was produced **on the target KDE workstation**, against a live Plasma session, a live Konsole user D-Bus with 11 services and 16 sessions, and an installed daemon. Live discovery, `keepalive doctor`, `keepalive list`, unit verification, and pseudo-terminal TUI runs were all exercised there.
 
-1. actual `qdbus6` output on Parrot/KDE and live Konsole `sendText` injection;
-2. actual Claude Code/Codex/Kimi process trees installed on the workstation;
-3. systemd user socket activation under the workstation's `graphical-session.target`;
+The following still require deliberate runtime qualification rather than being covered by automated claims:
+
+1. live Konsole `sendText` injection into a real AI client (delivery is still mock-covered only);
+2. process-tree shapes of every installed AI CLI beyond Claude;
+3. systemd user socket activation under `graphical-session.target` from a cold login;
 4. KDE notification delivery;
-5. Nerd Font glyph widths in the user's configured Konsole font;
+5. Nerd Font glyph cell widths in the user's configured Konsole font, including the powerline caps and wedges;
 6. real laptop suspend/resume lifecycle.
 
 The complete live checklist is in `docs/MAINTENANCE.md`.

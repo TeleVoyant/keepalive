@@ -12,13 +12,23 @@ maintainer or coding agent needs in order to continue safely.
 
 - Repository: `TeleVoyant/keepalive`
 - Branch: `master`
-- Reviewed baseline commit: `55c8f72` (`fix(keepalive): propagate send failures and enforce canonical message rotations`)
+- Reviewed baseline commit: `d75123f` (`fix(keepalive): harden scheduling, subprocess deadlines, and runtime recovery`)
 - Product version: `0.1.0`
 - Implementation: Bash 5+, Linux `/proc`, Konsole D-Bus, `systemd --user`
-- History at review time: one implementation commit
-- Current worktree hardening: monotonic/injectable scheduling with backward-clock
-  preservation; bounded qdbus/notification subprocesses with transient timeout
-  semantics; strict checkpoint recovery with diagnostic quarantine.
+- History at review time: three commits (`1e67c2b` implementation, then `55c8f72`
+  and `d75123f` hardening)
+- Current worktree fixes:
+  1. the TUI tracks renderer identity and clears the visible alternate screen on
+     first draw, view transition, and resize while retaining low-flicker
+     same-view redraws;
+  2. `keepalive.service` no longer sets `PrivateTmp=yes`, which had been breaking
+     every session's display name on the live workstation;
+  3. a full `lib/tui/*` overhaul: correct key decoding (unrecognized escape
+     sequences no longer exit the client), no `set -e` escapes from action loops,
+     width-exact frames, safe truncation, control-byte stripping, complete
+     `--ascii`, colored segment headers with defined fallbacks, change-driven
+     repaint, and no leaked client scratch files.
+  See [RISKS.md](RISKS.md) for the evidence behind each.
 - Working tree before this directory was added: clean and aligned with
   `origin/master`
 
@@ -31,7 +41,8 @@ maintainer or coding agent needs in order to continue safely.
 - [DEVELOPMENT.md](DEVELOPMENT.md): conventions, testing, validation evidence,
   installation, release flow, and change checklists.
 - [RISKS.md](RISKS.md): reproduced defects, implementation caveats, known
-  qualification boundaries, and recommended test additions.
+  qualification boundaries, and recommended test additions. Read the dated
+  "Resolved on" sections before assuming a listed problem is still present.
 
 ## Fast orientation
 

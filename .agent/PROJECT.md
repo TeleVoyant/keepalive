@@ -123,9 +123,9 @@ is optional in the aggregate developer check.
 | `lib/scheduler.sh` | Timer decrement, due-event ordering, validation, delivery, rotation. |
 | `lib/ipc.sh` | FIFO signal plus filesystem request/response protocol. |
 | `lib/service.sh` | Lock, startup/recovery, daemon loop, health/discovery cadence. |
-| `lib/tui/screen.sh` | Terminal lifecycle, keys, styles, status/progress primitives. |
-| `lib/tui/wizard.sh` | Six-step create/configure request builder. |
-| `lib/tui/tui.sh` | Manager/detail/log rendering and client action loops. |
+| `lib/tui/screen.sh` | Terminal lifecycle, cached size, view-aware clearing, key decoding, glyph/palette sets, width-exact frame rules, segment bars, sanitizing truncation. |
+| `lib/tui/wizard.sh` | Six-step create/configure request builder plus scratch-directory lifecycle. |
+| `lib/tui/tui.sh` | Manager/detail/log rendering, index decoding, single-pass checkpoint reads, change-driven repaint, client action loops. |
 | `systemd/*` | User FIFO socket activation and daemon supervision. |
 | `scripts/install.sh` | Per-user installed tree, symlink, units, socket enablement. |
 | `scripts/uninstall.sh` | Removes installed app/units, intentionally retains profile. |
@@ -241,3 +241,15 @@ name/pattern without adding another order slot.
 13. Secondary due checks run before main due checks.
 14. Enter-only events do not advance main rotation.
 15. Every Bash function has an adjacent `# Role:` maintenance comment.
+16. TUI view changes and resizes erase the visible alternate screen; steady same-view refreshes do not.
+17. The daemon runs in the caller's mount namespace. Unit hardening is restricted to
+    seccomp/prctl directives so `/proc/PID/cwd` and `/proc/PID/exe` stay resolvable.
+18. Every TUI frame is sized from the live terminal; there are no fixed-width frame literals.
+19. Only a bare `Esc` means back/cancel. Unrecognized escape sequences are consumed and
+    ignored, and a byte read past an `Esc` is queued rather than discarded.
+20. Presentation degrades in defined steps: powerline segment bar, colored segments without
+    wedges, plain boxed header. `--ascii` selects a 7-bit glyph set for the whole frame.
+21. The manager repaints only on real change (index content, selection, toast, resize, clock
+    second), not on every key-poll cycle.
+22. User-facing text is stripped of control bytes before rendering.
+23. A failed user action never escapes a TUI loop; under `set -e` that would exit the client.

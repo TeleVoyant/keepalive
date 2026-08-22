@@ -55,6 +55,142 @@ Regression coverage restores a valid record while quarantining corrupt start tim
 timer range, required-file, UUID binding, message rotation, message symlink, and
 top-level target-symlink cases without following the latter.
 
+## Resolved on 2026-08-22: `PrivateTmp=yes` no longer breaks session identity
+
+`keepalive.service` set `PrivateTmp=yes`, which places the daemon in a private
+mount namespace. `/proc/PID/cwd` and `/proc/PID/exe` are magic symlinks resolved
+against the *reader's* mount namespace, so the daemon could not resolve either one
+for AI processes it does not own, while `comm`, `cmdline`, and `stat` kept working.
+
+Observed live on the workstation before the fix: every discovered row published
+name `unknown` and directory `?`, making multiple concurrent Claude sessions
+indistinguishable in the TUI, `keepalive list`, and `index.tsv`. The same discovery
+code run outside the unit resolved the real project directories. `ka_proc_exe_basename`
+also failed silently, dropping the exe component from `ka_proc_signature` so that a
+wrapper recognizable only by executable basename would not classify.
+
+Note that discovery, PID-reuse guarding, and foreground-ancestry validation were
+never affected, because those read only `comm`, `cmdline`, and `stat`.
+
+The unit now uses only namespace-free hardening (`NoNewPrivileges`,
+`RestrictSUIDSGID`, `RestrictRealtime`, `RestrictNamespaces`, `LockPersonality`,
+`SystemCallArchitectures=native`, `RestrictAddressFamilies=AF_UNIX`), all verified
+against live Konsole discovery. The unit carries a comment naming the specific
+directives that must never be added back.
+
+This also removes the service-namespace half of the `/tmp` fallback risk below.
+
+## High priority: discovery cost scales with total Konsole sessions, not targets
+
+Measured on the live workstation with **zero** keep-alives configured: the daemon
+consumed 49,369 s of CPU over 86,673 s of wall time, a sustained **57% of one core**
+for 24 hours.
+
+`ka_state_refresh_discovery` runs every `KEEPALIVE_DISCOVERY_INTERVAL` (3 s) and
+rebuilds everything from scratch. With 11 Konsole services exporting 16 session
+objects, one cycle issues `1 + 11 + 3×16 = 60` qdbus calls. Each is a
+`timeout` + `qdbus6` pair, and `qdbus6` is a Qt binary that connects to the bus and
+exits. On top of that, `ka_proc_signature` costs roughly six forks per PID examined
+(`readlink`, `tr`, `sed`, plus command substitutions) across the ancestry walk for
+every session. That is on the order of 100 process spawns per second, sustained,
+independent of how many targets are actually monitored.
+
+`KEEPALIVE_HEALTH_INTERVAL` (2 s) adds three more qdbus calls per monitored target,
+which is the part that correctly scales with real work.
+
+Recommended directions, roughly in order of value:
+
+1. Skip or heavily back off discovery when no target is monitored and no client is
+   attached; the daemon only needs fresh discovery to populate `AVAILABLE` rows.
+2. Cache service/session paths and re-enumerate them on a much slower cadence than
+   the per-session property reads.
+3. Batch the three per-session property reads into one call if Konsole exposes a
+   suitable interface, or use `org.freedesktop.DBus.Properties.GetAll`.
+4. Replace `ka_proc_signature`'s external commands with pure-Bash reads;
+   `ka_proc_cmdline` in particular forks `tr` and `sed` per PID.
+5. Longer term, the documented native persistent D-Bus/signal design removes the
+   polling model entirely.
+
+Any change here must not weaken pre-send identity validation, which is separate
+from discovery.
+
+## Resolved on 2026-08-22: TUI overhaul
+
+A full pass over `lib/tui/*` fixed defects that the mocked suite could not reach.
+Found by rendering every view at 15 widths x 3 states x 4 presentation modes and by
+driving the real client through a pseudo-terminal.
+
+**Any unrecognized escape sequence quit the view.** `ka_tui_read_key` read a fixed
+two bytes after `Esc` and mapped anything it did not recognize to `ESC`. From the
+manager that exits the client, so Right/Left arrow, function keys, keypad keys, and
+xterm's `ESC [ n ~` Home/End all terminated the TUI. This was the user-reported
+"pressing any other key exits". The decoder now reads byte by byte, treats only a
+bare `Esc` as cancel, and reports unrecognized sequences as `UNKNOWN`, which no view
+acts on.
+
+**A key typed right after `Esc` was swallowed.** The follow-up byte was discarded,
+so `Esc` plus a fast keystroke lost the keystroke and misread the pair as a
+sequence. That byte is now queued in `KA_TUI_PENDING_KEY` and delivered next.
+This was reproducibly flaky before the fix and is deterministic after it.
+
+**A failed action exited the client.** Under the entrypoint's `set -e`, a non-zero
+return from a wizard cancel or a rejected daemon action escaped the loop body and
+terminated the TUI. Cancelling the wizard reproducibly exited with status 1 at
+`d75123f`. Navigation and actions are now absorbed by `ka_tui_open_row` and
+`ka_tui_guard_action`.
+
+**Frames used fixed-width literals.** Box rules were hard-coded at 78/71/64/63/29/27
+dashes regardless of terminal width, so headers wrapped on an 80-column terminal and
+fell short on a wide one. All rules are now computed from live width.
+
+**Narrow terminals printed untruncated text.** Derived widths such as `cols - 24`
+went non-positive below the minimum width, and `printf '%.*s'` treats a negative
+precision as omitted — so the whole string printed and destroyed the layout.
+`ka_tui_field_width` floors the budget and `ka_tui_truncate` clamps.
+
+**`--ascii` was not ASCII.** It only changed progress-bar characters; 75 lines of
+Unicode box drawing, selection markers, arrows and ellipses were unaffected. A
+glyph set now covers the entire frame.
+
+**Control bytes reached the screen.** Message, directory, and process-label text
+passed through unfiltered, so an embedded escape sequence could repaint or
+reposition the live frame. `ka_tui_truncate` strips control bytes inline.
+
+**Icon mode shifted every column.** Status padding was computed from the bare status
+word while the rendered label also carried an icon and a space.
+`ka_tui_status_width` reports the rendered cell count.
+
+**Client temp files leaked.** Wizard scratch directories survived Ctrl-C — five were
+found on the live workstation, aged 24 h — and `ka_tui_load_index` leaked an
+`index-sort.XXXXXX` file per interrupted frame. The scratch path is now published to
+the exit trap, stale ones are swept, and the sort streams through a pipeline with no
+temp file at all.
+
+Performance, measured on the review workstation with two rows at 100 columns:
+
+| | before | after |
+|---|---|---|
+| manager frame | 26.1 ms | 15.9 ms |
+| idle poll | 26.1 ms (always rendered) | 0.083 ms |
+| effective idle cost at 4 Hz | ~10.4% of one core | ~1.6% of one core |
+
+The wins are cached terminal size instead of `tput` forks per query, one
+`state.tsv` parse instead of a dozen command substitutions per detail frame, a
+`REPLY`-setting timer-color helper instead of a fork per bar, and repainting only on
+real change rather than four times a second.
+
+## Remaining TUI gaps
+
+- Truncation still counts characters, not terminal cells, so wide CJK/emoji
+  under-count. A full `wcwidth` table in Bash was judged disproportionate.
+- The pseudo-terminal harness used for this review lives in the scratch directory,
+  not in `tests/`. Interactive coverage in the suite is still unit-level: key
+  decoding is tested from byte streams, but no committed test drives a real pty.
+- `ka_tui_prompt_line` uses a blocking `read` with no timeout and no cancel key, so
+  a user inside a custom-value prompt must press Enter to leave it.
+- `q` closes the manager, detail, and log views but not the wizard, where only `Esc`
+  cancels. This is what the on-screen hints say, but it is an inconsistency.
+
 ## Medium priority: multi-file operations are not transactions
 
 The documentation describes configuration save as a transaction, but atomicity is
@@ -83,10 +219,13 @@ When `XDG_RUNTIME_DIR` is unset, runtime state falls back to the predictable
 
 1. `/tmp` is not guaranteed to be removed at logout, so runtime records/logs can
    outlive a login.
-2. `PrivateTmp=yes` can give the systemd service a different `/tmp` namespace from
-   clients, breaking FIFO/request visibility.
-3. The predictable base path does not explicitly verify ownership/no-symlink
+2. The predictable base path does not explicitly verify ownership/no-symlink
    before use.
+
+The former third item, `PrivateTmp=yes` giving the service a different `/tmp`
+namespace from clients and breaking FIFO/request visibility, no longer applies:
+that directive was removed on 2026-08-22 for an unrelated and more damaging reason.
+Re-adding any mount-namespace directive would reintroduce both problems at once.
 
 Normal systemd user sessions should provide `%t`/`XDG_RUNTIME_DIR`, so this is a
 fallback-path issue. Recommended fix: require a valid owned XDG runtime for service
@@ -151,21 +290,15 @@ All runtime directories are private to the user, which reduces cross-user impact
 Still, explicit bounds, UUID validation, collision-safe directory creation, and
 complete terminal-control filtering would make the data contracts stronger.
 
-## Lower priority: UI edge cases are mostly untested
+## Lower priority: remaining UI edge cases
 
-- The manager rejects widths below 52, but its decorative header is much wider and
-  can wrap in the compact-width range.
-- Detail/wizard rendering does not consistently enforce minimum width before using
-  derived truncation widths.
-- Unicode truncation uses Bash character length rather than terminal cell width.
-- Persisted/user-entered messages can contain terminal controls not fully removed
-  before rendering.
-- Wizard temporary directories are not cleaned by an EXIT trap if interrupted;
-  hourly IPC cleanup only scans `requests/` and `responses/`.
-- Full manager/detail/wizard/log interaction is absent from automated tests.
+The 2026-08-22 overhaul resolved the layout, clearing, glyph, sanitizing, key
+decoding, and leak items previously listed here. What remains:
 
-The documented `--no-icons` and `--ascii` paths mitigate glyph compatibility, not
-all of the layout/control cases above.
+- Unicode cell width is still approximated by character count.
+- No committed test drives the manager/detail/wizard/log loops through a real
+  pseudo-terminal; see "Remaining TUI gaps" above.
+- The wizard's custom-value prompt cannot be cancelled without pressing Enter.
 
 ## Semantics that deserve explicit decisions/tests
 
@@ -209,4 +342,6 @@ In priority order:
 4. Crash/failure between target/profile/message update stages.
 5. Multiple concurrent CREATE/CONFIGURE/DELETE requests for one UUID.
 6. Real systemd socket activation in an isolated user manager.
-7. Pseudo-terminal-driven TUI key/resize/cancel cleanup tests.
+7. Pseudo-terminal-driven TUI key/resize/cancel cleanup tests, promoted from the
+   throwaway harness used on 2026-08-22 into `tests/`.
+8. Terminal cell-width handling for wide CJK/emoji in truncation.
