@@ -44,16 +44,60 @@ assert_false 'CONFIGURE rejects a non-canonical main-message rotation' ka_state_
 assert_eq 60 "${KA_T_MAIN_INTERVAL[$uuid]}" 'rejected CONFIGURE leaves selected target settings unchanged'
 assert_eq 60 "$(ka_read_first_line "$KA_PROFILE_DIR/main_interval")" 'rejected CONFIGURE leaves persistent profile unchanged'
 
+# Validators must hand the exact reason back so IPC can return it instead of a fixed
+# generic string; the operator previously had to read the journal to learn why.
+ka_error_reset
+assert_false 'malformed CREATE fails' ka_state_create_target 'no-such-uuid' "$bad_req"
+assert_eq 'selected Konsole session is no longer available' "$KA_LAST_ERROR" \
+    'refusal records an operator-facing reason for the IPC responder'
+ka_error_reset
+assert_eq '' "$KA_LAST_ERROR" 'the recorded reason can be cleared between operations'
+
 ka_state_toggle_pause "$uuid"
 assert_eq PAUSED "${KA_T_STATUS[$uuid]}" 'pause transition'
 assert_eq 60 "${KA_T_MAIN_REMAIN[$uuid]}" 'pause preserves remaining time'
 ka_state_toggle_pause "$uuid"
 assert_eq ACTIVE "${KA_T_STATUS[$uuid]}" 'resume transition'
 
+# Periodic health prefers the discovery snapshot so it costs no extra D-Bus calls.
+# Role: Fail loudly if health validation still reaches for a live D-Bus call.
+ka_konsole_validate_target() { KA_LIVE_VALIDATION_CALLS=$(( ${KA_LIVE_VALIDATION_CALLS:-0} + 1 )); return 0; }
+KA_LIVE_VALIDATION_CALLS=0
+KA_D_FG_PID[$uuid]=$$
+ka_state_validate_targets
+assert_eq 0 "$KA_LIVE_VALIDATION_CALLS" 'a discovered target is validated from the snapshot, without D-Bus'
+assert_eq ACTIVE "${KA_T_STATUS[$uuid]}" 'snapshot validation keeps a healthy target active'
+unset 'KA_D_TERM_PID[$uuid]'
+ka_state_validate_targets
+assert_eq 1 "$KA_LIVE_VALIDATION_CALLS" 'a target missing from discovery still falls back to a live call'
+# Keep the target out of the snapshot so the strike tests below exercise the live path.
+unset 'KA_D_FG_PID[$uuid]'
+
+# Transient failures are debounced, not ignored. A call that timed out or could not be
+# made proves nothing, but a bus that never returns must still end in UNAVAILABLE.
 # Role: Model a bounded qdbus timeout during periodic target health validation.
 ka_konsole_validate_target() { return 20; }
+KEEPALIVE_VALIDATION_STRIKES=3
+KA_T_STRIKES[$uuid]=0
 ka_state_validate_targets
 assert_eq ACTIVE "${KA_T_STATUS[$uuid]}" 'transient health timeout does not make target unavailable'
+assert_eq 1 "${KA_T_STRIKES[$uuid]}" 'a transient failure records one strike'
+ka_state_validate_targets
+assert_eq ACTIVE "${KA_T_STATUS[$uuid]}" 'a second transient failure still retains identity'
+
+# Role: Model an unreachable Konsole D-Bus session rather than a timeout.
+ka_konsole_validate_target() { return 21; }
+ka_state_validate_targets
+assert_eq UNAVAILABLE "${KA_T_STATUS[$uuid]}" 'repeated unreachable validation eventually gives up'
+assert_contains "$(ka_log_path "$uuid")" 'consecutive attempts' 'the giving-up reason records the strike count'
+
+KA_T_STATUS[$uuid]=ACTIVE; KA_T_STRIKES[$uuid]=2
+# Role: Model a Konsole session that becomes reachable again before the budget runs out.
+ka_konsole_validate_target() { return 0; }
+ka_state_validate_targets
+assert_eq ACTIVE "${KA_T_STATUS[$uuid]}" 'recovery keeps the target active'
+assert_eq 0 "${KA_T_STRIKES[$uuid]}" 'a successful validation clears accumulated strikes'
+unset KEEPALIVE_VALIDATION_STRIKES
 source "$TEST_ROOT/lib/konsole.sh"
 
 ka_state_mark_unavailable "$uuid" 'AI process exited'

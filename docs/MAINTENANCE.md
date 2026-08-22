@@ -39,7 +39,13 @@ Do not merge changes that weaken these rules:
 20. Strip control bytes from user/filesystem text before it reaches the screen.
 21. Keep `--no-icons`, `--no-color`, `NO_COLOR`, and `--ascii` complete interfaces, not degraded ones.
 22. Never let a failed user action escape a TUI loop; `set -e` turns that into a client exit.
-23. Never give `keepalive.service` a private mount namespace. `PrivateTmp`,
+23. Only a completed D-Bus call returning a different value, or local `/proc` evidence,
+    may mark a target UNAVAILABLE. Unreachable and timed-out calls are transient.
+24. Return daemon-side refusal reasons to the client; never replace them with a generic string.
+25. Periodic health may use the discovery snapshot; pre-send validation may not.
+26. Keep event logs bounded and collapse repeated gap events.
+27. Never return a value through stdout from a function that also writes to the terminal.
+28. Never give `keepalive.service` a private mount namespace. `PrivateTmp`,
     `PrivateDevices`, `ProtectSystem`, `ProtectHome`, `ProtectProc`, and the
     `ProtectKernel*` family all break `/proc/PID/cwd` and `/proc/PID/exe` resolution
     for processes the daemon does not own, silently reducing every session to
@@ -163,4 +169,7 @@ On the real KDE workstation:
 19. Press Right/Left arrow, a function key, and a keypad key in the manager; the client must ignore them and stay open.
 20. Open the wizard and cancel with `Esc` from step 1 and from a later step; the manager must return, not exit.
 21. Resize the terminal from very wide down to 52 columns in each view; no line may wrap and no border may overrun.
-22. Compare the default, `--no-icons`, `NO_COLOR=1`, and `--ascii` renderings of the manager and target detail.
+22. Compare the default, `--no-icons`, `NO_COLOR=1`, and `--ascii` renderings of the manager, target detail, and every wizard step.
+23. Create a keep-alive through the wizard using a **custom** message and a custom interval; both must be accepted and stored verbatim.
+24. Drive the full lifecycle from the CLI: `create`, `pause`, `resume`, `send`, `reset`, `mode`, `delete`, and `list --json`.
+25. Confirm `systemctl --user stop keepalive.service` logs no `Failed with result`.

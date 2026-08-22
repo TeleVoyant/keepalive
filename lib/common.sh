@@ -1,9 +1,17 @@
 #!/usr/bin/env bash
 # Common helpers shared by the Keep Alive service and TUI client.
 
-# Role: Print an error message to stderr without terminating the caller.
+# Role: Print an error to stderr and record it for the IPC responder.
+# Daemon-side validators are the only place that knows *why* an operation failed;
+# without this the reason reached the journal and clients got a fixed generic string.
 ka_error() {
+    KA_LAST_ERROR=$*
     printf 'keepalive: ERROR: %s\n' "$*" >&2
+}
+
+# Role: Clear the recorded failure reason before starting a new operation.
+ka_error_reset() {
+    KA_LAST_ERROR=''
 }
 
 # Role: Print a warning message to stderr without terminating the caller.
@@ -47,13 +55,28 @@ ka_now_epoch() {
     printf '%(%s)T' -1
 }
 
-# Role: Read integer monotonic seconds from procfs or an injectable test clock file.
+# Role: Read integer monotonic seconds into REPLY from procfs or an injectable clock.
+# Sets REPLY rather than printing: the service loop reads this several times a second,
+# and a command substitution here cost a fork on every iteration.
 ka_now_monotonic() {
     local source=${KEEPALIVE_MONOTONIC_FILE:-/proc/uptime} seconds='' _rest=''
+    REPLY=''
     [[ -r $source ]] || return 1
     read -r seconds _rest <"$source" || true
     [[ $seconds =~ ^[0-9]+([.][0-9]+)?$ ]] || return 1
-    printf '%s' "${seconds%%.*}"
+    REPLY=${seconds%%.*}
+}
+
+# Role: Read a millisecond wall timestamp into REPLY for sub-second work budgets.
+# /proc/uptime has one-second granularity, too coarse to bound a single discovery pass.
+ka_now_ms() {
+    local t=${EPOCHREALTIME:-}
+    if [[ -z $t ]]; then
+        REPLY=$(( ${EPOCHSECONDS:-0} * 1000 ))
+        return 0
+    fi
+    t=${t/[.,]/}
+    REPLY=$(( 10#${t%???} ))
 }
 
 # Role: Return a compact local timestamp suitable for per-target event history.
@@ -99,16 +122,62 @@ ka_format_duration() {
 }
 
 # Role: Write stdin to a file atomically by renaming a same-directory temporary file.
+# Private permissions come from the process umask, set once in ka_xdg_init, so this no
+# longer forks chmod; the directory check is a builtin test rather than an mkdir fork.
 ka_atomic_write() {
     local destination=$1
     local directory base tmp
     directory=${destination%/*}
     base=${destination##*/}
-    mkdir -p "$directory"
+    [[ -d $directory ]] || mkdir -p "$directory"
     tmp="$directory/.${base}.tmp.$$.$RANDOM"
     cat >"$tmp"
-    chmod 600 "$tmp" 2>/dev/null || true
     mv -f -- "$tmp" "$destination"
+}
+
+# Role: Atomically write a literal string without forking cat or a pipeline.
+# Scalar and checkpoint writes are the daemon's most frequent file operations; routing
+# them through a pipeline into cat cost several forks each.
+ka_atomic_write_value() {
+    local destination=$1 content=${2-} directory base tmp
+    directory=${destination%/*}
+    base=${destination##*/}
+    [[ -d $directory ]] || mkdir -p "$directory"
+    tmp="$directory/.${base}.tmp.$$.$RANDOM"
+    printf '%s' "$content" >"$tmp" || { rm -f -- "$tmp"; return 1; }
+    mv -f -- "$tmp" "$destination"
+}
+
+# Role: Replace a directory with a staged copy using renames, rolling back on failure.
+#
+# POSIX offers no atomic directory swap, so this cannot be a true transaction. What it
+# does give is a commit window of two renames instead of the whole copy: previously the
+# live directory was removed and then repopulated file by file, so a crash or I/O error
+# mid-copy left a partially written rotation in place. A failed second rename restores
+# the original. Any interruption between the two renames leaves the directory missing,
+# which the checkpoint loader already rejects and quarantines rather than using.
+ka_commit_staged_dir() {
+    local staged=$1 destination=$2 trash="${2}.trash.$$"
+    rm -rf -- "$trash"
+    if [[ -e $destination ]]; then
+        mv -- "$destination" "$trash" || { rm -rf -- "$staged"; return 1; }
+    fi
+    if ! mv -- "$staged" "$destination"; then
+        [[ -e $trash ]] && mv -- "$trash" "$destination"
+        rm -rf -- "$staged"
+        return 1
+    fi
+    rm -rf -- "$trash"
+    return 0
+}
+
+# Role: Remove staging and rollback directories abandoned by an interrupted write.
+ka_cleanup_staged_dirs() {
+    local root=$1
+    command -v find >/dev/null 2>&1 || return 0
+    find "$root" -maxdepth 3 -type d \( -name '*.staged.*' -o -name '*.trash.*' \) \
+        -exec rm -rf -- {} + 2>/dev/null || true
+    return 0
 }
 
 # Role: Read the first line of a file, returning a supplied default when absent.
@@ -128,20 +197,29 @@ ka_read_first_line() {
 # Role: Write one scalar value followed by a newline using atomic replacement.
 ka_write_scalar() {
     local path=$1 value=${2-}
-    printf '%s\n' "$value" | ka_atomic_write "$path"
+    ka_atomic_write_value "$path" "$value"$'\n'
 }
 
-# Role: Remove ANSI control characters from untrusted process labels before rendering.
+# Role: Escape one string for embedding in JSON output.
+ka_json_escape() {
+    local value=${1-}
+    value=${value//\\/\\\\}
+    value=${value//\"/\\\"}
+    value=${value//$'\n'/\\n}
+    value=${value//$'\r'/\\r}
+    value=${value//$'\t'/\\t}
+    value=${value//[[:cntrl:]]/}
+    printf '%s' "$value"
+}
+
+# Role: Remove every control character from untrusted process labels before rendering.
+# The previous version removed only a named handful, despite a comment claiming
+# otherwise; [[:cntrl:]] covers all of C0, DEL, and C1 in a UTF-8 locale.
 ka_strip_controls() {
     local value=${1-}
-    # Keep printable characters and common spaces; Bash pattern removes C0 controls.
-    value=${value//$'\e'/}
-    value=${value//$'\a'/}
-    value=${value//$'\b'/}
-    value=${value//$'\f'/}
-    value=${value//$'\v'/}
     value=${value//$'\r'/ }
     value=${value//$'\n'/ }
     value=${value//$'\t'/ }
+    value=${value//[[:cntrl:]]/}
     printf '%s' "$value"
 }

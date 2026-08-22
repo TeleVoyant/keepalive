@@ -85,6 +85,46 @@ FG_PID  AI_PID  AI_STARTTIME  FG_COMMAND
 String fields are converted to one line before output. Discovery is ephemeral;
 the `discovery/` runtime directory is created but currently not populated.
 
+## D-Bus transport
+
+Read-only session queries go through `dbus-send` when available, and `qdbus` otherwise.
+`ka_dbus_use_send` returns false whenever `KEEPALIVE_QDBUS` is set, which pins the qdbus
+path for the test mock and for operators who need the original transport. `dbus-send`
+replies are parsed by `ka_dbus_send_scalar`, which trims whitespace and strips the type
+token that `--print-reply=literal` still emits for non-string values. Service
+enumeration uses `org.freedesktop.DBus.ListNames`; session enumeration introspects
+`/Sessions` and reads the child node names.
+
+Every bounded call resolves its deadline through `ka_dbus_timeout_resolve`, which sets a
+variable rather than being read through a command substitution.
+
+## Validation classification
+
+| Return | Meaning | Sticky? |
+|---:|---|---|
+| `10` / `11` | A call completed and returned a different UUID or terminal PID | yes |
+| `12` / `13` / `15` | Local `/proc` evidence: process gone, PID reused, ancestry lost | yes |
+| `14` | Foreground PID unavailable or non-numeric | yes |
+| `20` | Bounded call timed out | no, debounced |
+| `21` | Call could not be made at all | no, debounced |
+
+Transient results increment `KA_T_STRIKES` and only become sticky `UNAVAILABLE` after
+`KEEPALIVE_VALIDATION_STRIKES` consecutive failures. Strikes live in memory only and
+reset on any success, so a checkpoint never carries a grudge across a restart.
+
+Periodic health prefers `ka_state_validate_from_discovery`, which re-derives the same
+checks from the discovery snapshot and costs no D-Bus call. It returns 1 for "no usable
+snapshot", the caller's signal to fall back to a live call. Pre-send validation always
+uses the live path.
+
+## Adaptive discovery cadence
+
+Discovery exists to populate `AVAILABLE` rows for clients. `ka_service_discovery_interval`
+sets `KA_DISCOVERY_INTERVAL` once a second, fork-free: the fast interval whenever any
+target is monitored or `clients.seen` was touched within `KEEPALIVE_CLIENT_PRESENCE_TTL`,
+and `KEEPALIVE_IDLE_DISCOVERY_INTERVAL` otherwise. The TUI refreshes `clients.seen` once
+a second through a builtin redirect.
+
 ## Target identity contract
 
 A monitored target stores both identity and current address:
@@ -109,13 +149,14 @@ dynamic condition: current foreground PID descends from the AI PID
 | `14` | Current foreground PID is unavailable/non-numeric. |
 | `15` | Foreground PID no longer descends from remembered AI PID. |
 | `20` | A bounded Konsole D-Bus validation call timed out. |
+| `21` | A Konsole D-Bus call could not be made at all. |
 
 Health validation runs every two seconds by default, and the exact same validation
 runs immediately before every send. Definite identity/process failures transition
 an `ACTIVE` or `PAUSED` record to sticky `UNAVAILABLE`, save it, log the reason,
-and optionally notify. Return 20 is deliberately transient: health/recovery retry
-later, while a due/manual send fails and resets only its consumed timer. Discovery
-never reverses a definite unavailable state.
+and optionally notify. Returns 20 and 21 are deliberately transient and debounced;
+see "Validation classification" above. Discovery never reverses a definite
+unavailable state.
 
 ## In-memory collections
 

@@ -534,7 +534,13 @@ ka_tui_main() {
         # The header carries a clock, so redraw at 1 Hz even when nothing else moved.
         # Everything else is event-driven: an idle manager no longer repaints 4x a second.
         printf -v tick '%(%H:%M:%S)T' -1
-        [[ $tick == "$last_tick" ]] || { dirty=1; last_tick=$tick; }
+        if [[ $tick != "$last_tick" ]]; then
+            dirty=1
+            last_tick=$tick
+            # Tell the daemon a client is watching so it keeps discovery responsive.
+            # A redirect from printf is a builtin write, so this costs no fork.
+            printf '%(%s)T\n' -1 >"$KA_CLIENT_PRESENCE_FILE" 2>/dev/null || true
+        fi
         [[ -n ${KA_TUI_TOAST:-} ]] && dirty=1
         ((${KA_TUI_RESIZED:-0} == 1)) && dirty=1
         if ((dirty == 1)); then

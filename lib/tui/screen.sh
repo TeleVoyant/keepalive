@@ -41,10 +41,12 @@ ka_tui_glyphs_init() {
         KA_G_TL='+' KA_G_TR='+' KA_G_BL='+' KA_G_BR='+'
         KA_G_ML='+' KA_G_MR='+' KA_G_H='-' KA_G_V='|'
         KA_G_SEL='>' KA_G_CUR='->' KA_G_NONE='-' KA_G_ELL='...'
+        KA_G_DOT_ON='*' KA_G_DOT_OFF='.'
     else
         KA_G_TL='╭' KA_G_TR='╮' KA_G_BL='╰' KA_G_BR='╯'
         KA_G_ML='├' KA_G_MR='┤' KA_G_H='─' KA_G_V='│'
         KA_G_SEL='❯' KA_G_CUR='→' KA_G_NONE='—' KA_G_ELL='…'
+        KA_G_DOT_ON='●' KA_G_DOT_OFF='○'
     fi
     # Powerline wedges are Nerd Font private-use glyphs, so they follow icon mode, not
     # ASCII mode: --no-icons keeps colored segments but drops the wedge, which still
@@ -444,9 +446,22 @@ ka_tui_split_tsv() {
     KA_TSV+=("$line")
 }
 
-# Role: Temporarily show the cursor and read one editable line inside a guided TUI form.
+# Role: Show the cursor and read one edited line, returning it in KA_PROMPT_VALUE.
+#
+# The prompt, the cursor-visibility escapes, and the echo change must reach the
+# terminal, not the caller. Callers used to capture this function's stdout with
+# $(...), which folded the prompt text and every escape sequence into the returned
+# value: typing "hello world" yielded
+#   $'\E[?12l\E[?25h\nNew message\E(B\E[m: \E[?25lhello world'
+# The embedded newline then failed daemon validation as a multi-line message, so
+# every custom message, custom interval, and secondary prompt was rejected and only
+# the untouched profile defaults could be saved.
+#
+# Returning through a global keeps the prompt on screen, keeps stty/tput acting on
+# the real shell rather than a subshell, and hands back exactly what was typed.
 ka_tui_prompt_line() {
     local prompt=$1 default=${2-} value
+    KA_PROMPT_VALUE=''
     stty echo 2>/dev/null || true
     tput cnorm 2>/dev/null || printf '\033[?25h'
     printf '\n%s%s%s' "$KA_BOLD" "$prompt" "$KA_RESET"
@@ -457,7 +472,9 @@ ka_tui_prompt_line() {
     stty -echo 2>/dev/null || true
     value=${value:-$default}
     # Typed input is stored and later replayed into a terminal; keep it control-free.
-    ka_tui_sanitize "$value"
+    value=${value//$'\t'/ }
+    value=${value//[[:cntrl:]]/}
+    KA_PROMPT_VALUE=$value
 }
 
 # Role: Render a short transient action result at the bottom of the next screen frame.

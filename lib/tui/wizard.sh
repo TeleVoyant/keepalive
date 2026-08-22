@@ -10,20 +10,67 @@ ka_wizard_cleanup_stale() {
         -exec rm -rf -- {} + 2>/dev/null || true
 }
 
-# Role: Render the shared wizard frame header for one numbered step.
-ka_wizard_step_header() {
-    local icon=$1 step=$2 title=$3
-    ka_tui_box_top "$icon" "Create/Configure Keep Alive - Step $step of 6"
-    printf '%s %s\n%s\n' "$KA_G_V" "$title" "$KA_G_V"
+# Role: Render a six-step progress indicator with completed, current, and pending marks.
+ka_wizard_progress() {
+    local step=$1 i out=''
+    for i in 1 2 3 4 5 6; do
+        if ((i < step)); then out+="${KA_GREEN}${KA_G_DOT_ON}${KA_RESET}"
+        elif ((i == step)); then out+="${KA_CYAN}${KA_BOLD}${KA_G_DOT_ON}${KA_RESET}"
+        else out+="${KA_DIM}${KA_G_DOT_OFF}${KA_RESET}"
+        fi
+        ((i < 6)) && out+=' '
+    done
+    printf '%s' "$out"
+}
+
+# Role: Render the shared wizard header, as a colored segment bar where the terminal
+# allows it and as the plain box otherwise.
+# Mirrors the manager and detail headers so every screen shares one visual language,
+# while --no-color, NO_COLOR, and a too-narrow terminal still get a complete header.
+ka_wizard_header() {
+    local icon=$1 step=$2 title=$3 subject=${KA_WIZARD_SUBJECT-} width
+    width=$(ka_tui_field_width 46 10)
+    if ka_tui_bar_supported; then
+        ka_tui_bar_begin
+        ka_tui_bar_add 4 7 "$(ka_icon_label "$icon" "${KA_WIZARD_ACTION:-Configure}")" 1
+        ka_tui_bar_add 5 7 "step $step/6"
+        ka_tui_bar_add 0 7 "$title"
+        [[ -n $subject ]] && ka_tui_bar_add 6 0 "$(ka_tui_truncate "$subject" "$width")"
+        ka_tui_bar_end
+        if ka_tui_bar_flush; then
+            printf '%s  %s\n%s\n' "$KA_G_V" "$(ka_wizard_progress "$step")" "$KA_G_V"
+            return 0
+        fi
+    fi
+    ka_tui_box_top "$icon" "${KA_WIZARD_ACTION:-Configure} Keep Alive - Step $step of 6"
+    if [[ -n $subject ]]; then
+        printf '%s %s  %s%s%s\n' "$KA_G_V" "$title" "$KA_DIM" "$(ka_tui_truncate "$subject" "$width")" "$KA_RESET"
+    else
+        printf '%s %s\n' "$KA_G_V" "$title"
+    fi
+    printf '%s  %s\n%s\n' "$KA_G_V" "$(ka_wizard_progress "$step")" "$KA_G_V"
+}
+
+# Role: Draw the key-hint footer, choosing a compact form on narrow terminals.
+# These were fixed-width literals; step one's was 80 columns and wrapped on anything
+# smaller, which is the same defect already fixed in the manager and detail footers.
+ka_wizard_hint() {
+    local long=$1 short=${2-} text
+    text=$long
+    [[ -n $short ]] && ((${KA_TUI_COLS:-80} < ${#long} + 4)) && text=$short
+    printf '%s\n%s  %s\n' "$KA_G_V" "$KA_G_V" "$(ka_tui_truncate "$text" "$(ka_tui_field_width 4)")"
 }
 
 # Role: Draw a selectable wizard option line with a consistent highlight marker.
 ka_wizard_option() {
-    local active=$1 number=$2 label=$3
+    local active=$1 number=$2 label=$3 width
+    width=$(ka_tui_field_width 12 10)
+    label=$(ka_tui_truncate "$label" "$width")
     if [[ $active == 1 ]]; then
-        printf '%s  %s%s %s  %s%s\n' "$KA_G_V" "$KA_BOLD" "$KA_G_SEL" "$number" "$label" "$KA_RESET"
+        printf '%s  %s%s%s %s%s  %s%s\n' "$KA_G_V" "$KA_CYAN" "$KA_BOLD" "$KA_G_SEL" \
+            "$number" "$KA_RESET" "${KA_BOLD}${label}" "$KA_RESET"
     else
-        printf '%s    %s  %s\n' "$KA_G_V" "$number" "$label"
+        printf '%s    %s%s%s  %s\n' "$KA_G_V" "$KA_DIM" "$number" "$KA_RESET" "$label"
     fi
 }
 
@@ -70,12 +117,12 @@ ka_wizard_step_messages() {
         ka_tui_frame_begin
         if ka_wizard_too_small; then ka_tui_read_key 60 || continue; [[ $KA_KEY == ESC ]] && return 1; continue; fi
         text_w=$(ka_tui_field_width 12 12)
-        ka_tui_box_top "$KA_I_MESSAGE" "Create/Configure - $(ka_tui_truncate "$type / $name" 30)"
-        printf '%s Step 1 of 6 - Main message rotation\n%s\n' "$KA_G_V" "$KA_G_V"
+        ka_wizard_header "$KA_I_MESSAGE" 1 'Main message rotation'
         for i in "${!KA_WIZ_MESSAGES[@]}"; do
             ka_wizard_option "$((i == selected))" "$((i + 1))" "$(ka_tui_truncate "${KA_WIZ_MESSAGES[$i]}" "$text_w")"
         done
-        printf '%s\n%s  a add    e edit    x remove    up/down select    Enter continue    Esc cancel\n' "$KA_G_V" "$KA_G_V"
+        ka_wizard_hint 'a add    e edit    x remove    up/down select    Enter continue    Esc cancel' \
+            'a add  e edit  x remove  Enter next  Esc cancel'
         ka_tui_box_bottom
         ka_tui_frame_end
         ka_tui_read_key 60 || continue
@@ -84,12 +131,12 @@ ka_wizard_step_messages() {
             UP|k) ((selected > 0)) && selected=$((selected - 1)) ;;
             DOWN|j) ((selected + 1 < ${#KA_WIZ_MESSAGES[@]})) && selected=$((selected + 1)) ;;
             a|A)
-                value=$(ka_tui_prompt_line 'New message')
+                ka_tui_prompt_line 'New message'; value=$KA_PROMPT_VALUE
                 [[ -n $value ]] && KA_WIZ_MESSAGES+=("$value")
                 selected=$((${#KA_WIZ_MESSAGES[@]} - 1))
                 ;;
             e|E)
-                value=$(ka_tui_prompt_line 'Edit message' "${KA_WIZ_MESSAGES[$selected]}")
+                ka_tui_prompt_line 'Edit message' "${KA_WIZ_MESSAGES[$selected]}"; value=$KA_PROMPT_VALUE
                 [[ -n $value ]] && KA_WIZ_MESSAGES[$selected]=$value
                 ;;
             x|X)
@@ -118,12 +165,13 @@ ka_wizard_step_main_interval() {
     while true; do
         ka_tui_frame_begin
         if ka_wizard_too_small; then ka_tui_read_key 60 || continue; [[ $KA_KEY == ESC ]] && return 2; continue; fi
-        ka_wizard_step_header "$KA_I_TIMER" 2 'Main interval'
+        ka_wizard_header "$KA_I_TIMER" 2 'Main interval'
         local i
         for i in 0 1 2 3; do
             ka_wizard_option "$((i == selected))" "$((i + 1))" "${labels[$i]}"
         done
-        printf '%s\n%s  up/down select    1-4 direct    Enter continue    Esc back\n' "$KA_G_V" "$KA_G_V"
+        ka_wizard_hint 'up/down select    1-4 direct    Enter continue    Esc back' \
+            'up/down  1-4  Enter next  Esc back'
         ka_tui_box_bottom
         ka_tui_frame_end
         ka_tui_read_key 60 || continue
@@ -138,7 +186,7 @@ ka_wizard_step_main_interval() {
                     1) value=900 ;;
                     2) value=300 ;;
                     3)
-                        value=$(ka_tui_prompt_line 'Custom interval in minutes' "$((current / 60))")
+                        ka_tui_prompt_line 'Custom interval in minutes' "$((current / 60))"; value=$KA_PROMPT_VALUE
                         ka_is_positive_int "$value" || { ka_tui_toast 'Enter a positive whole number of minutes.'; continue; }
                         value=$((value * 60))
                         ;;
@@ -162,14 +210,14 @@ ka_wizard_step_secondary() {
         ka_tui_frame_begin
         if ka_wizard_too_small; then ka_tui_read_key 60 || continue; [[ $KA_KEY == ESC ]] && return 2; continue; fi
         text_w=$(ka_tui_field_width 14 12)
-        ka_wizard_step_header "$KA_I_SECONDARY" 3 'Secondary prompt'
+        ka_wizard_header "$KA_I_SECONDARY" 3 'Secondary prompt'
         ka_wizard_option "$((choice == 0))" '1' 'Disabled'
         ka_wizard_option "$((choice == 1))" '2' 'Enabled'
         if ((choice == 1)); then
             printf '%s\n%s Message : %s\n' "$KA_G_V" "$KA_G_V" "$(ka_tui_truncate "$message" "$text_w")"
             printf '%s Interval: %s\n' "$KA_G_V" "$(ka_format_duration "$interval")"
         fi
-        printf '%s\n%s  up/down toggle    Enter continue    Esc back\n' "$KA_G_V" "$KA_G_V"
+        ka_wizard_hint 'up/down toggle    Enter continue    Esc back' 'up/down  Enter next  Esc back'
         ka_tui_box_bottom
         ka_tui_frame_end
         ka_tui_read_key 60 || continue
@@ -180,10 +228,10 @@ ka_wizard_step_secondary() {
             2) choice=1 ;;
             ENTER)
                 if ((choice == 1)); then
-                    value=$(ka_tui_prompt_line 'Secondary message' "${message:-Continue if there is unfinished work.}")
+                    ka_tui_prompt_line 'Secondary message' "${message:-Continue if there is unfinished work.}"; value=$KA_PROMPT_VALUE
                     [[ -n $value ]] || continue
                     message=$value
-                    value=$(ka_tui_prompt_line 'Secondary interval in minutes' "$((interval / 60))")
+                    ka_tui_prompt_line 'Secondary interval in minutes' "$((interval / 60))"; value=$KA_PROMPT_VALUE
                     ka_is_positive_int "$value" || { ka_tui_toast 'Enter a positive whole number of minutes.'; continue; }
                     interval=$((value * 60))
                 fi
@@ -204,11 +252,11 @@ ka_wizard_step_notifications() {
     while true; do
         ka_tui_frame_begin
         if ka_wizard_too_small; then ka_tui_read_key 60 || continue; [[ $KA_KEY == ESC ]] && return 2; continue; fi
-        ka_wizard_step_header "$KA_I_NOTIFY" 4 'Desktop notifications'
+        ka_wizard_header "$KA_I_NOTIFY" 4 'Desktop notifications'
         ka_wizard_option "$((choice == 0))" '1' 'OFF'
         ka_wizard_option "$((choice == 1))" '2' 'ON'
         printf '%s\n%s Successful sends and target-loss events follow this setting.\n' "$KA_G_V" "$KA_G_V"
-        printf '%s\n%s  up/down toggle    Enter continue    Esc back\n' "$KA_G_V" "$KA_G_V"
+        ka_wizard_hint 'up/down toggle    Enter continue    Esc back' 'up/down  Enter next  Esc back'
         ka_tui_box_bottom
         ka_tui_frame_end
         ka_tui_read_key 60 || continue
@@ -231,11 +279,11 @@ ka_wizard_step_delivery() {
     while true; do
         ka_tui_frame_begin
         if ka_wizard_too_small; then ka_tui_read_key 60 || continue; [[ $KA_KEY == ESC ]] && return 2; continue; fi
-        ka_wizard_step_header "$KA_I_ENTER" 5 'Delivery mode'
+        ka_wizard_header "$KA_I_ENTER" 5 'Delivery mode'
         ka_wizard_option "$((choice == 0))" '1' 'MESSAGE + ENTER'
         ka_wizard_option "$((choice == 1))" '2' 'ENTER ONLY'
         printf '%s\n%s Pressing e later toggles this mode for the selected target.\n' "$KA_G_V" "$KA_G_V"
-        printf '%s\n%s  up/down toggle    Enter continue    Esc back\n' "$KA_G_V" "$KA_G_V"
+        ka_wizard_hint 'up/down toggle    Enter continue    Esc back' 'up/down  Enter next  Esc back'
         ka_tui_box_bottom
         ka_tui_frame_end
         ka_tui_read_key 60 || continue
@@ -265,7 +313,7 @@ ka_wizard_step_review() {
         ka_tui_frame_begin
         if ka_wizard_too_small; then ka_tui_read_key 60 || continue; [[ $KA_KEY == ESC ]] && return 2; continue; fi
         text_w=$(ka_tui_field_width 24 12)
-        ka_wizard_step_header "$KA_I_CONFIG" 6 "Review - $(ka_tui_truncate "$type / $name" 30)"
+        ka_wizard_header "$KA_I_CONFIG" 6 'Review and save'
         printf '%s Main messages      %d-message rotation\n' "$KA_G_V" "$count"
         printf '%s Main interval      %s\n' "$KA_G_V" "$(ka_format_duration "$(ka_read_first_line "$config_dir/main_interval")")"
         if [[ $secondary == 1 ]]; then
@@ -279,7 +327,7 @@ ka_wizard_step_review() {
         printf '%s Delivery           %s\n' "$KA_G_V" "$(ka_read_first_line "$config_dir/delivery_mode")"
         printf '%s\n%s Saving updates this target and the one global profile only.\n' "$KA_G_V" "$KA_G_V"
         printf '%s Existing keep-alives are not changed.\n' "$KA_G_V"
-        printf '%s\n%s  Enter save      Esc back\n' "$KA_G_V" "$KA_G_V"
+        ka_wizard_hint 'Enter save      Esc back'
         ka_tui_box_bottom
         ka_tui_frame_end
         ka_tui_read_key 60 || continue
@@ -291,6 +339,8 @@ ka_wizard_step_review() {
 # Role: Run the six-step guided wizard and submit CREATE/CONFIGURE atomically to the daemon.
 ka_tui_run_wizard() {
     local uuid=$1 status=$2 type=$3 name=$4 tmp step=1 rc id req response command
+    KA_WIZARD_SUBJECT="$type / $name"
+    [[ $status == AVAILABLE ]] && KA_WIZARD_ACTION=Create || KA_WIZARD_ACTION=Configure
     tmp=$(mktemp -d "$KA_RUNTIME_DIR/wizard.XXXXXX") || return 1
     # Publish the scratch path so ka_tui_leave removes it on Ctrl-C, SIGTERM, or exit.
     KA_TUI_SCRATCH=$tmp

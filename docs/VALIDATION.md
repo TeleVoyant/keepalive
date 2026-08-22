@@ -11,7 +11,7 @@ The release candidate passed:
 Bash syntax:                 PASS
 Function-role comment lint:  PASS
 Dependency-free test files:  13 / 13 PASS
-Assertions:                  184 / 184 PASS
+Assertions:                  213 / 213 PASS
 systemd-analyze verify:      PASS
 Installer layout simulation: PASS (non-root + mocked systemctl)
 Daemon/client integration:   PASS (real Bash processes/FIFO + mocked qdbus)
@@ -63,6 +63,13 @@ Run the same aggregate command with:
 - A key typed immediately after `Esc` is preserved rather than swallowed.
 - A cancelled wizard or a rejected daemon action returns to the previous screen instead of terminating the client.
 - Client scratch directories and index sort files do not survive an interrupted TUI.
+- Wizard input is returned out of band, so custom messages and intervals are stored verbatim instead of being contaminated by prompt text and cursor escapes.
+- Wizard steps render the shared colored segment header with step progress, degrading to the boxed header without color and to a 7-bit frame under `--ascii`.
+- Daemon refusals reach the client with their specific reason, on both the CLI and the TUI.
+- A D-Bus call that could not be made is transient and debounced; only a completed call returning a different value, or local `/proc` evidence, marks a target UNAVAILABLE.
+- Periodic health validation reuses the discovery snapshot and issues no D-Bus call for an already-discovered target, while pre-send validation stays live.
+- The public CLI drives the whole lifecycle: create, pause, idempotent pause, resume, delete, and `list --json` validated by a real JSON parser.
+- Event logs are trimmed to a retention budget and repeated scheduler-gap events collapse to one entry per episode.
 - User installer places source, symlink, and systemd units correctly and enables the socket entrypoint.
 - `keepalive.socket` and `keepalive.service` pass `systemd-analyze verify`.
 

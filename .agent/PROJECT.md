@@ -35,7 +35,13 @@ The supported public commands are:
 
 ```text
 keepalive                                  TUI
-keepalive list                             plain session table
+keepalive list [--json]                    plain session table or machine-readable rows
+keepalive create UUID                      create from the saved profile, no wizard
+keepalive delete UUID                      remove one keep-alive and its history
+keepalive pause UUID | resume UUID         idempotent freeze/resume
+keepalive send UUID [secondary]            immediate delivery
+keepalive reset UUID                       reset the main countdown
+keepalive mode UUID                        toggle delivery mode
 keepalive status                           daemon ping
 keepalive refresh                          immediate discovery/validation
 keepalive profile                          print persistent defaults
@@ -189,7 +195,14 @@ persistent config directory.
 | `XDG_RUNTIME_DIR` | Login-scoped runtime base | `/tmp/keepalive-$UID` fallback |
 | `XDG_STATE_HOME` | Resolved but unused | `$HOME/.local/state` |
 | `NO_COLOR` | Disable current client's colors when non-empty | unset |
-| `KEEPALIVE_QDBUS` | Explicit executable qdbus mock/override | auto-detect |
+| `KEEPALIVE_QDBUS` | Explicit qdbus override; also pins the qdbus transport, which is how tests inject their mock | auto-detect |
+| `KEEPALIVE_DBUS_SEND` | Explicit dbus-send override | auto-detect |
+| `KEEPALIVE_IDLE_DISCOVERY_INTERVAL` | Discovery cadence with nothing monitored and no client watching | `30` |
+| `KEEPALIVE_CLIENT_PRESENCE_TTL` | How long a client heartbeat keeps discovery fast | `20` |
+| `KEEPALIVE_STATUS_INTERVAL` | service.state write cadence (diagnostics only) | `15` |
+| `KEEPALIVE_VALIDATION_STRIKES` | Consecutive transient failures before a target is given up on | `5` |
+| `KEEPALIVE_LOG_MAX_LINES` | Retained event-log lines per target | `2000` |
+| `KEEPALIVE_LOG_CHECK_EVERY` | Events between log-trim checks | `200` |
 | `KEEPALIVE_QDBUS_TIMEOUT` | Per-qdbus-call deadline, positive integer seconds | `2` |
 | `KEEPALIVE_NOTIFY_SEND` | Explicit executable notification helper override | `notify-send` |
 | `KEEPALIVE_NOTIFY_TIMEOUT` | Per-notification deadline, positive integer seconds | `2` |
@@ -253,3 +266,11 @@ name/pattern without adding another order slot.
     second), not on every key-poll cycle.
 22. User-facing text is stripped of control bytes before rendering.
 23. A failed user action never escapes a TUI loop; under `set -e` that would exit the client.
+24. Read-only D-Bus calls prefer `dbus-send`; `qdbus` remains the fallback and is pinned
+    whenever `KEEPALIVE_QDBUS` is set.
+25. Only a completed call that returned a different value, or a local `/proc` check,
+    proves identity loss. Unreachable and timed-out calls are transient and debounced.
+26. Daemon-side refusals carry their reason to the client; never replace it with a
+    generic string.
+27. Periodic health may use the discovery snapshot; pre-send validation may not.
+28. Event logs are bounded, and repeated gap events are collapsed per episode.

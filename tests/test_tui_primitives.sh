@@ -136,4 +136,24 @@ assert_eq 'ESC q'   "$(decode_keys '\033q')"    'Escape then a fast keystroke pr
 assert_eq 'ESC ESC' "$(decode_keys '\033\033')" 'two fast Escapes are both delivered'
 assert_eq 'UP DOWN' "$(decode_keys '\033[A\033[B')" 'consecutive sequences decode independently'
 
+# Prompt input must not travel through stdout. Callers used to capture this function's
+# output with $(...), which folded the prompt text and cursor escapes into the value;
+# the embedded newline then failed daemon validation, so every custom message and
+# interval was rejected and only untouched profile defaults could be saved.
+# Role: Run one prompt with scripted input, discarding its on-screen output.
+prompt_with() {
+    local input=$1 default=${2-}
+    ka_tui_prompt_line 'New message' "$default" <<<"$input" >/dev/null 2>&1
+    printf '%s' "$KA_PROMPT_VALUE"
+}
+
+assert_eq 'hello world' "$(prompt_with 'hello world')" 'typed text is returned verbatim, free of prompt output'
+assert_eq 'ping'        "$(prompt_with '' 'ping')"     'empty input falls back to the supplied default'
+assert_eq ''            "$(prompt_with '')"            'empty input with no default returns nothing'
+assert_eq 'a b'         "$(prompt_with $'a\tb')"       'tabs in typed input become spaces'
+assert_eq 'clean'       "$(prompt_with $'cl\x01ean')"  'control bytes are stripped from typed input'
+multiline_probe=$(prompt_with 'hello world')
+assert_eq "$multiline_probe" "${multiline_probe//$'\n'/}" 'returned value never contains a newline'
+assert_eq "$multiline_probe" "${multiline_probe//$'\033'/}" 'returned value never contains an escape byte' 
+
 test_finish

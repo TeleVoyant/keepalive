@@ -2,6 +2,33 @@
 # Per-target runtime event logging. Logs intentionally live under XDG_RUNTIME_DIR
 # and therefore do not survive a full logout/reboot.
 
+# Per-UUID write counters driving periodic trims. Runtime-only, never persisted.
+declare -gA KA_LOG_WRITES=()
+
+# Role: Return the retained event-log line budget for one target.
+ka_log_max_lines() {
+    local value=${KEEPALIVE_LOG_MAX_LINES:-2000}
+    ka_is_positive_int "$value" || value=2000
+    printf '%s' "$value"
+}
+
+# Role: Trim one runtime event log to its retention budget.
+# Logs are append-only and the TUI loads a whole file into memory, so an unbounded
+# history is a client hang as well as disk use.
+ka_log_trim() {
+    local path=$1 max tmp
+    [[ -f $path ]] || return 0
+    max=$(ka_log_max_lines)
+    tmp="$path.trim.$$"
+    if tail -n "$max" -- "$path" >"$tmp" 2>/dev/null; then
+        mv -f -- "$tmp" "$path"
+        chmod 600 "$path" 2>/dev/null || true
+    else
+        rm -f -- "$tmp"
+    fi
+    return 0
+}
+
 # Role: Return the runtime event-log path for a Konsole session UUID.
 ka_log_path() {
     local uuid=$1
@@ -17,12 +44,21 @@ ka_log_event() {
     printf '%s\t%s\t%s\t%s\n' "$(ka_now_hms)" "$(ka_single_line "$event")" \
         "$(ka_single_line "$detail")" "$(ka_single_line "$result")" >>"$path"
     chmod 600 "$path" 2>/dev/null || true
+    local writes=$(( ${KA_LOG_WRITES[$uuid]:-0} + 1 ))
+    KA_LOG_WRITES[$uuid]=$writes
+    # Checking every write would fork `tail` per event; amortize it instead.
+    if ((writes % ${KEEPALIVE_LOG_CHECK_EVERY:-200} == 0)); then
+        ka_log_trim "$path"
+    fi
+    return 0
 }
 
 # Role: Delete a selected target's runtime history when the keep-alive is deleted.
 ka_log_delete() {
     local uuid=$1
     rm -f -- "$(ka_log_path "$uuid")"
+    unset 'KA_LOG_WRITES[$uuid]'
+    return 0
 }
 
 # Role: Print the most recent N target events in chronological order for detail views.

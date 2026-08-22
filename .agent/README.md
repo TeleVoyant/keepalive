@@ -28,6 +28,11 @@ maintainer or coding agent needs in order to continue safely.
      width-exact frames, safe truncation, control-byte stripping, complete
      `--ascii`, colored segment headers with defined fallbacks, change-driven
      repaint, and no leaked client scratch files.
+  4. a backend pass: wizard prompt input fixed (custom messages and intervals were
+     silently rejected), refusal reasons propagated to clients, transient D-Bus
+     failures debounced instead of destroying targets, bounded event logs, a clean
+     stop no longer logged as a failure, daemon CPU cut roughly fourfold, and a
+     scriptable CLI with `--json`.
   See [RISKS.md](RISKS.md) for the evidence behind each.
 - Working tree before this directory was added: clean and aligned with
   `origin/master`

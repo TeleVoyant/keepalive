@@ -30,6 +30,7 @@ ka_scheduler_send_main() {
         validation_rc=$?
         if ((validation_rc == 2)); then
             detail=${KA_SCHEDULER_VALIDATION_REASON:-'Transient target validation failure'}
+            KA_LAST_ERROR=$detail
             ka_log_event "$uuid" MAIN "$detail" "$([[ $origin == MANUAL ]] && printf 'FAILED · manual' || printf FAILED)"
             ka_notify_send_failed "${KA_T_NOTIFY[$uuid]}" "${KA_T_NAME[$uuid]}" "$detail"
             KA_T_MAIN_REMAIN[$uuid]=${KA_T_MAIN_INTERVAL[$uuid]}
@@ -44,13 +45,18 @@ ka_scheduler_send_main() {
     ((index >= 0 && index < count)) || index=0
     message=$(ka_state_message_at "$uuid" "$index")
 
+    local submit_only=${KA_T_PENDING_SUBMIT[$uuid]:-0}
     if [[ ${KA_T_MODE[$uuid]} == ENTER_ONLY ]]; then
         detail='[ENTER]'
+        submit_only=0
+    elif ((submit_only == 1)); then
+        detail="[SUBMIT] $message"
     else
         detail=$message
     fi
 
-    if ka_konsole_deliver "${KA_T_SERVICE[$uuid]}" "${KA_T_PATH[$uuid]}" "${KA_T_MODE[$uuid]}" "$message"; then
+    if ka_konsole_deliver "${KA_T_SERVICE[$uuid]}" "${KA_T_PATH[$uuid]}" "${KA_T_MODE[$uuid]}" "$message" "$submit_only"; then
+        KA_T_PENDING_SUBMIT[$uuid]=0
         ka_log_event "$uuid" MAIN "$detail" "$([[ $origin == MANUAL ]] && printf 'SENT · manual' || printf SENT)"
         ka_notify_sent "${KA_T_NOTIFY[$uuid]}" "${KA_T_NAME[$uuid]}" "$detail"
         # ENTER_ONLY intentionally does not consume a queued message because no message was sent.
@@ -58,6 +64,14 @@ ka_scheduler_send_main() {
             KA_T_MAIN_INDEX[$uuid]=$(((index + 1) % count))
         fi
     else
+        local deliver_rc=$?
+        if ((deliver_rc == 3)); then
+            # The text is already on the target's input line; only the submit is owed.
+            KA_T_PENDING_SUBMIT[$uuid]=1
+            KA_LAST_ERROR='message delivered but submit failed; the next attempt will only submit'
+        else
+            KA_LAST_ERROR='Konsole rejected the main send (transport failure)'
+        fi
         ka_log_event "$uuid" MAIN "$detail" "$([[ $origin == MANUAL ]] && printf 'FAILED · manual' || printf FAILED)"
         ka_notify_send_failed "${KA_T_NOTIFY[$uuid]}" "${KA_T_NAME[$uuid]}" "$detail"
         delivery_failed=1
@@ -79,6 +93,7 @@ ka_scheduler_send_secondary() {
         validation_rc=$?
         if ((validation_rc == 2)); then
             detail=${KA_SCHEDULER_VALIDATION_REASON:-'Transient target validation failure'}
+            KA_LAST_ERROR=$detail
             ka_log_event "$uuid" SECONDARY "$detail" "$([[ $origin == MANUAL ]] && printf 'FAILED · manual' || printf FAILED)"
             ka_notify_send_failed "${KA_T_NOTIFY[$uuid]}" "${KA_T_NAME[$uuid]}" "$detail"
             KA_T_SECONDARY_REMAIN[$uuid]=${KA_T_SECONDARY_INTERVAL[$uuid]}
@@ -90,10 +105,18 @@ ka_scheduler_send_secondary() {
     message=${KA_T_SECONDARY_MESSAGE[$uuid]}
     if [[ ${KA_T_MODE[$uuid]} == ENTER_ONLY ]]; then detail='[ENTER]'; else detail=$message; fi
 
-    if ka_konsole_deliver "${KA_T_SERVICE[$uuid]}" "${KA_T_PATH[$uuid]}" "${KA_T_MODE[$uuid]}" "$message"; then
+    if ka_konsole_deliver "${KA_T_SERVICE[$uuid]}" "${KA_T_PATH[$uuid]}" "${KA_T_MODE[$uuid]}" "$message" "${KA_T_PENDING_SUBMIT[$uuid]:-0}"; then
+        KA_T_PENDING_SUBMIT[$uuid]=0
         ka_log_event "$uuid" SECONDARY "$detail" "$([[ $origin == MANUAL ]] && printf 'SENT · manual' || printf SENT)"
         ka_notify_sent "${KA_T_NOTIFY[$uuid]}" "${KA_T_NAME[$uuid]}" "$detail"
     else
+        local deliver_rc=$?
+        if ((deliver_rc == 3)); then
+            KA_T_PENDING_SUBMIT[$uuid]=1
+            KA_LAST_ERROR='message delivered but submit failed; the next attempt will only submit'
+        else
+            KA_LAST_ERROR='Konsole rejected the secondary send (transport failure)'
+        fi
         ka_log_event "$uuid" SECONDARY "$detail" "$([[ $origin == MANUAL ]] && printf 'FAILED · manual' || printf FAILED)"
         ka_notify_send_failed "${KA_T_NOTIFY[$uuid]}" "${KA_T_NAME[$uuid]}" "$detail"
         delivery_failed=1
@@ -108,6 +131,10 @@ ka_scheduler_send_secondary() {
 # Role: Preserve all countdowns when a large scheduler gap indicates suspend or process stall.
 ka_scheduler_preserve_gap() {
     local elapsed=$1 uuid
+    # One entry per contiguous gap episode. A stalled loop or a degraded bus would
+    # otherwise append a line per target on every iteration, for as long as it lasts.
+    ((${KA_SCHEDULER_GAP_ACTIVE:-0} == 0)) || return 0
+    KA_SCHEDULER_GAP_ACTIVE=1
     for uuid in "${KA_T_UUIDS[@]}"; do
         [[ ${KA_T_STATUS[$uuid]} == UNAVAILABLE ]] && continue
         ka_log_event "$uuid" TIMER "scheduler gap ${elapsed}s; countdown preserved" PRESERVED
@@ -136,6 +163,8 @@ ka_scheduler_tick() {
         return 0
     fi
 
+    # A tick inside the budget ends any gap episode.
+    KA_SCHEDULER_GAP_ACTIVE=0
     for uuid in "${KA_T_UUIDS[@]}"; do
         [[ ${KA_T_STATUS[$uuid]} == ACTIVE ]] || continue
         KA_T_MAIN_REMAIN[$uuid]=$((KA_T_MAIN_REMAIN[$uuid] - elapsed))

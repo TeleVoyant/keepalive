@@ -163,6 +163,24 @@ q / Esc        close only this TUI client
 
 Closing the UI never stops the service or timers.
 
+### Scripting
+
+Every operation the TUI performs is available from the command line, so keep-alives
+can be managed without a terminal UI:
+
+```bash
+keepalive list --json                  # machine-readable rows
+keepalive create <uuid>                # create from the saved profile
+keepalive pause <uuid> / resume <uuid> # idempotent
+keepalive send <uuid> [secondary]      # deliver immediately
+keepalive reset <uuid>                 # reset the main countdown
+keepalive mode <uuid>                  # toggle MESSAGE+ENTER / ENTER ONLY
+keepalive delete <uuid>
+```
+
+Refused operations return the daemon's specific reason rather than a generic
+failure, both on the CLI and in the TUI.
+
 Only a bare `Esc` means back/cancel. Arrow, function, keypad, and other escape
 sequences the client does not recognize are ignored rather than being treated as
 `Esc`, and a key typed immediately after `Esc` is preserved instead of being

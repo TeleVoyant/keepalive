@@ -22,7 +22,8 @@ assert_eq 'no-newline-value' "$(ka_read_first_line "$TEST_TMP/no-newline")" 'sca
 clock_file="$TEST_TMP/monotonic.clock"
 ka_write_scalar "$clock_file" '123.75 999.00'
 export KEEPALIVE_MONOTONIC_FILE=$clock_file
-assert_eq 123 "$(ka_now_monotonic)" 'injectable monotonic clock returns integer seconds'
+ka_now_monotonic
+assert_eq 123 "$REPLY" 'injectable monotonic clock returns integer seconds in REPLY'
 ka_write_scalar "$clock_file" 'not-a-clock'
 assert_false 'invalid injected monotonic clock is rejected' ka_now_monotonic
 unset KEEPALIVE_MONOTONIC_FILE

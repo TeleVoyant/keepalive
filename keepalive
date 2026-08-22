@@ -37,7 +37,13 @@ Keep Alive Manager
 
 Usage:
   keepalive [--no-icons] [--no-color] [--ascii]   Open attachable TUI
-  keepalive list                                  List discovered/managed AI sessions
+  keepalive list [--json]                         List discovered/managed AI sessions
+  keepalive create UUID                           Create a keep-alive using the saved profile
+  keepalive delete UUID                           Remove one keep-alive and its history
+  keepalive pause UUID | resume UUID              Freeze or resume one keep-alive
+  keepalive send UUID [secondary]                 Send a keep-alive immediately
+  keepalive reset UUID                            Reset the main countdown
+  keepalive mode UUID                             Toggle MESSAGE+ENTER / ENTER ONLY
   keepalive status                                Check user service availability
   keepalive refresh                               Force immediate Konsole discovery
   keepalive profile                               Show the single persistent default profile
@@ -87,6 +93,89 @@ ka_cli_list() {
         printf '%-3d %-16s %-24s %-13s %-10s %-10s\n' "$((i + 1))" "${KA_R_TYPE[$i]}" \
             "$(ka_tui_truncate "${KA_R_NAME[$i]}" 24)" "${KA_R_STATUS[$i]}" "$main" "$nudge"
     done
+}
+
+# Role: Emit the current index as JSON so scripts do not have to parse the text table.
+ka_cli_list_json() {
+    local i first=1
+    printf '[\n'
+    for i in "${!KA_R_UUID[@]}"; do
+        ((first == 1)) || printf ',\n'
+        first=0
+        printf '  {"uuid":"%s","type":"%s","name":"%s","directory":"%s","status":"%s",' \
+            "$(ka_json_escape "${KA_R_UUID[$i]}")" "$(ka_json_escape "${KA_R_TYPE[$i]}")" \
+            "$(ka_json_escape "${KA_R_NAME[$i]}")" "$(ka_json_escape "${KA_R_DIR[$i]}")" \
+            "$(ka_json_escape "${KA_R_STATUS[$i]}")"
+        printf '"main_remaining":%d,"main_interval":%d,' "${KA_R_MAIN_REMAIN[$i]:-0}" "${KA_R_MAIN_INTERVAL[$i]:-0}"
+        printf '"secondary_enabled":%d,"secondary_remaining":%d,"secondary_interval":%d,' \
+            "${KA_R_SEC_ENABLED[$i]:-0}" "${KA_R_SEC_REMAIN[$i]:-0}" "${KA_R_SEC_INTERVAL[$i]:-0}"
+        printf '"mode":"%s","notifications":%d,"last_seen":"%s","reason":"%s"}' \
+            "$(ka_json_escape "${KA_R_MODE[$i]}")" "${KA_R_NOTIFY[$i]:-0}" \
+            "$(ka_json_escape "${KA_R_LAST[$i]}")" "$(ka_json_escape "${KA_R_REASON[$i]}")"
+    done
+    ((first == 1)) || printf '\n'
+    printf ']\n'
+}
+
+# Role: Look up one session's current state in the published index.
+ka_cli_status_of() {
+    local uuid=$1 i
+    for i in "${!KA_R_UUID[@]}"; do
+        [[ ${KA_R_UUID[$i]} == "$uuid" ]] && { printf '%s' "${KA_R_STATUS[$i]}"; return 0; }
+    done
+    return 1
+}
+
+# Role: Submit one daemon operation from the CLI and report its response verbatim.
+# The daemon now returns the specific refusal reason, so scripts get an actionable
+# message rather than a fixed generic string.
+ka_cli_request() {
+    local command=$1 uuid=${2-} response
+    ka_cli_ensure_service || return 1
+    response=$(ka_ipc_call "$command" "$uuid") || true
+    printf '%s\n' "${response#*$'\t'}"
+    [[ $response == OK$'\t'* ]]
+}
+
+# Role: Create a keep-alive for one discovered session using the persistent profile.
+# The wizard was previously the only way to create one, which made the product
+# impossible to automate or to exercise end to end without driving a terminal UI.
+ka_cli_create() {
+    local uuid=$1 id req response
+    [[ -n $uuid ]] || { ka_error 'usage: keepalive create UUID'; return 2; }
+    ka_cli_ensure_service || return 1
+    ka_ipc_call REFRESH '' >/dev/null 2>&1 || true
+    ka_tui_load_index
+    local status
+    if status=$(ka_cli_status_of "$uuid"); then
+        [[ $status == AVAILABLE ]] || { ka_error "session already has a keep-alive (state: $status)"; return 1; }
+    else
+        ka_error 'no such discovered Konsole session'
+        return 1
+    fi
+    id=$(ka_ipc_new_request CREATE "$uuid") || return 1
+    req=$(ka_ipc_request_dir "$id")
+    mkdir -p "$req/config"
+    ka_profile_copy_to_request "$req/config"
+    ka_ipc_signal_request "$id" || { rm -rf -- "$req"; return 1; }
+    response=$(ka_ipc_wait_response "$id")
+    printf '%s\n' "${response#*$'\t'}"
+    [[ $response == OK$'\t'* ]]
+}
+
+# Role: Move one target into an explicit paused or resumed state, idempotently.
+ka_cli_set_paused() {
+    local uuid=$1 want=$2 status
+    [[ -n $uuid ]] || { ka_error "usage: keepalive ${want,,} UUID"; return 2; }
+    ka_cli_ensure_service || return 1
+    ka_ipc_call REFRESH '' >/dev/null 2>&1 || true
+    ka_tui_load_index
+    status=$(ka_cli_status_of "$uuid") || { ka_error 'no such keep-alive'; return 1; }
+    case $status in
+        "$want") printf 'already %s\n' "${want,,}"; return 0 ;;
+        ACTIVE|PAUSED) ka_cli_request TOGGLE_PAUSE "$uuid" ;;
+        *) ka_error "target is $status and cannot be paused or resumed"; return 1 ;;
+    esac
 }
 
 # Role: Run deterministic diagnostics for Bash, systemd-user, qdbus, Konsole, and notifications.
@@ -162,10 +251,12 @@ ka_cli_main() {
     KA_ICONS_ENABLED=1
     KA_COLOR_ENABLED=1
     KA_ASCII_MODE=0
+    KA_CLI_JSON=0
     [[ -n ${NO_COLOR:-} ]] && KA_COLOR_ENABLED=0
     local -a args=()
     while (($#)); do
         case $1 in
+            --json) KA_CLI_JSON=1 ;;
             --no-icons) KA_ICONS_ENABLED=0 ;;
             --no-color) KA_COLOR_ENABLED=0 ;;
             --ascii) KA_ASCII_MODE=1; KA_ICONS_ENABLED=0 ;;
@@ -179,7 +270,28 @@ ka_cli_main() {
 
     case ${args[0]-} in
         '') ka_tui_main ;;
-        list) ka_cli_list ;;
+        list)
+            if ((KA_CLI_JSON == 1)); then
+                ka_cli_ensure_service || return 1
+                ka_ipc_call REFRESH '' >/dev/null 2>&1 || true
+                ka_tui_load_index
+                ka_cli_list_json
+            else
+                ka_cli_list
+            fi
+            ;;
+        create) ka_cli_create "${args[1]-}" ;;
+        delete) [[ -n ${args[1]-} ]] || { ka_error 'usage: keepalive delete UUID'; return 2; }
+                ka_cli_request DELETE "${args[1]}" ;;
+        pause) ka_cli_set_paused "${args[1]-}" PAUSED ;;
+        resume) ka_cli_set_paused "${args[1]-}" ACTIVE ;;
+        send) [[ -n ${args[1]-} ]] || { ka_error 'usage: keepalive send UUID [secondary]'; return 2; }
+              if [[ ${args[2]-} == secondary ]]; then ka_cli_request SEND_SECONDARY "${args[1]}"
+              else ka_cli_request SEND_MAIN "${args[1]}"; fi ;;
+        reset) [[ -n ${args[1]-} ]] || { ka_error 'usage: keepalive reset UUID'; return 2; }
+               ka_cli_request RESET_MAIN "${args[1]}" ;;
+        mode) [[ -n ${args[1]-} ]] || { ka_error 'usage: keepalive mode UUID'; return 2; }
+              ka_cli_request TOGGLE_MODE "${args[1]}" ;;
         status) ka_cli_ensure_service && printf 'Keep Alive service: online\n' ;;
         refresh) ka_cli_ensure_service && ka_ipc_call REFRESH '' ;;
         profile) ka_profile_print ;;

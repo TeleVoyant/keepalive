@@ -49,7 +49,16 @@
 22. Keep every presentation tier complete: powerline, colored-segment, plain-box, and
     fully 7-bit `--ascii`.
 23. Prefer `REPLY`-setting helpers over command substitution in per-row render paths; a
-    fork costs about 0.5-1 ms here and rows call these several times each.
+    fork costs about 0.5-1 ms here and rows call these several times each. The same rule
+    applies to the daemon loop: an early adaptive-cadence attempt put a command
+    substitution in the loop condition and cost more than the polling it replaced.
+24. Never return a value through stdout from a function that also prints to the terminal.
+    `ka_tui_prompt_line` did, and every caller captured the prompt text along with the
+    typed value, which broke all custom wizard input.
+25. Keep `qdbus` working as a fallback transport. `KEEPALIVE_QDBUS` must continue to pin
+    it, because that is how the suite injects its mock.
+26. Benchmark with warm binaries and interleaved ordering. A cold cache made `dbus-send`
+    measure slower than `qdbus6` on the first run, which is the opposite of the truth.
 
 The module source order in `keepalive` matters because functions share global
 variables rather than namespaced objects. New modules should be sourced before
@@ -140,6 +149,24 @@ The same session then ran a full TUI overhaul. Validation for it:
   and human typing speeds after the Escape-pushback fix;
 - suite grew from 131 to 184 assertions across the same 13 files.
 
+A backend pass followed, driven by a fresh inspection of the non-TUI modules:
+
+- suite grew from 184 to 213 assertions across the same 13 files;
+- the wizard's custom-message path was fixed and verified end to end through a real
+  pseudo-terminal against the installed binary: typing a custom message produced
+  "Keep-alive created." and stored `custom keep-alive text` verbatim;
+- idle daemon CPU with no keep-alives and no client attached fell from 19.20% to
+  **4.77% of one core** at the same Konsole session count;
+- `ka_konsole_get` fell from 12.50 ms to 4.67 ms CPU per call (warmed, interleaved A/B);
+- a clean `systemctl --user stop` no longer logs `Failed with result 'exit-code'`,
+  confirmed against the live journal;
+- the public CLI lifecycle (create/pause/resume/delete/`--json`) is covered by the
+  cross-process integration test, which previously could not reach CREATE at all.
+
+Note for future measurement: the daemon is socket-activated, so after a session
+restart it is *not* running until a client touches the socket. `keepalive status` is
+enough to start it.
+
 Useful live probes for future work on this workstation:
 
 ```bash
@@ -175,7 +202,7 @@ systemctl --user restart keepalive.service
 | `test_common.sh` | Duration, safe IDs, literal metacharacters, no-newline scalar read, injectable monotonic clock. |
 | `test_classifier.sh` | Claude/Gemini/Aider signatures, shell negative, ancestry basics. |
 | `test_profile.sh` | Defaults, profile update, literal stored message, contiguous numbering. |
-| `test_state.sh` | Mutation-free malformed CREATE/CONFIGURE rejection, create, pause/resume, transient health timeout, unavailable, replacement UUID, cleanup. |
+| `test_state.sh` | Mutation-free malformed CREATE/CONFIGURE rejection, create, pause/resume, recorded refusal reasons, snapshot-backed health validation, transient-failure strike budget and recovery, unavailable, replacement UUID, cleanup. |
 | `test_scheduler.sh` | Main rotation, transport/validation timeout failures, enter-only preservation, timer independence, long/backward-gap preservation. |
 | `test_recovery.sh` | Valid same-login recovery with unchanged durations and transient validation deferral. |
 | `test_recovery_validation.sh` | Strict checkpoint validation, range/message/symlink rejection, quarantine reasons/log preservation. |
@@ -184,7 +211,7 @@ systemctl --user restart keepalive.service
 | `test_tui_primitives.sh` | ASCII progress/urgency, icon-free state, view-aware clear and resize sequences, width-exact frame rules, truncation safety and control stripping, non-collapsing TSV split, 7-bit glyph set, status cell width, segment-bar width/fallback, and key decoding (arrows, page/home/end, unrecognized sequences, Escape pushback). |
 | `test_function_comments.sh` | Adjacent `# Role:` convention. |
 | `test_install_layout.sh` | Non-root install/uninstall with mocked systemctl. |
-| `test_service_integration.sh` | Cross-process daemon/client lifecycle, mocked sendText success/failure/timeout. |
+| `test_service_integration.sh` | Cross-process daemon/client lifecycle, mocked sendText success/failure/timeout with specific reasons, and the full public-CLI lifecycle: delete, create, pause/idempotent pause, resume, `--json` validated by a real parser, and a duplicate-create refusal. |
 
 Each test calls `test_env_setup`, which creates isolated temporary `HOME` and XDG
 directories. Root-based CI attempts to run installation/integration behavior as

@@ -113,6 +113,9 @@ ka_ipc_handle_request() {
     [[ -d $dir ]] || { ka_ipc_respond "$id" ERROR 'request directory not found'; return 1; }
     command=$(ka_read_first_line "$dir/command")
     uuid=$(ka_read_first_line "$dir/uuid")
+    # Validators record why they refused; start clean so a stale reason cannot leak
+    # into an unrelated response.
+    ka_error_reset
 
     case $command in
         PING)
@@ -125,28 +128,28 @@ ka_ipc_handle_request() {
             message='refreshed'
             ;;
         CREATE)
-            ka_state_create_target "$uuid" "$dir/config" || { rc=$?; message='could not create keep-alive'; }
+            ka_state_create_target "$uuid" "$dir/config" || { rc=$?; message=${KA_LAST_ERROR:-'could not create keep-alive'}; }
             ;;
         CONFIGURE)
-            ka_state_configure_target "$uuid" "$dir/config" || { rc=$?; message='could not configure keep-alive'; }
+            ka_state_configure_target "$uuid" "$dir/config" || { rc=$?; message=${KA_LAST_ERROR:-'could not configure keep-alive'}; }
             ;;
         DELETE)
-            ka_state_delete_target "$uuid" || { rc=$?; message='keep-alive not found'; }
+            ka_state_delete_target "$uuid" || { rc=$?; message=${KA_LAST_ERROR:-'keep-alive not found'}; }
             ;;
         TOGGLE_PAUSE)
-            ka_state_toggle_pause "$uuid" || { rc=$?; message='target cannot be paused/resumed'; }
+            ka_state_toggle_pause "$uuid" || { rc=$?; message=${KA_LAST_ERROR:-'target cannot be paused/resumed'}; }
             ;;
         TOGGLE_MODE)
-            ka_state_toggle_mode "$uuid" || { rc=$?; message='delivery mode cannot be changed'; }
+            ka_state_toggle_mode "$uuid" || { rc=$?; message=${KA_LAST_ERROR:-'delivery mode cannot be changed'}; }
             ;;
         RESET_MAIN)
-            ka_state_reset_main "$uuid" || { rc=$?; message='main timer cannot be reset'; }
+            ka_state_reset_main "$uuid" || { rc=$?; message=${KA_LAST_ERROR:-'main timer cannot be reset'}; }
             ;;
         SEND_MAIN)
-            ka_scheduler_send_main "$uuid" MANUAL || { rc=$?; message='main send failed'; }
+            ka_scheduler_send_main "$uuid" MANUAL || { rc=$?; message=${KA_LAST_ERROR:-'main send failed'}; }
             ;;
         SEND_SECONDARY)
-            ka_scheduler_send_secondary "$uuid" MANUAL || { rc=$?; message='secondary send failed'; }
+            ka_scheduler_send_secondary "$uuid" MANUAL || { rc=$?; message=${KA_LAST_ERROR:-'secondary send failed'}; }
             ;;
         *)
             rc=2

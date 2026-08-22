@@ -10,6 +10,7 @@ ka_profile_init_defaults() {
     [[ -r $KA_PROFILE_DIR/secondary_message ]] || ka_write_scalar "$KA_PROFILE_DIR/secondary_message" 'Continue if there is unfinished work.'
     [[ -r $KA_PROFILE_DIR/notifications ]] || ka_write_scalar "$KA_PROFILE_DIR/notifications" 0
     [[ -r $KA_PROFILE_DIR/delivery_mode ]] || ka_write_scalar "$KA_PROFILE_DIR/delivery_mode" MESSAGE_ENTER
+    ka_cleanup_staged_dirs "$KA_CONFIG_DIR"
     if ! compgen -G "$KA_PROFILE_DIR/messages/[0-9][0-9][0-9]" >/dev/null; then
         mkdir -p "$KA_PROFILE_DIR/messages"
         ka_write_scalar "$KA_PROFILE_DIR/messages/001" 'ping'
@@ -30,6 +31,7 @@ ka_profile_copy_to_request() {
     rm -rf -- "$request_dir/messages"
     mkdir -p "$request_dir/messages"
     cp -f -- "$KA_PROFILE_DIR/messages"/[0-9][0-9][0-9] "$request_dir/messages/" 2>/dev/null || true
+    return 0
 }
 
 # Role: Replace the single persistent profile with validated values from one request.
@@ -46,10 +48,13 @@ ka_profile_update_from_request() {
     ka_write_scalar "$KA_PROFILE_DIR/notifications" "$(ka_read_first_line "$request_dir/notifications")"
     ka_write_scalar "$KA_PROFILE_DIR/delivery_mode" "$(ka_read_first_line "$request_dir/delivery_mode")"
 
-    rm -rf -- "$KA_PROFILE_DIR/messages"
-    mkdir -p "$KA_PROFILE_DIR/messages"
-    chmod 700 "$KA_PROFILE_DIR/messages" 2>/dev/null || true
-    cp -f -- "$request_dir/messages"/[0-9][0-9][0-9] "$KA_PROFILE_DIR/messages/"
+    local staged="$KA_PROFILE_DIR/messages.staged.$$"
+    rm -rf -- "$staged"
+    mkdir -p "$staged" || return 1
+    chmod 700 "$staged" 2>/dev/null || true
+    cp -f -- "$request_dir/messages"/[0-9][0-9][0-9] "$staged/" || { rm -rf -- "$staged"; return 1; }
+    chmod 600 "$staged"/* 2>/dev/null || true
+    ka_commit_staged_dir "$staged" "$KA_PROFILE_DIR/messages"
 }
 
 # Role: Validate that main messages form a non-empty contiguous 001..N rotation.
@@ -70,6 +75,12 @@ ka_profile_validate_main_messages() {
             ka_error 'at least one non-empty main message is required'
             return 1
         }
+        local max_count=${KEEPALIVE_MAX_MESSAGES:-64}
+        ka_is_positive_int "$max_count" || max_count=64
+        ((count <= max_count)) || {
+            ka_error "main message rotation has $count entries; the limit is $max_count"
+            return 1
+        }
 
         for ((index=1; index<=count; index++)); do
             printf -v expected '%03d' "$index"
@@ -88,6 +99,12 @@ ka_profile_validate_main_messages() {
             }
             [[ -n $content && $content != *$'\n'* ]] || {
                 ka_error "main message $expected must be one non-empty logical line"
+                return 1
+            }
+            local max_len=${KEEPALIVE_MAX_MESSAGE_LENGTH:-2000}
+            ka_is_positive_int "$max_len" || max_len=2000
+            ((${#content} <= max_len)) || {
+                ka_error "main message $expected is ${#content} characters; the limit is $max_len"
                 return 1
             }
         done
@@ -115,6 +132,12 @@ ka_profile_validate_request() {
     if [[ $secondary_enabled == 1 ]]; then
         [[ -n $secondary_content ]] || { ka_error 'enabled secondary message cannot be empty'; return 1; }
         [[ $secondary_content != *$'\n'* ]] || { ka_error 'secondary message must be one logical line'; return 1; }
+        local max_len=${KEEPALIVE_MAX_MESSAGE_LENGTH:-2000}
+        ka_is_positive_int "$max_len" || max_len=2000
+        ((${#secondary_content} <= max_len)) || {
+            ka_error "secondary message is ${#secondary_content} characters; the limit is $max_len"
+            return 1
+        }
     fi
 
     ka_profile_validate_main_messages "$request_dir/messages"

@@ -3,13 +3,24 @@
 
 # Role: List /Sessions/N object paths exported by one Konsole D-Bus service.
 ka_konsole_session_paths() {
-    local service=$1
+    local service=$1 xml name
+    if ka_dbus_use_send; then
+        xml=$(ka_dbus_send_scalar "$service" /Sessions org.freedesktop.DBus.Introspectable.Introspect 2>/dev/null) || return 0
+        while IFS= read -r name; do
+            [[ -n $name ]] && printf '/Sessions/%s\n' "$name"
+        done < <(grep -oE '<node name="[0-9]+"' <<<"$xml" | grep -oE '[0-9]+' || true)
+        return 0
+    fi
     ka_qdbus_call "$service" | grep -oE '/Sessions/[0-9]+$' || true
 }
 
 # Role: Fetch one scalar method from a Konsole session object.
 ka_konsole_get() {
     local service=$1 path=$2 method=$3
+    if ka_dbus_use_send; then
+        ka_dbus_send_scalar "$service" "$path" "org.kde.konsole.Session.$method"
+        return
+    fi
     ka_qdbus_call "$service" "$path" "org.kde.konsole.Session.$method"
 }
 
@@ -42,10 +53,23 @@ ka_konsole_session_name() {
 # foreground PID, AI PID, AI PID starttime, foreground command.
 ka_konsole_discover() {
     local service path uuid term_pid fgpid class ai_type ai_pid ai_start name_info name cwd cmd
+    local budget deadline
+    budget=${KEEPALIVE_DISCOVERY_BUDGET_MS:-1000}
+    ka_is_positive_int "$budget" || budget=1000
+    ka_now_ms
+    deadline=$((REPLY + budget))
     while IFS= read -r service; do
         [[ -n $service ]] || continue
         while IFS= read -r path; do
             [[ -n $path ]] || continue
+            # Each session costs up to three bounded D-Bus calls. Without a pass budget a
+            # degraded bus blocks the whole daemon loop, which then exceeds the suspend
+            # gap and silently stops advancing every countdown.
+            ka_now_ms
+            if ((REPLY > deadline)); then
+                printf '#INCOMPLETE\n'
+                return 0
+            fi
             uuid=$(ka_konsole_get "$service" "$path" shellSessionId 2>/dev/null || true)
             term_pid=$(ka_konsole_get "$service" "$path" processId 2>/dev/null || true)
             fgpid=$(ka_konsole_get "$service" "$path" foregroundProcessId 2>/dev/null || true)
@@ -66,6 +90,7 @@ ka_konsole_discover() {
                 "$term_pid" "$fgpid" "$ai_pid" "$ai_start" "$(ka_single_line "$cmd")"
         done < <(ka_konsole_session_paths "$service")
     done < <(ka_qdbus_konsole_services)
+    printf '#COMPLETE\n'
 }
 
 # Role: Verify that a target still refers to the exact original Konsole/AI process tree.
@@ -76,14 +101,15 @@ ka_konsole_validate_target() {
     if uuid=$(ka_konsole_get "$service" "$path" shellSessionId 2>/dev/null); then :; else
         rc=$?
         ka_qdbus_status_is_timeout "$rc" && return 20
-        return 10
+        # The call never completed, so it proves nothing about identity.
+        return 21
     fi
     [[ $uuid == "$expected_uuid" ]] || return 10
 
     if term_pid=$(ka_konsole_get "$service" "$path" processId 2>/dev/null); then :; else
         rc=$?
         ka_qdbus_status_is_timeout "$rc" && return 20
-        return 11
+        return 21
     fi
     [[ $term_pid == "$expected_term_pid" ]] || return 11
 
@@ -94,7 +120,7 @@ ka_konsole_validate_target() {
     if fgpid=$(ka_konsole_get "$service" "$path" foregroundProcessId 2>/dev/null); then :; else
         rc=$?
         ka_qdbus_status_is_timeout "$rc" && return 20
-        return 14
+        return 21
     fi
     [[ $fgpid =~ ^[0-9]+$ ]] || return 14
     ka_process_is_descendant_of "$fgpid" "$expected_ai_pid" || return 15
@@ -111,13 +137,17 @@ ka_konsole_validation_reason() {
         14) printf 'Konsole foreground process is unavailable' ;;
         15) printf 'AI process no longer owns the foreground process tree' ;;
         20) printf 'Konsole D-Bus validation timed out' ;;
+        21) printf 'Konsole D-Bus session could not be reached' ;;
         *)  printf 'Target validation failed' ;;
     esac
 }
 
 # Role: Identify target-validation failures that should not make identity sticky unavailable.
+# A call that timed out (20) or could not be made at all (21) proves nothing about the
+# target. Only a call that completed and returned a different value, or a local /proc
+# check, is evidence of identity loss.
 ka_konsole_validation_is_transient() {
-    [[ ${1-} == 20 ]]
+    [[ ${1-} == 20 || ${1-} == 21 ]]
 }
 
 # Role: Send raw text to a specific Konsole session through its D-Bus sendText method.
@@ -127,23 +157,41 @@ ka_konsole_send_raw() {
 }
 
 # Role: Deliver one keep-alive event in MESSAGE+ENTER or ENTER_ONLY mode.
+#
+# Returns 0 on success, 1 when nothing was delivered, 2 for an unknown mode, and 3 when
+# the message reached the terminal but the submit did not. That last case is the
+# duplicate-text hazard: a blind retry would append the message a second time. Callers
+# record it and retry with submit_only so the pending line is completed, not repeated.
+#
+# KEEPALIVE_ATOMIC_SUBMIT=1 sends text and submit in a single sendText, which removes the
+# partial state entirely. It is opt-in because some AI CLIs debounce input and may submit
+# before rendering the text; that is why the gap exists.
 ka_konsole_deliver() {
-    local service=$1 path=$2 mode=$3 message=${4-}
+    local service=$1 path=$2 mode=$3 message=${4-} submit_only=${5:-0}
     local submit_seq=${KEEPALIVE_SUBMIT_SEQ:-$'\r'}
     local send_gap=${KEEPALIVE_SEND_GAP:-0.15}
 
     case $mode in
         ENTER_ONLY)
-            ka_konsole_send_raw "$service" "$path" "$submit_seq"
+            ka_konsole_send_raw "$service" "$path" "$submit_seq" || return 1
             ;;
         MESSAGE_ENTER)
-            ka_konsole_send_raw "$service" "$path" "$message" || return
+            if ((submit_only == 1)); then
+                ka_konsole_send_raw "$service" "$path" "$submit_seq" || return 3
+                return 0
+            fi
+            if [[ ${KEEPALIVE_ATOMIC_SUBMIT:-0} == 1 ]]; then
+                ka_konsole_send_raw "$service" "$path" "$message$submit_seq" || return 1
+                return 0
+            fi
+            ka_konsole_send_raw "$service" "$path" "$message" || return 1
             sleep "$send_gap"
-            ka_konsole_send_raw "$service" "$path" "$submit_seq"
+            ka_konsole_send_raw "$service" "$path" "$submit_seq" || return 3
             ;;
         *)
             ka_error "unknown delivery mode: $mode"
             return 2
             ;;
     esac
+    return 0
 }

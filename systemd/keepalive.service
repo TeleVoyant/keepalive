@@ -9,6 +9,9 @@ Type=simple
 ExecStart=%h/.local/bin/keepalive --service
 Restart=on-failure
 RestartSec=2s
+# The daemon maps INT/TERM/HUP to 130/143/129 so the shell reports which signal ended
+# it. Without this, systemd logs every deliberate stop as "Failed with result exit-code".
+SuccessExitStatus=129 130 143
 UMask=0077
 
 # Hardening here is deliberately limited to directives that do NOT place the

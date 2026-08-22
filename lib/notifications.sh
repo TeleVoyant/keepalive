@@ -22,7 +22,8 @@ ka_notify_call() {
     ka_notify_available || return 127
     command -v timeout >/dev/null 2>&1 || return 127
     local command=${KEEPALIVE_NOTIFY_SEND:-notify-send} limit
-    limit=$(ka_notify_timeout_seconds)
+    limit=${KEEPALIVE_NOTIFY_TIMEOUT:-2}
+    ka_is_positive_int "$limit" || limit=2
     timeout --kill-after=1s "${limit}s" "$command" "$@"
 }
 

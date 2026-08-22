@@ -11,6 +11,12 @@ ka_state_init_arrays() {
     declare -gA KA_T_MAIN_INDEX=() KA_T_SECONDARY_ENABLED=() KA_T_SECONDARY_INTERVAL=()
     declare -gA KA_T_SECONDARY_REMAIN=() KA_T_SECONDARY_MESSAGE=() KA_T_LAST_SEEN=()
     declare -gA KA_T_REASON=()
+    # Consecutive transient validation failures. Runtime-only debounce, never persisted:
+    # a checkpoint should not carry a grudge across a daemon restart.
+    declare -gA KA_T_STRIKES=()
+    # Set when a message reached the terminal but its submit did not. The next attempt
+    # completes that pending line instead of appending the message again.
+    declare -gA KA_T_PENDING_SUBMIT=()
 
     declare -ga KA_D_UUIDS=()
     declare -gA KA_D_TYPE=() KA_D_NAME=() KA_D_DIR=() KA_D_SERVICE=() KA_D_PATH=()
@@ -55,29 +61,30 @@ ka_state_save_target() {
     mkdir -p "$dir/messages"
     chmod 700 "$dir" "$dir/messages" 2>/dev/null || true
     file="$dir/state.tsv"
-    {
-        printf 'uuid\t%s\n' "$(ka_single_line "$uuid")"
-        printf 'type\t%s\n' "$(ka_single_line "${KA_T_TYPE[$uuid]}")"
-        printf 'name\t%s\n' "$(ka_single_line "${KA_T_NAME[$uuid]}")"
-        printf 'directory\t%s\n' "$(ka_single_line "${KA_T_DIR[$uuid]}")"
-        printf 'service\t%s\n' "$(ka_single_line "${KA_T_SERVICE[$uuid]}")"
-        printf 'path\t%s\n' "$(ka_single_line "${KA_T_PATH[$uuid]}")"
-        printf 'term_pid\t%s\n' "${KA_T_TERM_PID[$uuid]}"
-        printf 'ai_pid\t%s\n' "${KA_T_AI_PID[$uuid]}"
-        printf 'ai_start\t%s\n' "${KA_T_AI_START[$uuid]}"
-        printf 'status\t%s\n' "${KA_T_STATUS[$uuid]}"
-        printf 'mode\t%s\n' "${KA_T_MODE[$uuid]}"
-        printf 'notifications\t%s\n' "${KA_T_NOTIFY[$uuid]}"
-        printf 'main_interval\t%s\n' "${KA_T_MAIN_INTERVAL[$uuid]}"
-        printf 'main_remaining\t%s\n' "${KA_T_MAIN_REMAIN[$uuid]}"
-        printf 'main_index\t%s\n' "${KA_T_MAIN_INDEX[$uuid]}"
-        printf 'secondary_enabled\t%s\n' "${KA_T_SECONDARY_ENABLED[$uuid]}"
-        printf 'secondary_interval\t%s\n' "${KA_T_SECONDARY_INTERVAL[$uuid]}"
-        printf 'secondary_remaining\t%s\n' "${KA_T_SECONDARY_REMAIN[$uuid]}"
-        printf 'last_seen\t%s\n' "$(ka_single_line "${KA_T_LAST_SEEN[$uuid]-}")"
-        printf 'reason\t%s\n' "$(ka_single_line "${KA_T_REASON[$uuid]-}")"
-    } | ka_atomic_write "$file"
-    printf '%s' "${KA_T_SECONDARY_MESSAGE[$uuid]-}" | ka_atomic_write "$dir/secondary_message"
+    local payload
+    printf -v payload '%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n' \
+        uuid "$(ka_single_line "$uuid")" \
+        type "$(ka_single_line "${KA_T_TYPE[$uuid]}")" \
+        name "$(ka_single_line "${KA_T_NAME[$uuid]}")" \
+        directory "$(ka_single_line "${KA_T_DIR[$uuid]}")" \
+        service "$(ka_single_line "${KA_T_SERVICE[$uuid]}")" \
+        path "$(ka_single_line "${KA_T_PATH[$uuid]}")" \
+        term_pid "${KA_T_TERM_PID[$uuid]}" \
+        ai_pid "${KA_T_AI_PID[$uuid]}" \
+        ai_start "${KA_T_AI_START[$uuid]}" \
+        status "${KA_T_STATUS[$uuid]}" \
+        mode "${KA_T_MODE[$uuid]}" \
+        notifications "${KA_T_NOTIFY[$uuid]}" \
+        main_interval "${KA_T_MAIN_INTERVAL[$uuid]}" \
+        main_remaining "${KA_T_MAIN_REMAIN[$uuid]}" \
+        main_index "${KA_T_MAIN_INDEX[$uuid]}" \
+        secondary_enabled "${KA_T_SECONDARY_ENABLED[$uuid]}" \
+        secondary_interval "${KA_T_SECONDARY_INTERVAL[$uuid]}" \
+        secondary_remaining "${KA_T_SECONDARY_REMAIN[$uuid]}" \
+        last_seen "$(ka_single_line "${KA_T_LAST_SEEN[$uuid]-}")" \
+        reason "$(ka_single_line "${KA_T_REASON[$uuid]-}")"
+    ka_atomic_write_value "$file" "$payload"
+    ka_atomic_write_value "$dir/secondary_message" "${KA_T_SECONDARY_MESSAGE[$uuid]-}"
 }
 
 # Role: Record a precise checkpoint-validation failure for quarantine diagnostics.
@@ -203,6 +210,8 @@ ka_state_load_target_dir() {
     KA_T_SECONDARY_MESSAGE[$uuid]=$secondary_message
     KA_T_LAST_SEEN[$uuid]=$last_seen
     KA_T_REASON[$uuid]=$reason
+    KA_T_STRIKES[$uuid]=0
+    KA_T_PENDING_SUBMIT[$uuid]=0
 }
 
 # Role: Move a malformed runtime record out of active targets and preserve its reason.
@@ -252,37 +261,55 @@ ka_state_load_all_targets() {
     ((had_dotglob == 1)) || shopt -u dotglob
 }
 
-# Role: Clear and rebuild the current recognized Konsole AI-session discovery cache.
+# Role: Rebuild the discovery snapshot, committing only a complete pass.
 ka_state_refresh_discovery() {
+    local -a n_uuids=()
+    local -A n_type=() n_name=() n_dir=() n_service=() n_path=()
+    local -A n_term=() n_fg=() n_ai=() n_start=() n_cmd=()
+    local complete=0 uuid type name directory service path term_pid fgpid ai_pid ai_start cmd key
+
+    while IFS=$'\t' read -r uuid type name directory service path term_pid fgpid ai_pid ai_start cmd; do
+        case $uuid in
+            '#COMPLETE') complete=1; continue ;;
+            '#INCOMPLETE') complete=0; continue ;;
+            '') continue ;;
+        esac
+        n_uuids+=("$uuid")
+        n_type[$uuid]=$type; n_name[$uuid]=$name; n_dir[$uuid]=$directory
+        n_service[$uuid]=$service; n_path[$uuid]=$path; n_term[$uuid]=$term_pid
+        n_fg[$uuid]=$fgpid; n_ai[$uuid]=$ai_pid; n_start[$uuid]=$ai_start; n_cmd[$uuid]=$cmd
+    done < <(ka_konsole_discover)
+
+    # A truncated pass would look like sessions disappearing, so keep the previous
+    # snapshot and let the caller decide whether to warn.
+    if ((complete != 1)); then
+        KA_DISCOVERY_STALE=1
+        return 1
+    fi
+    KA_DISCOVERY_STALE=0
+
     KA_D_UUIDS=()
     KA_D_TYPE=() KA_D_NAME=() KA_D_DIR=() KA_D_SERVICE=() KA_D_PATH=()
     KA_D_TERM_PID=() KA_D_FG_PID=() KA_D_AI_PID=() KA_D_AI_START=() KA_D_CMD=()
-
-    local uuid type name directory service path term_pid fgpid ai_pid ai_start cmd
-    while IFS=$'\t' read -r uuid type name directory service path term_pid fgpid ai_pid ai_start cmd; do
-        [[ -n $uuid ]] || continue
-        KA_D_UUIDS+=("$uuid")
-        KA_D_TYPE[$uuid]=$type
-        KA_D_NAME[$uuid]=$name
-        KA_D_DIR[$uuid]=$directory
-        KA_D_SERVICE[$uuid]=$service
-        KA_D_PATH[$uuid]=$path
-        KA_D_TERM_PID[$uuid]=$term_pid
-        KA_D_FG_PID[$uuid]=$fgpid
-        KA_D_AI_PID[$uuid]=$ai_pid
-        KA_D_AI_START[$uuid]=$ai_start
-        KA_D_CMD[$uuid]=$cmd
-    done < <(ka_konsole_discover)
+    for key in "${n_uuids[@]}"; do
+        KA_D_UUIDS+=("$key")
+        KA_D_TYPE[$key]=${n_type[$key]}; KA_D_NAME[$key]=${n_name[$key]}; KA_D_DIR[$key]=${n_dir[$key]}
+        KA_D_SERVICE[$key]=${n_service[$key]}; KA_D_PATH[$key]=${n_path[$key]}
+        KA_D_TERM_PID[$key]=${n_term[$key]}; KA_D_FG_PID[$key]=${n_fg[$key]}
+        KA_D_AI_PID[$key]=${n_ai[$key]}; KA_D_AI_START[$key]=${n_start[$key]}; KA_D_CMD[$key]=${n_cmd[$key]}
+    done
+    return 0
 }
 
 # Role: Copy a validated wizard request's message rotation into a target runtime directory.
 ka_state_copy_request_messages() {
-    local request_dir=$1 target_dir=$2
-    rm -rf -- "$target_dir/messages"
-    mkdir -p "$target_dir/messages"
-    chmod 700 "$target_dir/messages" 2>/dev/null || true
-    cp -f -- "$request_dir/messages"/[0-9][0-9][0-9] "$target_dir/messages/"
-    chmod 600 "$target_dir/messages"/* 2>/dev/null || true
+    local request_dir=$1 target_dir=$2 staged="$2/messages.staged.$$"
+    rm -rf -- "$staged"
+    mkdir -p "$staged" || return 1
+    chmod 700 "$staged" 2>/dev/null || true
+    cp -f -- "$request_dir/messages"/[0-9][0-9][0-9] "$staged/" || { rm -rf -- "$staged"; return 1; }
+    chmod 600 "$staged"/* 2>/dev/null || true
+    ka_commit_staged_dir "$staged" "$target_dir/messages"
 }
 
 # Role: Count non-empty stored main messages for one monitored target.
@@ -341,6 +368,8 @@ ka_state_create_target() {
     KA_T_SECONDARY_MESSAGE[$uuid]=$(cat "$request_dir/secondary_message")
     KA_T_LAST_SEEN[$uuid]=$(ka_now_full)
     KA_T_REASON[$uuid]=''
+    KA_T_STRIKES[$uuid]=0
+    KA_T_PENDING_SUBMIT[$uuid]=0
 
     ka_state_copy_request_messages "$request_dir" "$target_dir"
     ka_state_save_target "$uuid"
@@ -386,7 +415,8 @@ ka_state_delete_target() {
     unset 'KA_T_STATUS[$uuid]' 'KA_T_MODE[$uuid]' 'KA_T_NOTIFY[$uuid]' 'KA_T_MAIN_INTERVAL[$uuid]'
     unset 'KA_T_MAIN_REMAIN[$uuid]' 'KA_T_MAIN_INDEX[$uuid]' 'KA_T_SECONDARY_ENABLED[$uuid]'
     unset 'KA_T_SECONDARY_INTERVAL[$uuid]' 'KA_T_SECONDARY_REMAIN[$uuid]' 'KA_T_SECONDARY_MESSAGE[$uuid]'
-    unset 'KA_T_LAST_SEEN[$uuid]' 'KA_T_REASON[$uuid]'
+    unset 'KA_T_LAST_SEEN[$uuid]' 'KA_T_REASON[$uuid]' 'KA_T_STRIKES[$uuid]'
+    unset 'KA_T_PENDING_SUBMIT[$uuid]'
 }
 
 # Role: Toggle ACTIVE/PAUSED while preserving each countdown exactly.
@@ -439,24 +469,72 @@ ka_state_mark_unavailable() {
     [[ $previous == UNAVAILABLE ]] && return 0
     KA_T_STATUS[$uuid]=UNAVAILABLE
     KA_T_REASON[$uuid]=$reason
+    KA_T_STRIKES[$uuid]=0
     KA_T_LAST_SEEN[$uuid]=$(ka_now_full)
     ka_state_save_target "$uuid"
     ka_log_event "$uuid" TARGET "$reason" UNAVAILABLE
     ka_notify_target_lost "${KA_T_NOTIFY[$uuid]}" "${KA_T_NAME[$uuid]}" "$reason"
 }
 
+# Role: Validate one target against the current discovery snapshot instead of D-Bus.
+# Discovery already fetched shellSessionId, processId, and foregroundProcessId for every
+# session; periodic health re-fetched exactly the same three properties moments later.
+# Reusing the snapshot removes that duplication. Pre-send validation deliberately keeps
+# using the live path, because a send must never rely on a snapshot.
+ka_state_validate_from_discovery() {
+    local uuid=$1 start
+    # Return 1 only for "no usable snapshot", which is the caller's signal to fall back
+    # to a live call. Every field must be present before the snapshot can be trusted.
+    [[ -n ${KA_D_TERM_PID[$uuid]+x} && -n ${KA_D_FG_PID[$uuid]+x} ]] || return 1
+    [[ ${KA_D_TERM_PID[$uuid]} == "${KA_T_TERM_PID[$uuid]}" ]] || return 11
+    [[ -d /proc/${KA_T_AI_PID[$uuid]} ]] || return 12
+    start=$(ka_proc_starttime "${KA_T_AI_PID[$uuid]}" 2>/dev/null || true)
+    [[ $start == "${KA_T_AI_START[$uuid]}" ]] || return 13
+    [[ ${KA_D_FG_PID[$uuid]} =~ ^[0-9]+$ ]] || return 14
+    ka_process_is_descendant_of "${KA_D_FG_PID[$uuid]}" "${KA_T_AI_PID[$uuid]}" || return 15
+    return 0
+}
+
+# Role: Return the consecutive-transient-failure budget before a target is given up on.
+ka_state_strike_limit() {
+    local value=${KEEPALIVE_VALIDATION_STRIKES:-5}
+    ka_is_positive_int "$value" || value=5
+    printf '%s' "$value"
+}
+
 # Role: Validate every non-unavailable monitored target and update last-seen metadata.
+# Transient failures are debounced rather than ignored: a bus that never comes back
+# still ends in UNAVAILABLE, but a momentary outage or a Konsole restart does not
+# destroy every keep-alive on the first failed call.
 ka_state_validate_targets() {
-    local uuid rc reason
+    local uuid rc reason limit strikes
+    ((${#KA_T_UUIDS[@]} > 0)) || return 0
+    limit=$(ka_state_strike_limit)
     for uuid in "${KA_T_UUIDS[@]}"; do
         [[ ${KA_T_STATUS[$uuid]} != UNAVAILABLE ]] || continue
-        if ka_konsole_validate_target "${KA_T_SERVICE[$uuid]}" "${KA_T_PATH[$uuid]}" "$uuid" \
+        # Prefer the snapshot; fall back to a live call only for targets discovery
+        # did not see this cycle.
+        if ka_state_validate_from_discovery "$uuid"; then
+            rc=0
+        elif rc=$?; ((rc != 1)); then
+            :
+        elif ka_konsole_validate_target "${KA_T_SERVICE[$uuid]}" "${KA_T_PATH[$uuid]}" "$uuid" \
             "${KA_T_TERM_PID[$uuid]}" "${KA_T_AI_PID[$uuid]}" "${KA_T_AI_START[$uuid]}"; then
-            KA_T_LAST_SEEN[$uuid]=$(ka_now_full)
+            rc=0
         else
             rc=$?
-            ka_konsole_validation_is_transient "$rc" && continue
+        fi
+        if ((rc == 0)); then
+            KA_T_LAST_SEEN[$uuid]=$(ka_now_full)
+            KA_T_STRIKES[$uuid]=0
+        else
             reason=$(ka_konsole_validation_reason "$rc")
+            if ka_konsole_validation_is_transient "$rc"; then
+                strikes=$(( ${KA_T_STRIKES[$uuid]:-0} + 1 ))
+                KA_T_STRIKES[$uuid]=$strikes
+                ((strikes >= limit)) || continue
+                reason="$reason (${strikes} consecutive attempts)"
+            fi
             ka_state_mark_unavailable "$uuid" "$reason"
         fi
     done

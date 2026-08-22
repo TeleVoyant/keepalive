@@ -140,7 +140,8 @@ assert_contains "$send_log" 'ping' 'daemon sends configured message through mock
 # failed event remains recorded in the selected target's independent log.
 touch "$send_fail_file"
 response=$(run_test_user env "${ENV_ARGS[@]}" bash "$helper_toggle" "$TEST_ROOT" SEND_MAIN "$old_uuid")
-assert_eq $'ERROR\tmain send failed' "$response" 'manual transport failure propagates through daemon IPC'
+assert_eq $'ERROR\tKonsole rejected the main send (transport failure)' "$response" \
+    'manual transport failure reaches the client with its specific reason'
 assert_contains "$XDG_RUNTIME_DIR/keepalive/logs/$old_uuid.log" $'MAIN\tping\tFAILED · manual' 'daemon logs failed manual transport explicitly'
 rm -f -- "$send_fail_file"
 
@@ -148,12 +149,43 @@ rm -f -- "$send_fail_file"
 # target identity was lost. It must return ERROR while retaining ACTIVE state.
 touch "$qdbus_hang_file"
 response=$(run_test_user env "${ENV_ARGS[@]}" bash "$helper_toggle" "$TEST_ROOT" SEND_MAIN "$old_uuid")
-assert_eq $'ERROR\tmain send failed' "$response" 'bounded qdbus timeout propagates through daemon IPC'
+assert_eq $'ERROR\tKonsole D-Bus validation timed out' "$response" \
+    'bounded qdbus timeout reaches the client with its specific reason'
 rm -f -- "$qdbus_hang_file"
 list=$(run_keepalive list)
 [[ $list == *Avela* && $list == *ACTIVE* ]]
 assert_eq 0 "$?" 'transient qdbus timeout does not make target sticky unavailable'
 assert_contains "$XDG_RUNTIME_DIR/keepalive/logs/$old_uuid.log" 'Konsole D-Bus validation timed out' 'daemon records transient validation timeout'
+
+# The public CLI must be able to drive the whole lifecycle. Until now CREATE existed
+# only inside the interactive wizard, so no automated test could exercise the real
+# create path end to end.
+uuid2_file="$TEST_TMP/uuid2"
+delete_response=$(run_keepalive delete "$old_uuid")
+assert_eq 'ok' "$delete_response" 'CLI delete removes an existing keep-alive'
+
+create_response=$(run_keepalive create "$old_uuid")
+assert_eq 'ok' "$create_response" 'CLI create builds a keep-alive from the saved profile'
+list=$(run_keepalive list)
+[[ $list == *Avela* && $list == *ACTIVE* ]]
+assert_eq 0 "$?" 'CLI-created keep-alive is ACTIVE'
+
+assert_eq 'ok' "$(run_keepalive pause "$old_uuid")" 'CLI pause freezes the target'
+assert_eq 'already paused' "$(run_keepalive pause "$old_uuid")" 'CLI pause is idempotent'
+assert_eq 'ok' "$(run_keepalive resume "$old_uuid")" 'CLI resume restarts the countdown'
+
+json=$(run_keepalive list --json)
+[[ $json == *'"uuid": '* || $json == *'"uuid":"'* ]]
+assert_eq 0 "$?" 'CLI --json emits machine-readable rows'
+[[ $json == *'"status":"ACTIVE"'* ]]
+assert_eq 0 "$?" 'JSON output carries the target state'
+printf '%s' "$json" | python3 -c 'import json,sys; json.load(sys.stdin)' 2>/dev/null
+assert_eq 0 "$?" 'CLI --json output parses as valid JSON'
+
+# A refused operation must return the daemon's specific reason, not a generic string.
+refusal=$(run_keepalive create "$old_uuid" 2>&1 || true)
+assert_eq 'keepalive: ERROR: session already has a keep-alive (state: ACTIVE)' "$refusal" \
+    'CLI create refuses a duplicate with an actionable reason'
 
 # Kill original AI: service must retain target as sticky UNAVAILABLE.
 kill "$KA_FAKE_AI_PID" 2>/dev/null || true
