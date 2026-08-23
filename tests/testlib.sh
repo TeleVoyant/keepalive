@@ -8,7 +8,8 @@ TEST_FAIL=0
 
 # Role: Print a TAP-like success/failure assertion for exact string equality.
 assert_eq() {
-    local expected=$1 actual=$2 message=${3:-"expected '$expected', got '$actual'"}
+    local expected=$1 actual=$2
+    local message=${3:-"expected '$expected', got '$actual'"}
     ((TEST_COUNT += 1))
     if [[ $expected == "$actual" ]]; then
         printf 'ok %d - %s\n' "$TEST_COUNT" "$message"
@@ -34,14 +35,16 @@ assert_false() {
 
 # Role: Assert that a regular file exists.
 assert_file() {
-    local path=$1 message=${2:-"file exists: $path"}
+    local path=$1
+    local message=${2:-"file exists: $path"}
     ((TEST_COUNT += 1))
     if [[ -f $path ]]; then printf 'ok %d - %s\n' "$TEST_COUNT" "$message"; else printf 'not ok %d - %s\n' "$TEST_COUNT" "$message"; ((TEST_FAIL += 1)); fi
 }
 
 # Role: Assert that a file contains a fixed literal substring.
 assert_contains() {
-    local path=$1 needle=$2 message=${3:-"$path contains $needle"}
+    local path=$1 needle=$2
+    local message=${3:-"$path contains $needle"}
     ((TEST_COUNT += 1))
     if grep -Fq -- "$needle" "$path"; then printf 'ok %d - %s\n' "$TEST_COUNT" "$message"; else printf 'not ok %d - %s\n' "$TEST_COUNT" "$message"; ((TEST_FAIL += 1)); fi
 }

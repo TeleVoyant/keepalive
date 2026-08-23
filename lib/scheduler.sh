@@ -64,15 +64,17 @@ ka_scheduler_send_main() {
             KA_T_MAIN_INDEX[$uuid]=$(((index + 1) % count))
         fi
     else
-        local deliver_rc=$?
+        local deliver_rc=$? failure=FAILED
         if ((deliver_rc == 3)); then
             # The text is already on the target's input line; only the submit is owed.
             KA_T_PENDING_SUBMIT[$uuid]=1
             KA_LAST_ERROR='message delivered but submit failed; the next attempt will only submit'
+            failure='FAILED · submit owed'
         else
             KA_LAST_ERROR='Konsole rejected the main send (transport failure)'
         fi
-        ka_log_event "$uuid" MAIN "$detail" "$([[ $origin == MANUAL ]] && printf 'FAILED · manual' || printf FAILED)"
+        [[ $origin == MANUAL ]] && failure="$failure · manual"
+        ka_log_event "$uuid" MAIN "$detail" "$failure"
         ka_notify_send_failed "${KA_T_NOTIFY[$uuid]}" "${KA_T_NAME[$uuid]}" "$detail"
         delivery_failed=1
     fi
@@ -107,17 +109,21 @@ ka_scheduler_send_secondary() {
 
     if ka_konsole_deliver "${KA_T_SERVICE[$uuid]}" "${KA_T_PATH[$uuid]}" "${KA_T_MODE[$uuid]}" "$message" "${KA_T_PENDING_SUBMIT[$uuid]:-0}"; then
         KA_T_PENDING_SUBMIT[$uuid]=0
+        # Only an automatic delivery consumes the one-shot; a manual send is on demand.
+        [[ $origin == MANUAL ]] || KA_T_SECONDARY_DONE[$uuid]=1
         ka_log_event "$uuid" SECONDARY "$detail" "$([[ $origin == MANUAL ]] && printf 'SENT · manual' || printf SENT)"
         ka_notify_sent "${KA_T_NOTIFY[$uuid]}" "${KA_T_NAME[$uuid]}" "$detail"
     else
-        local deliver_rc=$?
+        local deliver_rc=$? failure=FAILED
         if ((deliver_rc == 3)); then
             KA_T_PENDING_SUBMIT[$uuid]=1
             KA_LAST_ERROR='message delivered but submit failed; the next attempt will only submit'
+            failure='FAILED · submit owed'
         else
             KA_LAST_ERROR='Konsole rejected the secondary send (transport failure)'
         fi
-        ka_log_event "$uuid" SECONDARY "$detail" "$([[ $origin == MANUAL ]] && printf 'FAILED · manual' || printf FAILED)"
+        [[ $origin == MANUAL ]] && failure="$failure · manual"
+        ka_log_event "$uuid" SECONDARY "$detail" "$failure"
         ka_notify_send_failed "${KA_T_NOTIFY[$uuid]}" "${KA_T_NAME[$uuid]}" "$detail"
         delivery_failed=1
     fi
@@ -126,6 +132,43 @@ ka_scheduler_send_secondary() {
     # Match MAIN semantics: reset after an attempted event, while returning a
     # transport error so manual IPC callers are not told the send succeeded.
     ((delivery_failed == 0)) || return 5
+}
+
+# Role: Send a single Enter now and return the target to MESSAGE+ENTER delivery.
+#
+# This is the detail view's `e`: press Enter once, then resume normal message delivery.
+# It never consumes a queued message, and it completes a pending submit if one is owed,
+# because a bare Enter is exactly what that state is waiting for.
+ka_scheduler_send_enter_once() {
+    local uuid=$1 origin=${2:-MANUAL} validation_rc
+    ka_state_has_target "$uuid" || { ka_error 'unknown keep-alive target'; return 1; }
+    [[ ${KA_T_STATUS[$uuid]} != UNAVAILABLE ]] || { ka_error 'unavailable targets cannot be sent to'; return 2; }
+    if ka_scheduler_validate_before_send "$uuid"; then :; else
+        validation_rc=$?
+        KA_LAST_ERROR=${KA_SCHEDULER_VALIDATION_REASON:-'target validation failed'}
+        if ((validation_rc == 2)); then
+            ka_log_event "$uuid" MAIN "$KA_LAST_ERROR" 'FAILED · manual'
+        fi
+        return 3
+    fi
+
+    if ka_konsole_deliver "${KA_T_SERVICE[$uuid]}" "${KA_T_PATH[$uuid]}" ENTER_ONLY ''; then
+        KA_T_PENDING_SUBMIT[$uuid]=0
+        ka_log_event "$uuid" MAIN '[ENTER] one-shot' 'SENT · manual'
+        ka_notify_sent "${KA_T_NOTIFY[$uuid]}" "${KA_T_NAME[$uuid]}" '[ENTER]'
+        KA_T_MAIN_REMAIN[$uuid]=${KA_T_MAIN_INTERVAL[$uuid]}
+        # Resume normal delivery; a one-shot Enter is not a mode change.
+        KA_T_MODE[$uuid]=MESSAGE_ENTER
+        ka_state_save_target "$uuid"
+        return 0
+    fi
+
+    KA_LAST_ERROR='Konsole rejected the Enter send (transport failure)'
+    ka_log_event "$uuid" MAIN '[ENTER] one-shot' 'FAILED · manual'
+    ka_notify_send_failed "${KA_T_NOTIFY[$uuid]}" "${KA_T_NAME[$uuid]}" '[ENTER]'
+    KA_T_MAIN_REMAIN[$uuid]=${KA_T_MAIN_INTERVAL[$uuid]}
+    ka_state_save_target "$uuid"
+    return 5
 }
 
 # Role: Preserve all countdowns when a large scheduler gap indicates suspend or process stall.
@@ -176,7 +219,10 @@ ka_scheduler_tick() {
         fi
 
         # Secondary intentionally preempts main when both timers become due together.
-        if [[ ${KA_T_SECONDARY_ENABLED[$uuid]} == 1 ]] && ((KA_T_SECONDARY_REMAIN[$uuid] <= 0)); then
+        # It is a one-shot nudge: after it has fired for this arming it stays quiet until
+        # the target is reconfigured, rather than repeating every interval.
+        if [[ ${KA_T_SECONDARY_ENABLED[$uuid]} == 1 ]] && ((KA_T_SECONDARY_REMAIN[$uuid] <= 0)) \
+            && ((${KA_T_SECONDARY_DONE[$uuid]:-0} == 0)); then
             ka_scheduler_send_secondary "$uuid" AUTO || true
         fi
         [[ ${KA_T_STATUS[$uuid]} == ACTIVE ]] || continue

@@ -38,17 +38,17 @@ ka_wizard_header() {
         [[ -n $subject ]] && ka_tui_bar_add 6 0 "$(ka_tui_truncate "$subject" "$width")"
         ka_tui_bar_end
         if ka_tui_bar_flush; then
-            printf '%s  %s\n%s\n' "$KA_G_V" "$(ka_wizard_progress "$step")" "$KA_G_V"
+            printf '%s  %s\033[K\n%s\033[K\n' "$KA_G_V" "$(ka_wizard_progress "$step")" "$KA_G_V"
             return 0
         fi
     fi
     ka_tui_box_top "$icon" "${KA_WIZARD_ACTION:-Configure} Keep Alive - Step $step of 6"
     if [[ -n $subject ]]; then
-        printf '%s %s  %s%s%s\n' "$KA_G_V" "$title" "$KA_DIM" "$(ka_tui_truncate "$subject" "$width")" "$KA_RESET"
+        printf '%s %s  %s%s%s\033[K\n' "$KA_G_V" "$title" "$KA_DIM" "$(ka_tui_truncate "$subject" "$width")" "$KA_RESET"
     else
-        printf '%s %s\n' "$KA_G_V" "$title"
+        printf '%s %s\033[K\n' "$KA_G_V" "$title"
     fi
-    printf '%s  %s\n%s\n' "$KA_G_V" "$(ka_wizard_progress "$step")" "$KA_G_V"
+    printf '%s  %s\033[K\n%s\033[K\n' "$KA_G_V" "$(ka_wizard_progress "$step")" "$KA_G_V"
 }
 
 # Role: Draw the key-hint footer, choosing a compact form on narrow terminals.
@@ -58,7 +58,7 @@ ka_wizard_hint() {
     local long=$1 short=${2-} text
     text=$long
     [[ -n $short ]] && ((${KA_TUI_COLS:-80} < ${#long} + 4)) && text=$short
-    printf '%s\n%s  %s\n' "$KA_G_V" "$KA_G_V" "$(ka_tui_truncate "$text" "$(ka_tui_field_width 4)")"
+    printf '%s\033[K\n%s  %s\033[K\n' "$KA_G_V" "$KA_G_V" "$(ka_tui_truncate "$text" "$(ka_tui_field_width 4)")"
 }
 
 # Role: Draw a selectable wizard option line with a consistent highlight marker.
@@ -67,10 +67,10 @@ ka_wizard_option() {
     width=$(ka_tui_field_width 12 10)
     label=$(ka_tui_truncate "$label" "$width")
     if [[ $active == 1 ]]; then
-        printf '%s  %s%s%s %s%s  %s%s\n' "$KA_G_V" "$KA_CYAN" "$KA_BOLD" "$KA_G_SEL" \
+        printf '%s  %s%s%s %s%s  %s%s\033[K\n' "$KA_G_V" "$KA_CYAN" "$KA_BOLD" "$KA_G_SEL" \
             "$number" "$KA_RESET" "${KA_BOLD}${label}" "$KA_RESET"
     else
-        printf '%s    %s%s%s  %s\n' "$KA_G_V" "$KA_DIM" "$number" "$KA_RESET" "$label"
+        printf '%s    %s%s%s  %s\033[K\n' "$KA_G_V" "$KA_DIM" "$number" "$KA_RESET" "$label"
     fi
 }
 
@@ -214,8 +214,8 @@ ka_wizard_step_secondary() {
         ka_wizard_option "$((choice == 0))" '1' 'Disabled'
         ka_wizard_option "$((choice == 1))" '2' 'Enabled'
         if ((choice == 1)); then
-            printf '%s\n%s Message : %s\n' "$KA_G_V" "$KA_G_V" "$(ka_tui_truncate "$message" "$text_w")"
-            printf '%s Interval: %s\n' "$KA_G_V" "$(ka_format_duration "$interval")"
+            printf '%s\033[K\n%s Message : %s\033[K\n' "$KA_G_V" "$KA_G_V" "$(ka_tui_truncate "$message" "$text_w")"
+            printf '%s Interval: %s\033[K\n' "$KA_G_V" "$(ka_format_duration "$interval")"
         fi
         ka_wizard_hint 'up/down toggle    Enter continue    Esc back' 'up/down  Enter next  Esc back'
         ka_tui_box_bottom
@@ -255,7 +255,7 @@ ka_wizard_step_notifications() {
         ka_wizard_header "$KA_I_NOTIFY" 4 'Desktop notifications'
         ka_wizard_option "$((choice == 0))" '1' 'OFF'
         ka_wizard_option "$((choice == 1))" '2' 'ON'
-        printf '%s\n%s Successful sends and target-loss events follow this setting.\n' "$KA_G_V" "$KA_G_V"
+        printf '%s\033[K\n%s Successful sends and target-loss events follow this setting.\033[K\n' "$KA_G_V" "$KA_G_V"
         ka_wizard_hint 'up/down toggle    Enter continue    Esc back' 'up/down  Enter next  Esc back'
         ka_tui_box_bottom
         ka_tui_frame_end
@@ -282,7 +282,7 @@ ka_wizard_step_delivery() {
         ka_wizard_header "$KA_I_ENTER" 5 'Delivery mode'
         ka_wizard_option "$((choice == 0))" '1' 'MESSAGE + ENTER'
         ka_wizard_option "$((choice == 1))" '2' 'ENTER ONLY'
-        printf '%s\n%s Pressing e later toggles this mode for the selected target.\n' "$KA_G_V" "$KA_G_V"
+        printf '%s\033[K\n%s Pressing e later toggles this mode for the selected target.\033[K\n' "$KA_G_V" "$KA_G_V"
         ka_wizard_hint 'up/down toggle    Enter continue    Esc back' 'up/down  Enter next  Esc back'
         ka_tui_box_bottom
         ka_tui_frame_end
@@ -314,19 +314,19 @@ ka_wizard_step_review() {
         if ka_wizard_too_small; then ka_tui_read_key 60 || continue; [[ $KA_KEY == ESC ]] && return 2; continue; fi
         text_w=$(ka_tui_field_width 24 12)
         ka_wizard_header "$KA_I_CONFIG" 6 'Review and save'
-        printf '%s Main messages      %d-message rotation\n' "$KA_G_V" "$count"
-        printf '%s Main interval      %s\n' "$KA_G_V" "$(ka_format_duration "$(ka_read_first_line "$config_dir/main_interval")")"
+        printf '%s Main messages      %d-message rotation\033[K\n' "$KA_G_V" "$count"
+        printf '%s Main interval      %s\033[K\n' "$KA_G_V" "$(ka_format_duration "$(ka_read_first_line "$config_dir/main_interval")")"
         if [[ $secondary == 1 ]]; then
-            printf '%s Secondary          %s - %s\n' "$KA_G_V" \
+            printf '%s Secondary          %s - %s\033[K\n' "$KA_G_V" \
                 "$(ka_format_duration "$(ka_read_first_line "$config_dir/secondary_interval")")" \
                 "$(ka_tui_truncate "$(ka_read_first_line "$config_dir/secondary_message")" "$text_w")"
         else
-            printf '%s Secondary          disabled\n' "$KA_G_V"
+            printf '%s Secondary          disabled\033[K\n' "$KA_G_V"
         fi
-        printf '%s Notifications      %s\n' "$KA_G_V" "$([[ $(ka_read_first_line "$config_dir/notifications") == 1 ]] && printf ON || printf OFF)"
-        printf '%s Delivery           %s\n' "$KA_G_V" "$(ka_read_first_line "$config_dir/delivery_mode")"
-        printf '%s\n%s Saving updates this target and the one global profile only.\n' "$KA_G_V" "$KA_G_V"
-        printf '%s Existing keep-alives are not changed.\n' "$KA_G_V"
+        printf '%s Notifications      %s\033[K\n' "$KA_G_V" "$([[ $(ka_read_first_line "$config_dir/notifications") == 1 ]] && printf ON || printf OFF)"
+        printf '%s Delivery           %s\033[K\n' "$KA_G_V" "$(ka_read_first_line "$config_dir/delivery_mode")"
+        printf '%s\033[K\n%s Saving updates this target and the one global profile only.\033[K\n' "$KA_G_V" "$KA_G_V"
+        printf '%s Existing keep-alives are not changed.\033[K\n' "$KA_G_V"
         ka_wizard_hint 'Enter save      Esc back'
         ka_tui_box_bottom
         ka_tui_frame_end

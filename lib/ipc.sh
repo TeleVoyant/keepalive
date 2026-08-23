@@ -23,7 +23,7 @@ ka_ipc_ensure_socket_unit() {
 
 # Role: Create a new private request directory and print its request identifier.
 ka_ipc_new_request() {
-    local command=$1 uuid=${2-} id dir
+    local command=$1 uuid=${2-} value=${3-} id dir
     ka_ensure_runtime_dirs
     id=$(ka_request_id)
     dir=$(ka_ipc_request_dir "$id")
@@ -31,6 +31,9 @@ ka_ipc_new_request() {
     chmod 700 "$dir" 2>/dev/null || true
     ka_write_scalar "$dir/command" "$command"
     [[ -n $uuid ]] && ka_write_scalar "$dir/uuid" "$uuid"
+    # Operations that need one scalar argument put it in a data file, keeping the FIFO
+    # line to just the request id.
+    [[ -n $value ]] && ka_write_scalar "$dir/value" "$value"
     printf '%s' "$id"
 }
 
@@ -65,8 +68,8 @@ ka_ipc_wait_response() {
 
 # Role: Submit a simple command request and wait synchronously for the daemon response.
 ka_ipc_call() {
-    local command=$1 uuid=${2-} id
-    id=$(ka_ipc_new_request "$command" "$uuid") || return
+    local command=$1 uuid=${2-} value=${3-} id
+    id=$(ka_ipc_new_request "$command" "$uuid" "$value") || return
     ka_ipc_signal_request "$id" || { rm -rf -- "$(ka_ipc_request_dir "$id")"; return 1; }
     ka_ipc_wait_response "$id"
 }
@@ -113,6 +116,8 @@ ka_ipc_handle_request() {
     [[ -d $dir ]] || { ka_ipc_respond "$id" ERROR 'request directory not found'; return 1; }
     command=$(ka_read_first_line "$dir/command")
     uuid=$(ka_read_first_line "$dir/uuid")
+    local value
+    value=$(ka_read_first_line "$dir/value")
     # Validators record why they refused; start clean so a stale reason cannot leak
     # into an unrelated response.
     ka_error_reset
@@ -141,6 +146,12 @@ ka_ipc_handle_request() {
             ;;
         TOGGLE_MODE)
             ka_state_toggle_mode "$uuid" || { rc=$?; message=${KA_LAST_ERROR:-'delivery mode cannot be changed'}; }
+            ;;
+        SET_MODE)
+            ka_state_set_mode "$uuid" "$value" || { rc=$?; message=${KA_LAST_ERROR:-'delivery mode cannot be changed'}; }
+            ;;
+        SEND_ENTER)
+            ka_scheduler_send_enter_once "$uuid" MANUAL || { rc=$?; message=${KA_LAST_ERROR:-'enter send failed'}; }
             ;;
         RESET_MAIN)
             ka_state_reset_main "$uuid" || { rc=$?; message=${KA_LAST_ERROR:-'main timer cannot be reset'}; }

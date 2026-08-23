@@ -103,7 +103,7 @@ ka_tui_bar_end() {
 # so the caller can render its plain fallback instead of emitting a wrapped bar.
 ka_tui_bar_flush() {
     ((KA_BAR_WIDTH <= ${KA_TUI_COLS:-80})) || return 1
-    printf '%s\n' "$KA_BAR_OUT"
+    printf '%s\033[K\n' "$KA_BAR_OUT"
 }
 
 # Role: Enter the alternate screen, hide cursor, and install safe restoration traps.
@@ -206,7 +206,7 @@ ka_tui_box_rule() {
     fill=$((cols - used))
     ((fill < 1)) && fill=1
     for ((i = 0; i < fill; i++)); do bar+=$KA_G_H; done
-    printf '%s%s%s%s%s\n' "$left" "$head" "$bar" "$tail" "$right"
+    printf '%s%s%s%s%s\033[K\n' "$left" "$head" "$bar" "$tail" "$right"
 }
 
 # Role: Draw the top rule of a framed view.
@@ -232,7 +232,7 @@ ka_tui_hrule() {
     ((width < 1)) && width=1
     for ((i = 0; i < indent; i++)); do pad+=' '; done
     for ((i = 0; i < width; i++)); do bar+=$KA_G_H; done
-    printf '%s%s\n' "$pad" "$bar"
+    printf '%s%s\033[K\n' "$pad" "$bar"
 }
 
 # Role: Report whether the terminal is large enough for a framed view to render legibly.
@@ -244,7 +244,7 @@ ka_tui_too_small() {
 # Role: Render the shared "terminal too small" placeholder used by every framed view.
 ka_tui_render_too_small() {
     local min_cols=${1:-52} min_lines=${2:-14}
-    printf 'Keep Alive\n\nTerminal too small.\nResize to at least %dx%d (now %dx%d).\n' \
+    printf 'Keep Alive\033[K\n\033[K\nTerminal too small.\033[K\nResize to at least %dx%d (now %dx%d).\033[K\n' \
         "$min_cols" "$min_lines" "${KA_TUI_COLS:-0}" "${KA_TUI_LINES:-0}"
 }
 
@@ -464,7 +464,7 @@ ka_tui_prompt_line() {
     KA_PROMPT_VALUE=''
     stty echo 2>/dev/null || true
     tput cnorm 2>/dev/null || printf '\033[?25h'
-    printf '\n%s%s%s' "$KA_BOLD" "$prompt" "$KA_RESET"
+    printf '\033[K\n%s%s%s' "$KA_BOLD" "$prompt" "$KA_RESET"
     [[ -n $default ]] && printf ' [%s]' "$default"
     printf ': '
     IFS= read -r value || value=''
@@ -489,7 +489,7 @@ ka_tui_render_toast() {
     now=$(ka_now_epoch)
     # A backward wall-clock correction must expire the toast rather than pin it forever.
     if [[ -n ${KA_TUI_TOAST:-} ]] && ((${KA_TUI_TOAST_UNTIL:-0} >= now && KA_TUI_TOAST_UNTIL - now <= 2)); then
-        printf '\n  %s%s%s\n' "$KA_CYAN" "$(ka_tui_truncate "$KA_TUI_TOAST" "$(ka_tui_field_width 4)")" "$KA_RESET"
+        printf '\033[K\n  %s%s%s\033[K\n' "$KA_CYAN" "$(ka_tui_truncate "$KA_TUI_TOAST" "$(ka_tui_field_width 4)")" "$KA_RESET"
     else
         KA_TUI_TOAST=''
     fi

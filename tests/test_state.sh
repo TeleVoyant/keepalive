@@ -100,6 +100,25 @@ assert_eq 0 "${KA_T_STRIKES[$uuid]}" 'a successful validation clears accumulated
 unset KEEPALIVE_VALIDATION_STRIKES
 source "$TEST_ROOT/lib/konsole.sh"
 
+# The one-shot secondary re-arms when the target is reconfigured, alongside the countdowns.
+KA_T_SECONDARY_DONE[$uuid]=1
+recfg="$TEST_TMP/rearm"
+ka_state_copy_target_to_request "$uuid" "$recfg"
+ka_state_configure_target "$uuid" "$recfg"
+assert_eq 0 "${KA_T_SECONDARY_DONE[$uuid]}" 'reconfiguring re-arms the one-shot secondary'
+
+# secondary_done is deliberately optional so checkpoints written before it existed load.
+ka_state_save_target "$uuid"
+state_file="$(ka_state_target_dir "$uuid")/state.tsv"
+assert_contains "$state_file" 'secondary_done' 'the checkpoint records the one-shot state'
+grep -v '^secondary_done' "$state_file" > "$state_file.old" && mv "$state_file.old" "$state_file"
+saved_status=${KA_T_STATUS[$uuid]}
+ka_state_init_arrays
+assert_true 'a checkpoint without secondary_done still loads' \
+    ka_state_load_target_dir "$(ka_state_target_dir "$uuid")"
+assert_eq 0 "${KA_T_SECONDARY_DONE[$uuid]}" 'a missing secondary_done defaults to not-yet-sent'
+assert_eq "$saved_status" "${KA_T_STATUS[$uuid]}" 'the rest of the checkpoint is unaffected'
+
 ka_state_mark_unavailable "$uuid" 'AI process exited'
 assert_eq UNAVAILABLE "${KA_T_STATUS[$uuid]}" 'target loss is sticky unavailable'
 assert_contains "$(ka_log_path "$uuid")" 'UNAVAILABLE' 'unavailable event is logged per target'

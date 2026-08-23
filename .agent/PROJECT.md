@@ -41,7 +41,8 @@ keepalive delete UUID                      remove one keep-alive and its history
 keepalive pause UUID | resume UUID         idempotent freeze/resume
 keepalive send UUID [secondary]            immediate delivery
 keepalive reset UUID                       reset the main countdown
-keepalive mode UUID                        toggle delivery mode
+keepalive enter UUID                       one Enter now, then resume MESSAGE+ENTER
+keepalive mode UUID [message-enter|enter-only]   set or toggle delivery mode
 keepalive status                           daemon ping
 keepalive refresh                          immediate discovery/validation
 keepalive profile                          print persistent defaults
@@ -85,6 +86,12 @@ reset the main timer; manual secondary sends reset only the secondary timer.
   the count.
 - `ENTER_ONLY` never consumes the queued main message.
 - Secondary delivery never resets or subtracts the main countdown.
+- The secondary prompt is a **one-shot nudge**: it fires automatically at most once per
+  arming, and re-arms only when the target is reconfigured. Manual secondary sends always
+  work and do not consume the one-shot.
+- Detail-view `e` sends a single Enter now and returns the target to `MESSAGE_ENTER`; it
+  never consumes a queued message and completes a pending submit if one is owed.
+- Detail-view `E` pins `ENTER_ONLY` from then on.
 - A target is identity-validated immediately before every manual or automatic
   send.
 - D-Bus validation timeouts fail the event but remain transient; they never prove
@@ -193,7 +200,6 @@ persistent config directory.
 |---|---|---|
 | `XDG_CONFIG_HOME` | Persistent config base | `$HOME/.config` |
 | `XDG_RUNTIME_DIR` | Login-scoped runtime base | `/tmp/keepalive-$UID` fallback |
-| `XDG_STATE_HOME` | Resolved but unused | `$HOME/.local/state` |
 | `NO_COLOR` | Disable current client's colors when non-empty | unset |
 | `KEEPALIVE_QDBUS` | Explicit qdbus override; also pins the qdbus transport, which is how tests inject their mock | auto-detect |
 | `KEEPALIVE_DBUS_SEND` | Explicit dbus-send override | auto-detect |
@@ -203,6 +209,11 @@ persistent config directory.
 | `KEEPALIVE_VALIDATION_STRIKES` | Consecutive transient failures before a target is given up on | `5` |
 | `KEEPALIVE_LOG_MAX_LINES` | Retained event-log lines per target | `2000` |
 | `KEEPALIVE_LOG_CHECK_EVERY` | Events between log-trim checks | `200` |
+| `KEEPALIVE_DISCOVERY_BUDGET_MS` | Wall-clock budget for one discovery pass | `1000` |
+| `KEEPALIVE_MAX_MESSAGES` | Maximum main-rotation entries | `64` |
+| `KEEPALIVE_MAX_MESSAGE_LENGTH` | Maximum characters per message | `2000` |
+| `KEEPALIVE_ATOMIC_SUBMIT` | Send text and submit in one `sendText` | `0` |
+| `KEEPALIVE_SKIP_SHELLCHECK` | Skip the optional ShellCheck stage in `dev-check.sh` | unset |
 | `KEEPALIVE_QDBUS_TIMEOUT` | Per-qdbus-call deadline, positive integer seconds | `2` |
 | `KEEPALIVE_NOTIFY_SEND` | Explicit executable notification helper override | `notify-send` |
 | `KEEPALIVE_NOTIFY_TIMEOUT` | Per-notification deadline, positive integer seconds | `2` |
@@ -274,3 +285,12 @@ name/pattern without adding another order slot.
     generic string.
 27. Periodic health may use the discovery snapshot; pre-send validation may not.
 28. Event logs are bounded, and repeated gap events are collapsed per episode.
+29. Every drawn TUI line erases its own tail; screen output and data output never share
+    a `printf` rewrite.
+30. One discovery pass is time-bounded, and only a complete pass replaces the snapshot.
+31. A message delivered without its submit is completed, never re-sent.
+32. The runtime base is verified before use when it is not an XDG runtime directory.
+33. The secondary prompt fires once per arming; only CONFIGURE re-arms it.
+34. `e` is a one-shot action, not a mode toggle; `E` is the persistent mode change.
+35. Never write `local a=$1 b="$a..."`: bash expands every assignment word before creating
+    any of them, so the second reads an outer `a` and fails under `set -u` without one.

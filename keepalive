@@ -43,7 +43,8 @@ Usage:
   keepalive pause UUID | resume UUID              Freeze or resume one keep-alive
   keepalive send UUID [secondary]                 Send a keep-alive immediately
   keepalive reset UUID                            Reset the main countdown
-  keepalive mode UUID                             Toggle MESSAGE+ENTER / ENTER ONLY
+  keepalive enter UUID                            Send one Enter, then resume MESSAGE+ENTER
+  keepalive mode UUID [message-enter|enter-only]  Set or toggle delivery mode
   keepalive status                                Check user service availability
   keepalive refresh                               Force immediate Konsole discovery
   keepalive profile                               Show the single persistent default profile
@@ -130,9 +131,9 @@ ka_cli_status_of() {
 # The daemon now returns the specific refusal reason, so scripts get an actionable
 # message rather than a fixed generic string.
 ka_cli_request() {
-    local command=$1 uuid=${2-} response
+    local command=$1 uuid=${2-} value=${3-} response
     ka_cli_ensure_service || return 1
-    response=$(ka_ipc_call "$command" "$uuid") || true
+    response=$(ka_ipc_call "$command" "$uuid" "$value") || true
     printf '%s\n' "${response#*$'\t'}"
     [[ $response == OK$'\t'* ]]
 }
@@ -290,8 +291,17 @@ ka_cli_main() {
               else ka_cli_request SEND_MAIN "${args[1]}"; fi ;;
         reset) [[ -n ${args[1]-} ]] || { ka_error 'usage: keepalive reset UUID'; return 2; }
                ka_cli_request RESET_MAIN "${args[1]}" ;;
-        mode) [[ -n ${args[1]-} ]] || { ka_error 'usage: keepalive mode UUID'; return 2; }
-              ka_cli_request TOGGLE_MODE "${args[1]}" ;;
+        mode)
+            [[ -n ${args[1]-} ]] || { ka_error 'usage: keepalive mode UUID [message-enter|enter-only]'; return 2; }
+            case ${args[2]-} in
+                '') ka_cli_request TOGGLE_MODE "${args[1]}" ;;
+                message-enter) ka_cli_request SET_MODE "${args[1]}" MESSAGE_ENTER ;;
+                enter-only) ka_cli_request SET_MODE "${args[1]}" ENTER_ONLY ;;
+                *) ka_error 'mode must be message-enter or enter-only'; return 2 ;;
+            esac
+            ;;
+        enter) [[ -n ${args[1]-} ]] || { ka_error 'usage: keepalive enter UUID'; return 2; }
+               ka_cli_request SEND_ENTER "${args[1]}" ;;
         status) ka_cli_ensure_service && printf 'Keep Alive service: online\n' ;;
         refresh) ka_cli_ensure_service && ka_ipc_call REFRESH '' ;;
         profile) ka_profile_print ;;

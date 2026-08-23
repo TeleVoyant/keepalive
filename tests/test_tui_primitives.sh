@@ -17,9 +17,10 @@ test_render_detail_frame() { ka_tui_frame_begin; }
 # Role: Flush a segment bar while keeping the bar itself out of the test transcript.
 flush_bar_quietly() { ka_tui_bar_flush >/dev/null; }
 
-# Role: Report the cell count of a rendered frame rule, which never carries styling.
+# Role: Report the cell count of a rendered frame rule, excluding its tail-erase escape.
 visible_width() {
-    printf '%d' "${#1}"
+    local line=${1//$'\033[K'/}
+    printf '%d' "${#line}"
 }
 
 assert_eq '#####-----' "$(ka_tui_progress 500 1000 10)" 'ASCII timer bar shows remaining-time depletion'
@@ -155,5 +156,27 @@ assert_eq 'clean'       "$(prompt_with $'cl\x01ean')"  'control bytes are stripp
 multiline_probe=$(prompt_with 'hello world')
 assert_eq "$multiline_probe" "${multiline_probe//$'\n'/}" 'returned value never contains a newline'
 assert_eq "$multiline_probe" "${multiline_probe//$'\033'/}" 'returned value never contains an escape byte' 
+
+# Every drawn line must erase to end of line. Without it, a shorter line redrawn over a
+# longer one at the same row leaves the old tail visible: that is what duplicated the
+# key-hint footer after a reset and after adding a wizard message.
+# Role: Report whether every line of a rendered block clears its own tail.
+all_lines_erase() {
+    local line
+    while IFS= read -r line; do
+        [[ $line == *$'\033[K' ]] || return 1
+    done <<<"$1"
+    return 0
+}
+
+KA_TUI_COLS=60; KA_TUI_LINES=24
+assert_true 'box top erases to end of line'    all_lines_erase "$(ka_tui_box_top '' 'Title')"
+assert_true 'box middle erases to end of line' all_lines_erase "$(ka_tui_box_mid '' 'Section')"
+assert_true 'box bottom erases to end of line' all_lines_erase "$(ka_tui_box_bottom)"
+assert_true 'indented rule erases to end of line' all_lines_erase "$(ka_tui_hrule 2)"
+assert_true 'the too-small notice erases every line' all_lines_erase "$(ka_tui_render_too_small 52 14)"
+KA_TUI_TOAST='saved'; KA_TUI_TOAST_UNTIL=$(( $(ka_now_epoch) + 2 ))
+assert_true 'the toast erases to end of line' all_lines_erase "$(ka_tui_render_toast)"
+KA_TUI_TOAST=''
 
 test_finish

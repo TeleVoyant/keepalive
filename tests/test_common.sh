@@ -28,4 +28,36 @@ ka_write_scalar "$clock_file" 'not-a-clock'
 assert_false 'invalid injected monotonic clock is rejected' ka_now_monotonic
 unset KEEPALIVE_MONOTONIC_FILE
 
+# ka_strip_controls previously removed only a named handful of control characters.
+assert_eq 'abc' "$(ka_strip_controls $'a\x01b\x7fc')" 'all C0 controls and DEL are stripped'
+assert_eq 'a b' "$(ka_strip_controls $'a\tb')" 'tabs become spaces'
+
+ka_now_ms
+assert_true 'millisecond clock returns a plausible epoch value' [ "$REPLY" -gt 1000000000000 ]
+
+# A staged directory swap must roll back rather than destroy the live copy.
+staging_root="$TEST_TMP/stage"; mkdir -p "$staging_root/live" "$staging_root/new"
+printf 'old\n' >"$staging_root/live/001"
+printf 'new\n' >"$staging_root/new/001"
+assert_true 'staged commit replaces the destination' ka_commit_staged_dir "$staging_root/new" "$staging_root/live"
+assert_eq 'new' "$(cat "$staging_root/live/001")" 'committed content replaces the original'
+assert_false 'a missing staging directory fails' ka_commit_staged_dir "$staging_root/absent" "$staging_root/live"
+assert_eq 'new' "$(cat "$staging_root/live/001")" 'a failed commit leaves the destination intact'
+
+mkdir -p "$staging_root/orphan.staged.1" "$staging_root/orphan.trash.2"
+ka_cleanup_staged_dirs "$staging_root"
+assert_false 'abandoned staging directories are swept' test -d "$staging_root/orphan.staged.1"
+assert_false 'abandoned rollback directories are swept' test -d "$staging_root/orphan.trash.2"
+
+# The predictable /tmp fallback must refuse an unsafe base.
+saved_runtime=$XDG_RUNTIME_DIR
+unset XDG_RUNTIME_DIR
+KA_RUNTIME_BASE="$TEST_TMP/evil"
+ln -s /tmp "$KA_RUNTIME_BASE"
+assert_false 'a symlinked runtime base is refused' ka_runtime_secure
+rm -f "$KA_RUNTIME_BASE"
+KA_RUNTIME_BASE="$TEST_TMP/fallback"
+assert_true 'an owned runtime base is accepted' ka_runtime_secure
+export XDG_RUNTIME_DIR=$saved_runtime
+
 test_finish

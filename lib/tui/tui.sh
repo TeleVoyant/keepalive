@@ -60,7 +60,7 @@ ka_tui_load_target_fields() {
     local uuid=$1 file line key value
     KA_F_TYPE='' KA_F_NAME='' KA_F_DIR='' KA_F_STATUS='' KA_F_MODE='' KA_F_NOTIFY=''
     KA_F_MAIN_REMAIN=0 KA_F_MAIN_INTERVAL=0 KA_F_MAIN_INDEX=0
-    KA_F_SEC_ENABLED=0 KA_F_SEC_REMAIN=0 KA_F_SEC_INTERVAL=0
+    KA_F_SEC_ENABLED=0 KA_F_SEC_REMAIN=0 KA_F_SEC_INTERVAL=0 KA_F_SEC_DONE=0
     KA_F_LAST='' KA_F_REASON=''
     file="$(ka_state_target_dir "$uuid")/state.tsv"
     [[ -r $file ]] || return 1
@@ -85,6 +85,7 @@ ka_tui_load_target_fields() {
             secondary_enabled) KA_F_SEC_ENABLED=$value ;;
             secondary_remaining) KA_F_SEC_REMAIN=$value ;;
             secondary_interval) KA_F_SEC_INTERVAL=$value ;;
+            secondary_done) KA_F_SEC_DONE=$value ;;
             last_seen) KA_F_LAST=$value ;;
             reason) KA_F_REASON=$value ;;
         esac
@@ -150,7 +151,7 @@ ka_tui_render_row_full() {
     else
         printf '%s' "$KA_G_NONE"
     fi
-    printf '\n'
+    printf '\033[K\n'
 }
 
 # Role: Render one manager row in narrow stacked form when terminal width is constrained.
@@ -160,14 +161,14 @@ ka_tui_render_row_compact() {
     status=${KA_R_STATUS[$i]}; mr=${KA_R_MAIN_REMAIN[$i]}; mi=${KA_R_MAIN_INTERVAL[$i]}
     se=${KA_R_SEC_ENABLED[$i]}; sr=${KA_R_SEC_REMAIN[$i]}
     name_w=$(ka_tui_field_width 22 12)
-    printf ' %s %2d %-10s / %s\n' "$marker" "$number" \
+    printf ' %s %2d %-10s / %s\033[K\n' "$marker" "$number" \
         "$(ka_tui_truncate "${KA_R_TYPE[$i]}" 10)" "$(ka_tui_truncate "${KA_R_NAME[$i]}" "$name_w")"
     printf '      '; ka_tui_status "$status"
     if [[ $status == ACTIVE || $status == PAUSED ]]; then
         printf '   '; ka_tui_progress "$mr" "$mi" 10; printf ' %s' "$(ka_format_duration "$mr")"
         [[ $se == 1 ]] && printf '   S %s' "$(ka_format_duration "$sr")"
     fi
-    printf '\n'
+    printf '\033[K\n'
 }
 
 # Role: Draw the manager header as a colored segment bar, falling back to the plain box.
@@ -189,7 +190,7 @@ ka_tui_render_manager_header() {
         ka_tui_bar_add 0 7 "$now"
         ka_tui_bar_end
         if ka_tui_bar_flush; then
-            printf '\n'
+            printf '\033[K\n'
             return 0
         fi
     fi
@@ -203,9 +204,9 @@ ka_tui_render_manager_header() {
     fi
     ka_tui_box_top "$KA_I_AI" 'Keep Alive Manager' "$now"
     # Truncated unconditionally: the counts are unbounded, so no fixed threshold is safe.
-    printf '%s %s\n' "$KA_G_V" "$(ka_tui_truncate "$summary" "$(ka_tui_field_width 2)")"
+    printf '%s %s\033[K\n' "$KA_G_V" "$(ka_tui_truncate "$summary" "$(ka_tui_field_width 2)")"
     ka_tui_box_bottom
-    printf '\n'
+    printf '\033[K\n'
 }
 
 # Role: Render the canonical manager overview while adapting to terminal dimensions.
@@ -229,19 +230,19 @@ ka_tui_render_manager() {
     if ((cols >= 92)); then
         local name_w
         name_w=$(ka_tui_row_name_width)
-        printf '    TYPE       %-*s KEEP-ALIVE     MAIN       NUDGE\n' "$name_w" 'SESSION'
+        printf '    TYPE       %-*s KEEP-ALIVE     MAIN       NUDGE\033[K\n' "$name_w" 'SESSION'
         ka_tui_hrule 2
         for ((i=offset; i<end; i++)); do ka_tui_render_row_full "$i" "$selected" "$((i + 1))" "$name_w"; done
     else
         for ((i=offset; i<end; i++)); do ka_tui_render_row_compact "$i" "$selected" "$((i + 1))"; done
     fi
     if ((n > max_rows)); then
-        printf '\n  showing %d-%d of %d\n' "$((offset + 1))" "$end" "$n"
+        printf '\033[K\n  showing %d-%d of %d\033[K\n' "$((offset + 1))" "$end" "$n"
     fi
     if ((cols >= 78)); then
-        printf '\n  up/down or j/k navigate    1-9 select    Enter open    r refresh    q quit\n'
+        printf '\033[K\n  up/down or j/k navigate    1-9 select    Enter open    r refresh    q quit\033[K\n'
     else
-        printf '\n  j/k move  1-9 pick  Enter open  r refresh  q quit\n'
+        printf '\033[K\n  j/k move  1-9 pick  Enter open  r refresh  q quit\033[K\n'
     fi
     ka_tui_render_toast
     ka_tui_frame_end
@@ -249,8 +250,8 @@ ka_tui_render_manager() {
 
 # Role: Submit one simple target action and convert daemon response into a transient toast.
 ka_tui_action() {
-    local command=$1 uuid=$2 response
-    response=$(ka_ipc_call "$command" "$uuid" 2>/dev/null || true)
+    local command=$1 uuid=$2 value=${3-} response
+    response=$(ka_ipc_call "$command" "$uuid" "$value" 2>/dev/null || true)
     if [[ $response == OK$'\t'* ]]; then ka_tui_toast "${response#*$'\t'}"; return 0; fi
     ka_tui_toast "${response#*$'\t'}"
     return 1
@@ -263,10 +264,10 @@ ka_tui_confirm_delete() {
         ka_tui_frame_begin
         width=$(ka_tui_field_width 4)
         ka_tui_box_top "$KA_I_DELETE" 'Delete Keep Alive'
-        printf '%s Delete keep-alive for %s?\n' "$KA_G_V" "$(ka_tui_truncate "$name" "$((width - 24))")"
+        printf '%s Delete keep-alive for %s?\033[K\n' "$KA_G_V" "$(ka_tui_truncate "$name" "$((width - 24))")"
         printf '%s This removes only manager state and this target'\''s runtime event history.\n' "$KA_G_V"
-        printf '%s The AI process and Konsole tab are never terminated.\n' "$KA_G_V"
-        printf '%s\n%s y delete     n/Esc cancel\n' "$KA_G_V" "$KA_G_V"
+        printf '%s The AI process and Konsole tab are never terminated.\033[K\n' "$KA_G_V"
+        printf '%s\033[K\n%s y delete     n/Esc cancel\033[K\n' "$KA_G_V" "$KA_G_V"
         ka_tui_box_bottom
         ka_tui_frame_end
         ka_tui_read_key 60 || continue
@@ -281,7 +282,7 @@ ka_tui_render_recent_events() {
     ka_tui_box_mid "$KA_I_LOG" 'Recent events'
     detail_w=$(ka_tui_field_width 38 12)
     while IFS=$'\t' read -r time event detail result; do
-        printf '%s  %-8s %-11s %-*s %s\n' "$KA_G_V" "$time" "$event" \
+        printf '%s  %-8s %-11s %-*s %s\033[K\n' "$KA_G_V" "$time" "$event" \
             "$detail_w" "$(ka_tui_truncate "$detail" "$detail_w")" "$(ka_tui_truncate "$result" 12)"
     done < <(ka_log_tail "$uuid" "$max")
 }
@@ -302,12 +303,12 @@ ka_tui_render_detail_header() {
         ka_tui_bar_add 0 7 "$now"
         ka_tui_bar_end
         if ka_tui_bar_flush; then
-            printf '%s\n' "$KA_G_V"
+            printf '%s\033[K\n' "$KA_G_V"
             return 0
         fi
     fi
     ka_tui_box_top "$KA_I_AI" "Keep Alive $(ka_tui_truncate "$KA_F_TYPE / $KA_F_NAME" 32)" "$now"
-    printf '%s\n%s  Status          ' "$KA_G_V" "$KA_G_V"; ka_tui_status "$KA_F_STATUS"; printf '\n'
+    printf '%s\033[K\n%s  Status          ' "$KA_G_V" "$KA_G_V"; ka_tui_status "$KA_F_STATUS"; printf '\n'
 }
 
 # Role: Render one existing keep-alive target detail view from atomic persisted state.
@@ -333,43 +334,48 @@ ka_tui_render_detail() {
     printf '%s  ' "$KA_G_V"; ka_icon_label "$KA_I_TERM" 'Target'; printf '          %s\n' "$(ka_tui_truncate "$KA_F_TYPE" "$value_w")"
     printf '%s  ' "$KA_G_V"; ka_icon_label "$KA_I_DIR" 'Directory'; printf '       %s\n' "$(ka_tui_truncate "$KA_F_DIR" "$value_w")"
     printf '%s  ' "$KA_G_V"; ka_icon_label "$KA_I_SESSION" 'Session'; printf '         %s\n' "$(ka_tui_truncate "$uuid" "$value_w")"
-    printf '%s\n%s  ' "$KA_G_V" "$KA_G_V"; ka_icon_label "$KA_I_ENTER" 'Delivery'
-    printf '        %s\n' "$([[ $KA_F_MODE == MESSAGE_ENTER ]] && printf 'MESSAGE + ENTER' || printf 'ENTER ONLY')"
+    printf '%s\033[K\n%s  ' "$KA_G_V" "$KA_G_V"; ka_icon_label "$KA_I_ENTER" 'Delivery'
+    printf '        %s\033[K\n' "$([[ $KA_F_MODE == MESSAGE_ENTER ]] && printf 'MESSAGE + ENTER' || printf 'ENTER ONLY')"
     printf '%s  ' "$KA_G_V"; ka_icon_label "$KA_I_NOTIFY" 'Notification'
-    printf '    %s\n' "$([[ $KA_F_NOTIFY == 1 ]] && printf ON || printf OFF)"
+    printf '    %s\033[K\n' "$([[ $KA_F_NOTIFY == 1 ]] && printf ON || printf OFF)"
 
     if [[ $KA_F_STATUS == UNAVAILABLE ]]; then
-        printf '%s\n%s  Last seen        %s\n%s  Reason           %s\n' "$KA_G_V" \
+        printf '%s\033[K\n%s  Last seen        %s\033[K\n%s  Reason           %s\033[K\n' "$KA_G_V" \
             "$KA_G_V" "$(ka_tui_truncate "$KA_F_LAST" "$value_w")" \
             "$KA_G_V" "$(ka_tui_truncate "$KA_F_REASON" "$value_w")"
-        printf '%s\n%s  %s\n' "$KA_G_V" "$KA_G_V" \
+        printf '%s\033[K\n%s  %s\033[K\n' "$KA_G_V" "$KA_G_V" \
             "$(ka_tui_truncate 'Timers are frozen. This record remains until you delete it.' "$(ka_tui_field_width 3)")"
     fi
 
     ka_tui_box_mid "$KA_I_TIMER" 'Timers'
-    printf '%s\n' "$KA_G_V"
+    printf '%s\033[K\n' "$KA_G_V"
     ka_tui_render_timer_row MAIN "$KA_F_MAIN_REMAIN" "$KA_F_MAIN_INTERVAL" "$bar_w" "$frozen"
     if [[ $KA_F_SEC_ENABLED == 1 ]]; then
-        ka_tui_render_timer_row SECONDARY "$KA_F_SEC_REMAIN" "$KA_F_SEC_INTERVAL" "$bar_w" "$frozen"
-        printf '%s  Prompt     %s\n' "$KA_G_V" "$(ka_tui_truncate "$secondary" "$(ka_tui_field_width 15 12)")"
+        local sec_note=$frozen
+        # The secondary is a one-shot nudge; say so once it has fired.
+        [[ ${KA_F_SEC_DONE:-0} == 1 ]] && sec_note=' · sent (one-shot)'
+        ka_tui_render_timer_row SECONDARY "$KA_F_SEC_REMAIN" "$KA_F_SEC_INTERVAL" "$bar_w" "$sec_note"
+        printf '%s  Prompt     %s\033[K\n' "$KA_G_V" "$(ka_tui_truncate "$secondary" "$(ka_tui_field_width 15 12)")"
     else
-        printf '%s  SECONDARY  disabled\n' "$KA_G_V"
+        printf '%s  SECONDARY  disabled\033[K\n' "$KA_G_V"
     fi
 
     ka_tui_box_mid "$KA_I_MESSAGE" 'Message rotation'
     ka_tui_render_message_rotation "$uuid" "$KA_F_MAIN_INDEX"
-    [[ $KA_F_MODE == ENTER_ONLY ]] && printf '%s   Enter-only mode does not consume the queued message.\n' "$KA_G_V"
+    [[ $KA_F_MODE == ENTER_ONLY ]] && printf '%s   Enter-only mode does not consume the queued message.\033[K\n' "$KA_G_V"
     ka_tui_render_recent_events "$uuid" 5
     ka_tui_box_bottom
-    printf '\n'
+    printf '\033[K\n'
     if [[ $KA_F_STATUS == UNAVAILABLE ]]; then
-        printf '  l full logs   d delete   Esc back\n'
+        printf '  l full logs   d delete   Esc back\033[K\n'
     elif ((cols >= 82)); then
-        printf '  n main now   s secondary now   r reset main   p pause/resume   e delivery mode\n'
-        printf '  c configure  l full logs       d delete       Esc back\n'
+        printf '  n main now   s secondary now   r reset main   p pause/resume\033[K\n'
+        printf '  e enter once (resumes message+enter)      E enter-only from now on\033[K\n'
+        printf '  c configure  l full logs       d delete       Esc back\033[K\n'
     else
-        printf '  n main  s secondary  r reset  p pause  e mode\n'
-        printf '  c configure  l logs  d delete  Esc back\n'
+        printf '  n main  s secondary  r reset  p pause\033[K\n'
+        printf '  e enter once   E enter-only\033[K\n'
+        printf '  c configure  l logs  d delete  Esc back\033[K\n'
     fi
     ka_tui_render_toast
     ka_tui_frame_end
@@ -382,10 +388,10 @@ ka_tui_render_timer_row() {
     printf '%s  %-11s' "$KA_G_V" "$label"
     ka_tui_progress "$remain" "$interval" "$bar_w"
     if ((${KA_TUI_COLS:-80} >= 62)); then
-        printf '  %-10s   interval %s%s\n' "$(ka_format_duration "$remain")" \
+        printf '  %-10s   interval %s%s\033[K\n' "$(ka_format_duration "$remain")" \
             "$(ka_format_duration "$interval")" "$frozen"
     else
-        printf '  %s%s\n' "$(ka_format_duration "$remain")" "$frozen"
+        printf '  %s%s\033[K\n' "$(ka_format_duration "$remain")" "$frozen"
     fi
 }
 
@@ -400,7 +406,7 @@ ka_tui_render_message_rotation() {
     for file in "$dir/messages"/[0-9][0-9][0-9]; do
         ((number += 1)); marker=' '
         ((number - 1 == index)) && marker=$KA_G_CUR
-        printf '%s   %s %2d. %s\n' "$KA_G_V" "$marker" "$number" "$(ka_tui_truncate "$(cat -- "$file")" "$text_w")"
+        printf '%s   %s %2d. %s\033[K\n' "$KA_G_V" "$marker" "$number" "$(ka_tui_truncate "$(cat -- "$file")" "$text_w")"
     done
     ((had_nullglob == 1)) || shopt -u nullglob
 }
@@ -424,14 +430,14 @@ ka_tui_logs() {
         ((offset > total - page)) && offset=$((total - page)); ((offset < 0)) && offset=0
         detail_w=$(ka_tui_field_width 34 12)
         ka_tui_box_top "$KA_I_LOG" 'Event Log' "$total events"
-        printf '\n'
+        printf '\033[K\n'
         local i time event detail result
         for ((i=offset; i<total && i<offset+page; i++)); do
             IFS=$'\t' read -r time event detail result <<<"${log_lines[$i]}"
-            printf ' %-8s %-11s %-*s %s\n' "$time" "$event" \
+            printf ' %-8s %-11s %-*s %s\033[K\n' "$time" "$event" \
                 "$detail_w" "$(ka_tui_truncate "$detail" "$detail_w")" "$(ka_tui_truncate "$result" 12)"
         done
-        printf '\n up/down scroll   PgUp/PgDn page   g first   G last   Esc back\n'
+        printf '\033[K\n up/down scroll   PgUp/PgDn page   g first   G last   Esc back\033[K\n'
         ka_tui_frame_end
         ka_tui_read_key 60 || continue
         key=$KA_KEY
@@ -469,7 +475,8 @@ ka_tui_detail() {
             s|S) ka_tui_guard_action "$status" SEND_SECONDARY "$uuid" ;;
             r|R) ka_tui_guard_action "$status" RESET_MAIN "$uuid" ;;
             p|P) ka_tui_guard_action "$status" TOGGLE_PAUSE "$uuid" ;;
-            e|E) ka_tui_guard_action "$status" TOGGLE_MODE "$uuid" ;;
+            e) ka_tui_guard_action "$status" SEND_ENTER "$uuid" ;;
+            E) ka_tui_guard_action "$status" SET_MODE "$uuid" ENTER_ONLY ;;
             c|C)
                 if [[ $status != UNAVAILABLE ]]; then
                     ka_tui_run_wizard "$uuid" "$status" "$type" "$name" || true
@@ -496,9 +503,9 @@ ka_tui_open_row() {
 # Role: Run one detail-screen action unless the target is UNAVAILABLE, absorbing failures.
 # Daemon rejections are reported to the user as a toast, never as a client exit status.
 ka_tui_guard_action() {
-    local status=$1 command=$2 uuid=$3
+    local status=$1 command=$2 uuid=$3 value=${4-}
     [[ $status != UNAVAILABLE ]] || return 0
-    ka_tui_action "$command" "$uuid" || true
+    ka_tui_action "$command" "$uuid" "$value" || true
     return 0
 }
 
@@ -539,7 +546,7 @@ ka_tui_main() {
             last_tick=$tick
             # Tell the daemon a client is watching so it keeps discovery responsive.
             # A redirect from printf is a builtin write, so this costs no fork.
-            printf '%(%s)T\n' -1 >"$KA_CLIENT_PRESENCE_FILE" 2>/dev/null || true
+            printf '%(%s)T\033[K\n' -1 >"$KA_CLIENT_PRESENCE_FILE" 2>/dev/null || true
         fi
         [[ -n ${KA_TUI_TOAST:-} ]] && dirty=1
         ((${KA_TUI_RESIZED:-0} == 1)) && dirty=1

@@ -243,7 +243,43 @@ Ranked remedies, all independent:
 6. Replace `ka_proc_signature`'s `readlink`/`tr`/`sed` forks with pure-Bash reads;
    it runs for every PID in every session's ancestry on every cycle.
 
-## Medium priority: a slow bus stalls IPC and silently freezes timers
+## Resolved on 2026-08-23: stale line tails corrupted redrawn frames
+
+`ka_tui_frame_end` emits `ED 0`, which erases only from the cursor downward. It never
+erased the tail of a line that the new frame overwrote with shorter content, so any
+change in frame height left the old text visible to the right of the new text.
+
+Reported from live use and reproduced exactly: after `reset main`, and after adding a
+message in the wizard, the key-hint footer appeared twice. Rendered screen before the fix:
+
+```text
+6:|  a add    e edit    x remove    up/down select    Enter continue    Esc cancel
+7:|  a add    e edit    x remove ...    Esc cancel-------------------+
+```
+
+Row 6's new content was a bare `|`; the rest of the old hint survived. Row 7 shows the
+new hint with the old box bottom's tail still attached.
+
+Every drawn line now ends with `EL 0`. The rewrite was applied only to screen-drawing
+`printf` format strings: `ka_tui_sort_index_rows` pipes TSV to `sort`, and `printf -v`
+builds strings, so both were excluded. Adding escapes there would corrupt data.
+
+Coverage: unit assertions that each frame primitive erases its own tail, plus a
+screen-level pty test that renders the capture through a small VT emulator and asserts
+the hint appears exactly once. The byte stream alone cannot show this class of bug.
+
+## Resolved on 2026-08-23: a slow bus no longer stalls IPC or freezes timers
+
+`ka_konsole_discover` now bounds one pass with `KEEPALIVE_DISCOVERY_BUDGET_MS`
+(default 1000) and ends with a `#COMPLETE` or `#INCOMPLETE` sentinel.
+`ka_state_refresh_discovery` commits only a complete pass, so a truncated one retains
+the previous snapshot instead of publishing what looks like sessions disappearing. The
+service loop warns once per stale episode. Verified live: a normal pass reports
+`#COMPLETE`, and a 1 ms budget degrades to `#INCOMPLETE` rather than blocking.
+
+Original finding follows.
+
+### Original finding: a slow bus stalls IPC and silently freezes timers
 
 The daemon is single threaded. Discovery is 8 qdbus calls with 2 sessions and 60 with
 16, each bounded at `KEEPALIVE_QDBUS_TIMEOUT` (default 2 s). A degraded bus therefore
@@ -307,13 +343,10 @@ keepalive.service: Failed with result 'exit-code'.
 
 Recommended: add `SuccessExitStatus=129 130 143`, or exit 0 from those traps.
 
-## Low priority: dead code and an unwired security control
+## Resolved on 2026-08-23: dead code removed, the security control wired up
 
-- `KA_DISCOVERY_DIR` is created every startup and never written to.
-- `KA_STATE_HOME` is resolved and never used.
-- `ka_runtime_is_xdg` is defined and never called. This is the check that was meant to
-  gate the predictable `/tmp/keepalive-$UID` fallback; leaving it unwired is why the
-  fallback still has no ownership or symlink verification.
+`KA_DISCOVERY_DIR` and `KA_STATE_HOME` are gone; neither was ever read.
+`ka_runtime_is_xdg` now backs `ka_runtime_secure`, which is what it was written for.
 
 ## Enhancement candidates
 
@@ -341,8 +374,11 @@ Not defects; recorded so the next agent does not have to rediscover them.
 - **Send policy.** Jitter to avoid synchronized sends across targets, retry with backoff
   instead of waiting a whole interval after a transport failure, and optionally skipping
   a send while the AI process is visibly busy.
-- **No CI.** There is no `.github/` workflow, so the suite runs only when someone
-  remembers to.
+- **CI — added on 2026-08-23.** `.github/workflows/ci.yml` runs the aggregate developer
+  check on every push and pull request. ShellCheck runs as a separate advisory job with
+  `continue-on-error`, because the codebase has never been verified against it and no
+  ShellCheck is available in the development environment; promote it to required once the
+  findings are cleared. `KEEPALIVE_SKIP_SHELLCHECK=1` excludes it from the blocking job.
 
 ## Superseded: discovery cost scales with total Konsole sessions, not targets
 
@@ -459,7 +495,22 @@ real change rather than four times a second.
 - `q` closes the manager, detail, and log views but not the wizard, where only `Esc`
   cancels. This is what the on-screen hints say, but it is an inconsistency.
 
-## Medium priority: multi-file operations are not transactions
+## Resolved on 2026-08-23: message replacement commits through a staged swap
+
+`ka_commit_staged_dir` builds the new rotation beside the live one and commits with two
+renames, rolling back if the second fails. The commit window is two renames instead of
+the whole copy; previously the live directory was removed and repopulated file by file,
+so a crash mid-copy left a partially written rotation in place. `ka_cleanup_staged_dirs`
+sweeps abandoned staging and rollback directories at daemon start and profile init.
+
+This is not a true transaction, and the notes deliberately do not claim one: POSIX has
+no atomic directory swap. An interruption between the two renames leaves the directory
+missing, which the checkpoint loader already rejects and quarantines rather than using,
+so the failure remains detectable rather than silent.
+
+Original finding follows.
+
+### Original finding: multi-file operations are not transactions
 
 The documentation describes configuration save as a transaction, but atomicity is
 per scalar file or per `state.tsv` rename. Create/configure performs multiple
@@ -480,7 +531,17 @@ rename/swap them, or introduce a generation/version marker and recovery rules.
 At minimum, document “atomic files/snapshots” rather than whole-save transaction
 semantics and add interruption/corruption tests.
 
-## Medium priority: `/tmp` fallback conflicts with stated lifecycle and service isolation
+## Resolved on 2026-08-23: the /tmp fallback is verified before use
+
+`ka_runtime_secure` is now called from `ka_ensure_runtime_dirs` and is fatal in service
+mode. It refuses a symlinked runtime base, refuses one that exists but is not a directory
+owned by this user, creates it otherwise, forces mode 700, and warns that the fallback
+does not share the login session lifecycle. `ka_runtime_is_xdg` existed for this and had
+never been wired up.
+
+Original finding follows.
+
+### Original finding: /tmp fallback conflicts with stated lifecycle and service isolation
 
 When `XDG_RUNTIME_DIR` is unset, runtime state falls back to the predictable
 `/tmp/keepalive-$UID/keepalive`. This has three differences from the stated model:
@@ -500,7 +561,21 @@ fallback-path issue. Recommended fix: require a valid owned XDG runtime for serv
 mode, or implement and test a secure shared fallback with an explicit session
 marker. `ka_runtime_is_xdg` exists but is not enforced.
 
-## Medium priority: message-plus-Enter delivery is not atomic
+## Resolved on 2026-08-23: a partial send no longer duplicates text
+
+`ka_konsole_deliver` returns 3 when the message reached the terminal but the submit did
+not. The scheduler records that in `KA_T_PENDING_SUBMIT` and the next attempt submits the
+pending line instead of appending the message again, which is the duplicate-text hazard.
+Success clears the flag and advances the rotation, because the message was consumed. The
+event log records `FAILED · submit owed` so the state is visible.
+
+`KEEPALIVE_ATOMIC_SUBMIT=1` sends text and submit in a single `sendText`, removing the
+partial state entirely. It is opt-in because some AI CLIs debounce input and may submit
+before rendering the text, which is why the gap exists.
+
+Original finding follows.
+
+### Original finding: message-plus-Enter delivery is not atomic
 
 `MESSAGE_ENTER` uses two qdbus calls separated by a sleep. If the message call
 succeeds and the Enter call fails, the event is logged as failed and rotation does
@@ -512,7 +587,14 @@ Potential mitigations: send message and submit sequence in one `sendText` call i
 Konsole behavior is validated to be equivalent, or track/log partial delivery and
 avoid blind duplicate retries.
 
-## Medium priority: install updates do not restart loaded daemon code
+## Resolved on 2026-08-23: the installer restarts a running daemon
+
+`scripts/install.sh` restarts `keepalive.service` when it is already active, so an update
+no longer leaves new clients talking to a daemon still executing the previous modules.
+
+Original finding follows.
+
+### Original finding: install updates do not restart loaded daemon code
 
 The installer overwrites the installed source and reloads unit definitions, then
 enables/starts the socket. If `keepalive.service` is already running, its Bash
@@ -523,7 +605,49 @@ Recommended fix: after a successful update, restart an active service (while
 preserving same-login target checkpoints) or version/negotiate the IPC protocol.
 Test upgrade with an active daemon.
 
-## Lower priority: positional TSV parsing is fragile around empty fields
+## Resolved on 2026-08-23: self-referential `local` declarations
+
+`ka_state_load_target_dir` began with `local dir=$1 file="$dir/state.tsv"`. Bash expands
+every assignment word in a single `local` before creating any of them, so `$dir` there
+resolved to an *outer* variable, and errored outright under `set -u` when none existed.
+
+It never surfaced because its only caller, `ka_state_load_all_targets`, happens to have a
+loop variable named `dir` holding the same path. Dynamic scoping made a latent crash look
+like working code. Found when a new test called the function from a scope without one.
+
+Three more instances lived in `tests/testlib.sh`, where the default-message expansions
+`${2:-"... $path"}` and `${3:-"expected '$expected' ..."}` would have failed whenever an
+assertion was written without an explicit message.
+
+All four are split into separate `local` statements, and
+`tests/test_function_comments.sh` now fails the build on the pattern.
+
+## Resolved on 2026-08-23: the secondary prompt is a one-shot nudge
+
+It repeated every `secondary_interval` for the life of the target. It now fires
+automatically at most once per arming, tracked by `KA_T_SECONDARY_DONE` and persisted as
+an **optional** `secondary_done` checkpoint field so pre-existing records still load.
+`CONFIGURE` re-arms it. Manual `SEND_SECONDARY` always delivers and does not consume it.
+
+## Resolved on 2026-08-23: `e` and `E` reach known delivery states
+
+`e` used to toggle the whole target's delivery mode. It now sends a single Enter
+immediately and returns the target to `MESSAGE_ENTER`, which is the "submit what is
+there, then carry on normally" action the mode toggle was being used for. It never
+consumes a queued message and completes a pending submit if one is owed. `E` maps to the
+new `SET_MODE` operation and pins `ENTER_ONLY`. Both are explicit sets, so each key
+reaches a known state rather than flipping whichever way the target happened to be.
+
+## Mitigated, format unchanged: positional TSV parsing around empty fields
+
+Every consumer now decodes empty columns correctly: the TUI uses `ka_tui_split_tsv`,
+which splits without `read`, and `ka_state_index_row` uses `awk -F '\t'`. The wire format
+itself is unchanged, so a *future* consumer written with `read` would hit the same trap.
+Kept here as a standing caution rather than an active defect.
+
+Original finding follows.
+
+### Original finding: positional TSV parsing is fragile around empty fields
 
 Bash treats tab as IFS whitespace and collapses adjacent empty delimiters.
 `AVAILABLE` index rows intentionally contain an empty mode field. Direct loading
@@ -542,7 +666,20 @@ Recommended fix: encode empty fields with explicit sentinel values, use a
 non-whitespace delimiter/length-safe format, or implement a parser that preserves
 empty TSV columns. Add exact round-trip tests for all statuses and empty values.
 
-## Lower priority: validation/sanitization boundaries are narrower than comments imply
+## Resolved on 2026-08-23: sanitization and bounds match their comments
+
+`ka_strip_controls` now removes every control character via `[[:cntrl:]]`, not the named
+handful it previously stripped despite a comment claiming otherwise. Main rotations are
+capped at `KEEPALIVE_MAX_MESSAGES` (default 64) and every message at
+`KEEPALIVE_MAX_MESSAGE_LENGTH` (default 2000), applied to the secondary message too.
+
+Still open from the original list: UUIDs are flattened with `ka_safe_id` for paths but
+never validated as UUID syntax, and request directories use `mkdir -p` rather than
+exclusive creation. Both are bounded by the runtime directory being private to the user.
+
+Original finding follows.
+
+### Original finding: validation/sanitization boundaries are narrower than comments imply
 
 - `ka_strip_controls` removes ESC and several named controls but not every C0/C1
   terminal control byte, despite its broader role comment.

@@ -19,6 +19,12 @@ check_syntax() {
 # Role: Run ShellCheck when installed while remaining usable on dependency-minimal hosts.
 check_shellcheck() {
     section 'ShellCheck (optional)'
+    # CI runs ShellCheck as a separate non-blocking job, because the codebase has never
+    # been verified against it: no ShellCheck is available in the development environment.
+    if [[ -n ${KEEPALIVE_SKIP_SHELLCHECK:-} ]]; then
+        printf 'skip: disabled by KEEPALIVE_SKIP_SHELLCHECK\n'
+        return 0
+    fi
     if ! command -v shellcheck >/dev/null 2>&1; then
         printf 'skip: shellcheck is not installed\n'
         return 0

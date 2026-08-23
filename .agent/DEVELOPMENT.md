@@ -57,7 +57,17 @@
     typed value, which broke all custom wizard input.
 25. Keep `qdbus` working as a fallback transport. `KEEPALIVE_QDBUS` must continue to pin
     it, because that is how the suite injects its mock.
-26. Benchmark with warm binaries and interleaved ordering. A cold cache made `dbus-send`
+26. Interactive tests must synchronise on expected output, not sleeps, and must provide
+    their own recognizable AI process. `tests/test_tui_pty.sh` was intermittently failing
+    because it pointed the qdbus mock at the test's own PID and relied on an *ancestor*
+    happening to be an AI client, so whether the wizard opened depended on the surrounding
+    process tree. Launching one client per assertion also loaded the shared daemon enough
+    to time out; related key checks now share one session.
+27. After editing by string replacement, grep for each intended change. One anchor in this
+    session carried a trailing space the file did not have, so the replacement silently did
+    nothing and the installer's daemon-restart fix was reported as landed while it was not.
+    It was caught only by exercising the behaviour on the live host.
+28. Benchmark with warm binaries and interleaved ordering. A cold cache made `dbus-send`
     measure slower than `qdbus6` on the first run, which is the opposite of the truth.
 
 The module source order in `keepalive` matters because functions share global

@@ -174,12 +174,24 @@ keepalive create <uuid>                # create from the saved profile
 keepalive pause <uuid> / resume <uuid> # idempotent
 keepalive send <uuid> [secondary]      # deliver immediately
 keepalive reset <uuid>                 # reset the main countdown
-keepalive mode <uuid>                  # toggle MESSAGE+ENTER / ENTER ONLY
+keepalive enter <uuid>                 # one Enter now, then resume MESSAGE+ENTER
+keepalive mode <uuid> [message-enter|enter-only]
 keepalive delete <uuid>
 ```
 
 Refused operations return the daemon's specific reason rather than a generic
 failure, both on the CLI and in the TUI.
+
+### Tuning
+
+| Variable | Meaning | Default |
+|---|---|---|
+| `KEEPALIVE_ATOMIC_SUBMIT` | Send message and Enter in one `sendText`, removing the partial-delivery window. Opt-in because some AI CLIs debounce input. | `0` |
+| `KEEPALIVE_IDLE_DISCOVERY_INTERVAL` | Discovery cadence when nothing is monitored and no client is watching | `30` |
+| `KEEPALIVE_DISCOVERY_BUDGET_MS` | Wall-clock budget for one discovery pass | `1000` |
+| `KEEPALIVE_VALIDATION_STRIKES` | Consecutive unreachable checks before a target is given up on | `5` |
+| `KEEPALIVE_LOG_MAX_LINES` | Retained event-log lines per target | `2000` |
+| `KEEPALIVE_MAX_MESSAGES` / `KEEPALIVE_MAX_MESSAGE_LENGTH` | Rotation and message-size limits | `64` / `2000` |
 
 Only a bare `Esc` means back/cancel. Arrow, function, keypad, and other escape
 sequences the client does not recognize are ignored rather than being treated as
@@ -215,10 +227,11 @@ Target detail:
 
 ```text
 n           send main keep-alive now
-s           send secondary keep-alive now
+s           send the secondary prompt now (always available, even after its one-shot)
 r           reset main timer
 p           pause/resume target
- e          toggle whole target: MESSAGE + ENTER ↔ ENTER ONLY
+ e          send one Enter now, then resume MESSAGE + ENTER
+ E          switch to ENTER ONLY from now on
 c           guided configuration wizard
 l           full independent event log
 d           delete this keep-alive record (never kills AI/Konsole)

@@ -17,6 +17,9 @@ ka_state_init_arrays() {
     # Set when a message reached the terminal but its submit did not. The next attempt
     # completes that pending line instead of appending the message again.
     declare -gA KA_T_PENDING_SUBMIT=()
+    # The secondary prompt is a one-shot nudge: once it has fired for this arming it
+    # stays quiet until the target is reconfigured.
+    declare -gA KA_T_SECONDARY_DONE=()
 
     declare -ga KA_D_UUIDS=()
     declare -gA KA_D_TYPE=() KA_D_NAME=() KA_D_DIR=() KA_D_SERVICE=() KA_D_PATH=()
@@ -62,7 +65,7 @@ ka_state_save_target() {
     chmod 700 "$dir" "$dir/messages" 2>/dev/null || true
     file="$dir/state.tsv"
     local payload
-    printf -v payload '%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n' \
+    printf -v payload '%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n' \
         uuid "$(ka_single_line "$uuid")" \
         type "$(ka_single_line "${KA_T_TYPE[$uuid]}")" \
         name "$(ka_single_line "${KA_T_NAME[$uuid]}")" \
@@ -81,6 +84,7 @@ ka_state_save_target() {
         secondary_enabled "${KA_T_SECONDARY_ENABLED[$uuid]}" \
         secondary_interval "${KA_T_SECONDARY_INTERVAL[$uuid]}" \
         secondary_remaining "${KA_T_SECONDARY_REMAIN[$uuid]}" \
+        secondary_done "${KA_T_SECONDARY_DONE[$uuid]:-0}" \
         last_seen "$(ka_single_line "${KA_T_LAST_SEEN[$uuid]-}")" \
         reason "$(ka_single_line "${KA_T_REASON[$uuid]-}")"
     ka_atomic_write_value "$file" "$payload"
@@ -95,19 +99,24 @@ ka_state_load_reject() {
 
 # Role: Load and fully validate one persisted runtime target without executing data.
 ka_state_load_target_dir() {
-    local dir=$1 file="$dir/state.tsv"
+    # Split deliberately: bash expands every assignment word in one `local` before
+    # creating any of them, so `local dir=$1 file="$dir/..."` reads an outer `dir` and
+    # fails outright under `set -u` when no outer one exists.
+    local dir=$1
+    local file="$dir/state.tsv"
     KA_STATE_LOAD_ERROR=''
     [[ -f $file && ! -L $file ]] || { ka_state_load_reject 'state.tsv is missing or not a regular file'; return 1; }
     local key value extra uuid=''
     local type='' name='' directory='' service='' path='' term_pid='' ai_pid='' ai_start=''
     local status='' mode='' notifications='' main_interval='' main_remaining='' main_index=''
     local secondary_enabled='' secondary_interval='' secondary_remaining='' last_seen='' reason=''
+    local secondary_done=''
     local parse_error='' secondary_message='' message_count=0 safe_uuid=''
     local -A seen=()
 
     while IFS=$'\t' read -r key value extra; do
         case $key in
-            uuid|type|name|directory|service|path|term_pid|ai_pid|ai_start|status|mode|notifications|main_interval|main_remaining|main_index|secondary_enabled|secondary_interval|secondary_remaining|last_seen|reason)
+            uuid|type|name|directory|service|path|term_pid|ai_pid|ai_start|status|mode|notifications|main_interval|main_remaining|main_index|secondary_enabled|secondary_interval|secondary_remaining|secondary_done|last_seen|reason)
                 if [[ -n ${seen[$key]+x} ]]; then
                     parse_error="duplicate state field: $key"
                     continue
@@ -139,6 +148,7 @@ ka_state_load_target_dir() {
             secondary_enabled) secondary_enabled=$value ;;
             secondary_interval) secondary_interval=$value ;;
             secondary_remaining) secondary_remaining=$value ;;
+            secondary_done) secondary_done=$value ;;
             last_seen) last_seen=$value ;;
             reason) reason=$value ;;
         esac
@@ -171,6 +181,11 @@ ka_state_load_target_dir() {
     ka_is_positive_int "$secondary_interval" || { ka_state_load_reject 'secondary_interval must be positive'; return 1; }
     ka_is_uint "$secondary_remaining" || { ka_state_load_reject 'secondary_remaining must be unsigned'; return 1; }
     ((secondary_remaining <= secondary_interval)) || { ka_state_load_reject 'secondary_remaining exceeds secondary_interval'; return 1; }
+    # Optional on purpose: checkpoints written before this field existed must still load.
+    [[ -z $secondary_done || $secondary_done == 0 || $secondary_done == 1 ]] || {
+        ka_state_load_reject 'secondary_done must be 0 or 1'
+        return 1
+    }
     [[ -f $dir/secondary_message && ! -L $dir/secondary_message ]] || {
         ka_state_load_reject 'secondary_message is missing or not a regular file'
         return 1
@@ -207,6 +222,7 @@ ka_state_load_target_dir() {
     KA_T_SECONDARY_ENABLED[$uuid]=$secondary_enabled
     KA_T_SECONDARY_INTERVAL[$uuid]=$secondary_interval
     KA_T_SECONDARY_REMAIN[$uuid]=$secondary_remaining
+    KA_T_SECONDARY_DONE[$uuid]=${secondary_done:-0}
     KA_T_SECONDARY_MESSAGE[$uuid]=$secondary_message
     KA_T_LAST_SEEN[$uuid]=$last_seen
     KA_T_REASON[$uuid]=$reason
@@ -370,6 +386,7 @@ ka_state_create_target() {
     KA_T_REASON[$uuid]=''
     KA_T_STRIKES[$uuid]=0
     KA_T_PENDING_SUBMIT[$uuid]=0
+    KA_T_SECONDARY_DONE[$uuid]=0
 
     ka_state_copy_request_messages "$request_dir" "$target_dir"
     ka_state_save_target "$uuid"
@@ -395,6 +412,8 @@ ka_state_configure_target() {
     KA_T_SECONDARY_ENABLED[$uuid]=$(ka_read_first_line "$request_dir/secondary_enabled")
     KA_T_SECONDARY_INTERVAL[$uuid]=$(ka_read_first_line "$request_dir/secondary_interval")
     KA_T_SECONDARY_REMAIN[$uuid]=${KA_T_SECONDARY_INTERVAL[$uuid]}
+    # Reconfiguring re-arms the one-shot nudge along with the countdowns.
+    KA_T_SECONDARY_DONE[$uuid]=0
     KA_T_SECONDARY_MESSAGE[$uuid]=$(cat "$request_dir/secondary_message")
     ka_state_copy_request_messages "$request_dir" "$target_dir"
     ka_state_save_target "$uuid"
@@ -416,7 +435,7 @@ ka_state_delete_target() {
     unset 'KA_T_MAIN_REMAIN[$uuid]' 'KA_T_MAIN_INDEX[$uuid]' 'KA_T_SECONDARY_ENABLED[$uuid]'
     unset 'KA_T_SECONDARY_INTERVAL[$uuid]' 'KA_T_SECONDARY_REMAIN[$uuid]' 'KA_T_SECONDARY_MESSAGE[$uuid]'
     unset 'KA_T_LAST_SEEN[$uuid]' 'KA_T_REASON[$uuid]' 'KA_T_STRIKES[$uuid]'
-    unset 'KA_T_PENDING_SUBMIT[$uuid]'
+    unset 'KA_T_PENDING_SUBMIT[$uuid]' 'KA_T_SECONDARY_DONE[$uuid]'
 }
 
 # Role: Toggle ACTIVE/PAUSED while preserving each countdown exactly.
@@ -449,6 +468,21 @@ ka_state_toggle_mode() {
     KA_T_MODE[$uuid]=$new
     ka_state_save_target "$uuid"
     ka_log_event "$uuid" MODE "$old -> $new" OK
+}
+
+# Role: Set one target's delivery mode explicitly rather than toggling it.
+# The detail view needs to *reach* a mode, not flip whichever way it happens to be:
+# `e` returns to MESSAGE_ENTER and `E` pins ENTER_ONLY.
+ka_state_set_mode() {
+    local uuid=$1 mode=$2 old
+    ka_state_has_target "$uuid" || { ka_error 'unknown keep-alive target'; return 1; }
+    [[ ${KA_T_STATUS[$uuid]} != UNAVAILABLE ]] || { ka_error 'unavailable targets cannot change delivery mode'; return 2; }
+    [[ $mode == MESSAGE_ENTER || $mode == ENTER_ONLY ]] || { ka_error "invalid delivery mode: $mode"; return 2; }
+    old=${KA_T_MODE[$uuid]}
+    [[ $old != "$mode" ]] || return 0
+    KA_T_MODE[$uuid]=$mode
+    ka_state_save_target "$uuid"
+    ka_log_event "$uuid" MODE "$old -> $mode" OK
 }
 
 # Role: Reset only the selected target's main countdown to its configured interval.

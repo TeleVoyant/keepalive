@@ -117,6 +117,23 @@ checks from the discovery snapshot and costs no D-Bus call. It returns 1 for "no
 snapshot", the caller's signal to fall back to a live call. Pre-send validation always
 uses the live path.
 
+## One-shot semantics
+
+The secondary prompt is a nudge, not a second keep-alive: `ka_scheduler_tick` fires it
+only while `KA_T_SECONDARY_DONE` is 0, and a successful automatic delivery sets that to 1.
+`CONFIGURE` clears it along with the countdowns, so reconfiguring re-arms the nudge. A
+manual `SEND_SECONDARY` always delivers and deliberately does not consume the one-shot.
+
+`secondary_done` is persisted in `state.tsv` but deliberately **optional** in the loader's
+required-field list, so checkpoints written before the field existed still load and
+default to not-yet-sent. Adding it as required would have quarantined every live record
+on upgrade.
+
+`ka_scheduler_send_enter_once` backs the detail view's `e`: it delivers a bare submit,
+clears any pending submit, resets the main countdown, leaves the rotation index alone,
+and sets the mode back to `MESSAGE_ENTER`. `E` maps to `SET_MODE ENTER_ONLY`, which is an
+explicit set rather than a toggle so each key reaches a known state.
+
 ## Adaptive discovery cadence
 
 Discovery exists to populate `AVAILABLE` rows for clients. `ka_service_discovery_interval`
@@ -340,7 +357,9 @@ Operations:
 | `TOGGLE_MODE` | `MESSAGE_ENTER` ↔ `ENTER_ONLY`. |
 | `RESET_MAIN` | Restore main remaining to configured interval. |
 | `SEND_MAIN` | Manual main delivery and main timer reset; transport failure returns `ERROR`. |
-| `SEND_SECONDARY` | Manual secondary delivery and secondary timer reset; transport failure returns `ERROR`. |
+| `SEND_SECONDARY` | Manual secondary delivery and secondary timer reset; transport failure returns `ERROR`. Does not consume the one-shot. |
+| `SEND_ENTER` | Deliver one submit sequence now, reset the main timer, and return the target to `MESSAGE_ENTER`. |
+| `SET_MODE` | Set delivery mode to the `value` file's contents rather than toggling. |
 
 All product mutations are delegated to state/scheduler functions rather than
 implemented in the IPC switch.
@@ -483,6 +502,18 @@ navigation code to terminal cleanup.
 `stty size` call, because those transitions are exactly when dimensions can change.
 `KA_TUI_COLS`/`KA_TUI_LINES` back `ka_tui_cols`/`ka_tui_lines`, which used to fork
 `tput` on every query.
+
+## TUI line erasure
+
+`ka_tui_frame_begin` positions the cursor and `ka_tui_frame_end` emits `ED 0`, which
+clears only from the cursor downward. Neither erases the tail of a line the new frame
+overwrites with shorter content, so every drawn line ends with `EL 0` instead. Any change
+in frame height, such as a new log event or an added wizard message, otherwise leaves the
+previous line's tail visible beside the new text.
+
+The rewrite applies to screen-drawing `printf` format strings only.
+`ka_tui_sort_index_rows` pipes TSV into `sort` and `printf -v` builds strings; escapes
+there would corrupt data.
 
 ## TUI layout model
 

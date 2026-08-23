@@ -29,4 +29,24 @@ while IFS= read -r file; do
 done < <(find "$TEST_ROOT" -type f \( -name '*.sh' -o -name keepalive \) ! -path '*/tests/test_function_comments.sh' | sort)
 
 assert_eq 0 "$missing" 'every production/test helper function has an adjacent Role comment'
+
+# Bash expands every assignment word in one `local` before creating any of them, so
+# `local dir=$1 file="$dir/x"` silently reads an outer `dir` and fails under `set -u`
+# when there is none. It hid in ka_state_load_target_dir because its only caller happened
+# to have a matching variable in scope.
+self_referential=0
+while IFS= read -r file; do
+    while IFS=: read -r lineno definition; do
+        first=${definition#*local }
+        first=${first%%=*}
+        rest=${definition#*local *=}
+        [[ $rest == *" "* ]] || continue
+        if [[ ${rest#* } == *"\$$first"* || ${rest#* } == *"\${$first"* ]]; then
+            printf 'self-referential local: %s:%s %s\n' "$file" "$lineno" "$definition"
+            ((self_referential += 1))
+        fi
+    done < <(grep -nE '^[[:space:]]*local [a-zA-Z_][a-zA-Z0-9_]*=[^ ]+ ' "$file" || true)
+done < <(find "$TEST_ROOT" -type f \( -name '*.sh' -o -name keepalive \) | sort)
+assert_eq 0 "$self_referential" 'no local declaration reads a name it defines in the same statement'
+
 test_finish

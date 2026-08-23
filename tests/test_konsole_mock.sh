@@ -37,4 +37,26 @@ assert_eq 124 "$notify_rc" 'desktop notification subprocess is terminated at its
 rm -f -- "$hang_file"
 unset FAKE_QDBUS_HANG_FILE KEEPALIVE_QDBUS_TIMEOUT KEEPALIVE_NOTIFY_SEND KEEPALIVE_NOTIFY_TIMEOUT
 
+# A discovery pass that runs out of budget must keep the previous snapshot rather than
+# publishing a truncated one, which would look like sessions disappearing.
+source "$TEST_ROOT/lib/logging.sh"; source "$TEST_ROOT/lib/notifications.sh"
+source "$TEST_ROOT/lib/profile.sh"; source "$TEST_ROOT/lib/state.sh"
+ka_state_init_arrays
+
+# Role: Emit one complete discovery pass for snapshot-commit tests.
+ka_konsole_discover() { printf 'u1\tClaude\tProj\t/w\torg.kde.konsole-1\t/Sessions/1\t10\t11\t11\t99\tclaude\n#COMPLETE\n'; }
+assert_true 'a complete pass is committed' ka_state_refresh_discovery
+assert_eq 1 "${#KA_D_UUIDS[@]}" 'the complete pass published one session'
+
+# Role: Emit a pass that hit its budget partway through.
+ka_konsole_discover() { printf '#INCOMPLETE\n'; }
+assert_false 'a truncated pass reports failure' ka_state_refresh_discovery
+assert_eq 1 "${#KA_D_UUIDS[@]}" 'the previous snapshot survives a truncated pass'
+assert_eq 1 "$KA_DISCOVERY_STALE" 'the truncated pass is flagged stale for the caller'
+
+# Role: Emit a complete pass with no sessions at all.
+ka_konsole_discover() { printf '#COMPLETE\n'; }
+assert_true 'an empty complete pass is committed' ka_state_refresh_discovery
+assert_eq 0 "${#KA_D_UUIDS[@]}" 'a genuinely empty session list replaces the snapshot'
+
 test_finish

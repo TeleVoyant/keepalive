@@ -1,6 +1,6 @@
 # Validation Report
 
-Date: 2026-08-22
+Date: 2026-08-23
 Version: 0.1.0
 
 ## Automated result
@@ -10,8 +10,8 @@ The release candidate passed:
 ```text
 Bash syntax:                 PASS
 Function-role comment lint:  PASS
-Dependency-free test files:  13 / 13 PASS
-Assertions:                  213 / 213 PASS
+Test files:                  14 / 14 PASS
+Assertions:                  283 / 283 PASS
 systemd-analyze verify:      PASS
 Installer layout simulation: PASS (non-root + mocked systemctl)
 Daemon/client integration:   PASS (real Bash processes/FIFO + mocked qdbus)
@@ -70,6 +70,18 @@ Run the same aggregate command with:
 - Periodic health validation reuses the discovery snapshot and issues no D-Bus call for an already-discovered target, while pre-send validation stays live.
 - The public CLI drives the whole lifecycle: create, pause, idempotent pause, resume, delete, and `list --json` validated by a real JSON parser.
 - Event logs are trimmed to a retention budget and repeated scheduler-gap events collapse to one entry per episode.
+- Every drawn TUI line erases its own tail, so a frame that changes height cannot leave the previous line's text beside the new one.
+- One discovery pass is time-bounded; a truncated pass retains the previous snapshot instead of publishing a partial one.
+- A message delivered without its submit is completed on the next attempt rather than re-sent, and the event log records that state.
+- Main rotations and message lengths are bounded, and all control characters are stripped from untrusted labels.
+- The predictable /tmp runtime fallback is refused when it is a symlink or not owned by this user.
+- Message-directory replacement commits through a staged swap that rolls back on failure, with abandoned staging directories swept at startup.
+- Re-running the installer restarts an already active daemon so clients never talk to stale sourced code.
+- A pseudo-terminal test drives the real client, and a small VT emulator renders the capture so stale-tail defects are visible to the suite.
+- Detail-view `e` sends a single Enter and returns the target to MESSAGE+ENTER without consuming a queued message; `E` pins ENTER ONLY.
+- The secondary prompt fires automatically once per arming and re-arms only on reconfiguration, while manual secondary sends stay available.
+- Checkpoints written before `secondary_done` existed still load and default to not-yet-sent.
+- No `local` declaration reads a name it defines in the same statement, which bash expands before creating any of them.
 - User installer places source, symlink, and systemd units correctly and enables the socket entrypoint.
 - `keepalive.socket` and `keepalive.service` pass `systemd-analyze verify`.
 

@@ -30,7 +30,12 @@ Each `test_*.sh` receives an isolated temporary `HOME`, `XDG_CONFIG_HOME`, and `
 - `test_ipc.sh`: multiple request IDs through one FIFO and responses.
 - `test_konsole_mock.sh`: mocked Konsole service/path/UUID/PID discovery, strict validation, qdbus timeout classification, and notification deadline.
 - `test_tui_primitives.sh`: ASCII/no-icon progress and status output; first-frame, view-transition, same-view, and resize clearing; width-exact frame rules and safe truncation; control-byte stripping; non-collapsing TSV column splitting; 7-bit glyph selection; segment-bar width accounting and fallback; and terminal key decoding including unrecognized escape sequences and Escape pushback.
+- `test_tui_pty.sh`: drives the real client through a pseudo-terminal — key classes that once exited the client, wizard cancel, Escape pushback, and a screen-level check that no key-hint line is drawn twice. Skips cleanly without `python3`.
 - `test_function_comments.sh`: every function has a `# Role:` maintenance comment.
+
+`tests/fixtures/pty-drive.py` runs a command under a real pty with scripted keys, and
+`tests/fixtures/vt-render.py` renders a capture into the screen a user would actually
+see. Only these two need `python3`; the rest of the suite stays dependency-free.
 
 ## What automated tests cannot prove here
 

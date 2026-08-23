@@ -34,6 +34,13 @@ main() {
     systemctl --user daemon-reload
     systemctl --user enable --now keepalive.socket
 
+    # A running daemon has already sourced the previous modules and keeps executing them
+    # until restarted, so an update would otherwise leave new clients talking to old code.
+    if systemctl --user is-active --quiet keepalive.service; then
+        printf 'Restarting the running daemon to load the updated code.\n'
+        systemctl --user restart keepalive.service
+    fi
+
     printf 'Installed Keep Alive Manager.\n'
     printf 'Command: %s/keepalive\n' "$bin"
     printf 'Try: keepalive doctor\n'

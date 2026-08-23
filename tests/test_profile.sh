@@ -38,4 +38,17 @@ ka_profile_copy_to_request "$empty"
 ka_atomic_write "$empty/messages/001" </dev/null
 assert_false 'main-message rotation rejects empty numbered slots' ka_profile_validate_request "$empty"
 
+# Unbounded message count and length were previously accepted.
+caps_req="$TEST_TMP/caps"
+ka_profile_copy_to_request "$caps_req"
+long=$(printf 'x%.0s' $(seq 1 3000))
+ka_write_scalar "$caps_req/messages/001" "$long"
+assert_false 'an over-long main message is rejected' ka_profile_validate_request "$caps_req"
+ka_write_scalar "$caps_req/messages/001" 'ping'
+for i in $(seq 2 70); do ka_write_scalar "$(printf '%s/messages/%03d' "$caps_req" "$i")" "m$i"; done
+assert_false 'an over-large rotation is rejected' ka_profile_validate_request "$caps_req"
+rm -f "$caps_req"/messages/*
+ka_write_scalar "$caps_req/messages/001" 'ping'
+assert_true 'a rotation within the limits is accepted' ka_profile_validate_request "$caps_req"
+
 test_finish
