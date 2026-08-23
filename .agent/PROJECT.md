@@ -218,6 +218,8 @@ persistent config directory.
 | `KEEPALIVE_RESPONSE_TIMEOUT_MS` | Client wait for a daemon response | `8000` |
 | `KEEPALIVE_CLEANUP_INTERVAL` | Seconds between stale request/response sweeps | `300` |
 | `KEEPALIVE_STALE_REQUEST_MINUTES` | Age before an abandoned request directory is swept | `30` |
+| `KEEPALIVE_CHECKPOINT_INTERVAL` | Seconds between flushes of ticked-down countdowns | `30` |
+| `KEEPALIVE_SNAPSHOT_MAX_AGE` | Oldest discovery snapshot health may validate against | `10` |
 | `KEEPALIVE_QDBUS_TIMEOUT` | Per-qdbus-call deadline, positive integer seconds | `2` |
 | `KEEPALIVE_NOTIFY_SEND` | Explicit executable notification helper override | `notify-send` |
 | `KEEPALIVE_NOTIFY_TIMEOUT` | Per-notification deadline, positive integer seconds | `2` |
@@ -307,5 +309,10 @@ name/pattern without adding another order slot.
     loop's only pacing.
 40. A configuration fault is not identity loss: never mark a target UNAVAILABLE for
     missing data, because an unavailable record cannot be reconfigured.
-41. Never write `local a=$1 b="$a..."`: bash expands every assignment word before creating
+41. Discovery cadence follows client presence alone; target count must never pin it fast.
+42. Pure string helpers set `REPLY`; never reach one through a command substitution on a
+    per-second path.
+43. A countdown decrement marks a target dirty; only transitions and the periodic flush
+    write a checkpoint.
+44. Never write `local a=$1 b="$a..."`: bash expands every assignment word before creating
     any of them, so the second reads an outer `a` and fails under `set -u` without one.

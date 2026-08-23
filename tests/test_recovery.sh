@@ -14,7 +14,7 @@ KA_T_AI_PID[$uuid]=$$; KA_T_AI_START[$uuid]=$(ka_proc_starttime $$); KA_T_STATUS
 KA_T_MODE[$uuid]=MESSAGE_ENTER; KA_T_NOTIFY[$uuid]=0; KA_T_MAIN_INTERVAL[$uuid]=1500; KA_T_MAIN_REMAIN[$uuid]=317
 KA_T_MAIN_INDEX[$uuid]=0; KA_T_SECONDARY_ENABLED[$uuid]=1; KA_T_SECONDARY_INTERVAL[$uuid]=600
 KA_T_SECONDARY_REMAIN[$uuid]=81; KA_T_SECONDARY_MESSAGE[$uuid]='nudge'; KA_T_LAST_SEEN[$uuid]=''; KA_T_REASON[$uuid]=''
-dir=$(ka_state_target_dir "$uuid"); mkdir -p "$dir/messages"; ka_write_scalar "$dir/messages/001" ping
+dir=$(target_dir "$uuid"); mkdir -p "$dir/messages"; ka_write_scalar "$dir/messages/001" ping
 ka_state_save_target "$uuid"
 
 VALIDATION_RC=0

@@ -19,6 +19,9 @@ ka_service_write_status() {
 
 # Role: Mark daemon state stopped on normal/signalled exit while leaving socket activation intact.
 ka_service_cleanup() {
+    # Flush first: countdowns advanced since the last periodic flush would otherwise be
+    # lost, and a clean stop is exactly when they are worth keeping.
+    ka_state_flush_dirty 2>/dev/null || true
     ka_service_write_status stopped 2>/dev/null || true
 }
 
@@ -76,19 +79,18 @@ ka_service_runtime_present() {
 # Sets KA_DISCOVERY_INTERVAL and forks nothing: it is consulted from the loop, where a
 # command substitution would cost more than the polling it is meant to avoid.
 ka_service_discovery_interval() {
-    local fast idle
+    local fast idle ttl seen='' now
     ka_tunable KEEPALIVE_DISCOVERY_INTERVAL 3;       fast=$REPLY
     ka_tunable KEEPALIVE_IDLE_DISCOVERY_INTERVAL 30; idle=$REPLY
-    if ((${#KA_T_UUIDS[@]} != 0)); then
-        KA_DISCOVERY_INTERVAL=$fast
-        return 0
-    fi
-    local seen='' now
+    ka_tunable KEEPALIVE_CLIENT_PRESENCE_TTL 20;     ttl=$REPLY
+    # Client presence alone decides. Keying this off the target count instead meant that
+    # creating a single keep-alive pinned discovery to the fast cadence forever, even with
+    # nothing attached to read the AVAILABLE rows it produces - which was the daemon's
+    # single largest cost. Monitored targets are validated by health, not by discovery.
     [[ -r $KA_CLIENT_PRESENCE_FILE ]] && { read -r seen <"$KA_CLIENT_PRESENCE_FILE" || true; }
     [[ $seen =~ ^[0-9]+$ ]] || seen=0
     printf -v now '%(%s)T' -1
-    ka_tunable KEEPALIVE_CLIENT_PRESENCE_TTL 20
-    if ((now - seen <= REPLY)); then
+    if ((now - seen <= ttl)); then
         KA_DISCOVERY_INTERVAL=$fast
     else
         KA_DISCOVERY_INTERVAL=$idle
@@ -99,13 +101,14 @@ ka_service_discovery_interval() {
 ka_service_loop() {
     local control_read=0
     local now last_tick elapsed last_health last_discovery last_publish last_cleanup last_status
-    local stale_logged=0 clock_warned=0 control_failures=0
+    local stale_logged=0 clock_warned=0 control_failures=0 last_flush=0 checkpoint_interval
     # Resolved once: these are process-wide settings, and validating them here keeps an
     # operator typo out of every arithmetic expression below.
     local health_interval status_interval cleanup_interval
     ka_tunable KEEPALIVE_HEALTH_INTERVAL 2;    health_interval=$REPLY
     ka_tunable KEEPALIVE_STATUS_INTERVAL 15;   status_interval=$REPLY
     ka_tunable KEEPALIVE_CLEANUP_INTERVAL 300; cleanup_interval=$REPLY
+    ka_tunable KEEPALIVE_CHECKPOINT_INTERVAL 30; checkpoint_interval=$REPLY
     ka_now_monotonic || { ka_error 'monotonic clock source is unavailable'; return 1; }
     last_tick=$REPLY
     last_health=$last_tick
@@ -113,6 +116,7 @@ ka_service_loop() {
     last_publish=$last_tick
     last_cleanup=$last_tick
     last_status=$last_tick
+    last_flush=$last_tick
 
     while true; do
         ka_ipc_service_read 0.20 && control_read=0 || control_read=$?
@@ -163,6 +167,7 @@ ka_service_loop() {
             last_publish=$now
             last_cleanup=$now
             last_status=$now
+            last_flush=$now
             continue
         elif ((elapsed > 0)); then
             ka_service_try 'timer tick' ka_scheduler_tick "$elapsed"
@@ -199,6 +204,11 @@ ka_service_loop() {
         if ((now - last_status >= status_interval)); then
             ka_service_try 'service status write' ka_service_write_status online
             last_status=$now
+        fi
+
+        if ((now - last_flush >= checkpoint_interval)); then
+            ka_service_try 'checkpoint flush' ka_state_flush_dirty
+            last_flush=$now
         fi
 
         if ((now - last_cleanup >= cleanup_interval)); then

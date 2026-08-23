@@ -4,12 +4,14 @@
 
 # Role: Return the filesystem directory for one client request identifier.
 ka_ipc_request_dir() {
-    printf '%s/%s' "$KA_REQUESTS_DIR" "$(ka_safe_id "$1")"
+    ka_safe_id "$1"
+    printf '%s/%s' "$KA_REQUESTS_DIR" "$REPLY"
 }
 
 # Role: Return the filesystem directory for one daemon response identifier.
 ka_ipc_response_dir() {
-    printf '%s/%s' "$KA_RESPONSES_DIR" "$(ka_safe_id "$1")"
+    ka_safe_id "$1"
+    printf '%s/%s' "$KA_RESPONSES_DIR" "$REPLY"
 }
 
 # Role: Ask systemd to ensure the per-user FIFO socket unit exists when installed.

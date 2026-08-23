@@ -49,7 +49,7 @@ ka_classifier_init() {
 # Role: Add or replace one classifier entry while preserving deterministic ordering.
 ka_classifier_add() {
     local name=$1 patterns=$2 key
-    key=$(ka_safe_id "${name,,}")
+    ka_safe_id "${name,,}"; key=$REPLY
     if [[ -z ${KA_CLASS_NAMES[$key]+x} ]]; then
         KA_CLASS_ORDER+=("$key")
     fi

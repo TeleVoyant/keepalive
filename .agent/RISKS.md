@@ -750,6 +750,56 @@ loader now strips it. A pattern that cannot compile was registered and swallowed
 `2>/dev/null` on the match; the loader now probes each pattern, refuses the entry, and
 names the offending line.
 
+## Resolved on 2026-08-23: daemon CPU with monitored targets
+
+Reported as "keepalive uses a lot of processing resources". Measured on the live
+workstation with two active targets:
+
+| state | before | after |
+|---|---:|---:|
+| client attached | 36.4% of one core | **20.7%** |
+| unattended | 38.4% of one core | **7.5%** |
+
+**First, a measurement trap.** Seven daemons were running, not one. Six were orphans from
+ad-hoc reproduction scripts in the scratchpad that started `./keepalive --service &` with
+no cleanup trap - unlike the committed tests, which have one. Killed clients left them
+reparented to systemd, polling for nine hours at ~0.8% each. They inflated every earlier
+measurement. Always check `ps -eo args | grep '[k]eepalive --service'` before profiling.
+
+Three causes, all fixed:
+
+1. **The idle backoff never engaged once a target existed.** `ka_service_discovery_interval`
+   keyed off target count, so creating one keep-alive pinned discovery to the fast cadence
+   permanently - even with nothing attached to read the `AVAILABLE` rows it produces. One
+   discovery pass costs 472 ms against the live bus, so at 3 s that alone was ~15.7% of a
+   core. Presence now decides on its own.
+
+   The coupling this exposes: health validation reuses the discovery snapshot, so backing
+   discovery off would silently age that snapshot. `KA_DISCOVERY_STAMP` now records when a
+   pass committed, and `ka_state_validate_from_discovery` refuses data older than
+   `KEEPALIVE_SNAPSHOT_MAX_AGE` (default 10 s), falling back to a live check - which for a
+   handful of targets is far cheaper than keeping discovery itself fast.
+
+2. **Pure string helpers were reached through command substitution.** `ka_single_line`,
+   `ka_safe_id`, and `ka_state_target_dir` now set `REPLY`. They ran roughly ten times per
+   checkpoint and per index row, once a second per target. `ka_state_save_target` also
+   re-ran `mkdir` and `chmod` on every write; both are now done once at creation.
+
+   | | before | after |
+   |---|---:|---:|
+   | `ka_state_save_target` | 14.75 ms | 5.00 ms |
+   | `ka_state_publish_index` | 12.25 ms | 4.25 ms |
+   | `ka_scheduler_tick` (2 targets) | 32.50 ms | 11.00 ms |
+
+3. **Every tick rewrote every target's checkpoint.** A countdown decrement now marks the
+   target dirty, and `ka_state_flush_dirty` persists it every
+   `KEEPALIVE_CHECKPOINT_INTERVAL` (default 30 s) and on clean shutdown. Recovery already
+   treats daemon downtime as a preserved gap, so the worst case is a countdown resuming at
+   most one flush interval stale.
+
+Tests keep one printing wrapper, `target_dir` in `testlib.sh`, purely so test expressions
+stay readable; production has a single idiom.
+
 ## Known: the pseudo-terminal suite is not perfectly deterministic
 
 `tests/test_tui_pty.sh` launches real clients against a real daemon, so it inherits real

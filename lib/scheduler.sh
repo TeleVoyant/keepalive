@@ -253,6 +253,8 @@ ka_scheduler_tick() {
         if ((KA_T_MAIN_REMAIN[$uuid] <= 0)); then
             ka_scheduler_send_main "$uuid" AUTO || true
         fi
-        ka_state_save_target "$uuid"
+        # Deliveries checkpoint themselves; a bare countdown decrement only needs to be
+        # flushed periodically.
+        ka_state_mark_dirty "$uuid"
     done
 }

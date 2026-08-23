@@ -31,7 +31,8 @@ ka_log_trim() {
 # Role: Return the runtime event-log path for a Konsole session UUID.
 ka_log_path() {
     local uuid=$1
-    printf '%s/%s.log' "$KA_LOGS_DIR" "$(ka_safe_id "$uuid")"
+    ka_safe_id "$uuid"
+    printf '%s/%s.log' "$KA_LOGS_DIR" "$REPLY"
 }
 
 # Role: Append one tab-separated event to a target's independent runtime history.
@@ -40,8 +41,12 @@ ka_log_event() {
     local path
     path=$(ka_log_path "$uuid")
     mkdir -p "$KA_LOGS_DIR"
-    printf '%s\t%s\t%s\t%s\n' "$(ka_now_hms)" "$(ka_single_line "$event")" \
-        "$(ka_single_line "$detail")" "$(ka_single_line "$result")" >>"$path"
+    local stamp s_event s_detail s_result
+    printf -v stamp '%(%H:%M:%S)T' -1
+    ka_single_line "$event";  s_event=$REPLY
+    ka_single_line "$detail"; s_detail=$REPLY
+    ka_single_line "$result"; s_result=$REPLY
+    printf '%s\t%s\t%s\t%s\n' "$stamp" "$s_event" "$s_detail" "$s_result" >>"$path"
     chmod 600 "$path" 2>/dev/null || true
     local writes=$(( ${KA_LOG_WRITES[$uuid]:-0} + 1 ))
     KA_LOG_WRITES[$uuid]=$writes

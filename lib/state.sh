@@ -20,16 +20,19 @@ ka_state_init_arrays() {
     # The secondary prompt is a one-shot nudge: once it has fired for this arming it
     # stays quiet until the target is reconfigured.
     declare -gA KA_T_SECONDARY_DONE=()
+    # Targets whose in-memory countdown has moved since their last checkpoint. Ticking a
+    # countdown does not justify rewriting a whole record every second per target.
+    declare -gA KA_T_DIRTY=()
 
     declare -ga KA_D_UUIDS=()
     declare -gA KA_D_TYPE=() KA_D_NAME=() KA_D_DIR=() KA_D_SERVICE=() KA_D_PATH=()
     declare -gA KA_D_TERM_PID=() KA_D_FG_PID=() KA_D_AI_PID=() KA_D_AI_START=() KA_D_CMD=()
 }
 
-# Role: Return the private runtime directory used to persist one monitored target.
+# Role: Put the private runtime directory for one monitored target in REPLY.
 ka_state_target_dir() {
-    local uuid=$1
-    printf '%s/%s' "$KA_TARGETS_DIR" "$(ka_safe_id "$uuid")"
+    ka_safe_id "$1"
+    REPLY="$KA_TARGETS_DIR/$REPLY"
 }
 
 # Role: Return true when the daemon currently has a monitored record for a UUID.
@@ -57,37 +60,68 @@ ka_state_unregister_uuid() {
     KA_T_UUIDS=("${next[@]}")
 }
 
+# Role: Note that a target's in-memory state has moved ahead of its checkpoint.
+ka_state_mark_dirty() {
+    KA_T_DIRTY[$1]=1
+}
+
+# Role: Checkpoint every target whose countdown has moved since the last flush.
+#
+# Countdown decrements used to be checkpointed on every tick, which rewrote a full record
+# per target per second purely to persist a decremented number. Recovery already treats
+# daemon downtime as a preserved gap, so a periodic flush loses nothing that matters:
+# the worst case is a countdown that resumes at most one flush interval stale.
+ka_state_flush_dirty() {
+    local uuid
+    for uuid in "${!KA_T_DIRTY[@]}"; do
+        ka_state_has_target "$uuid" || { unset 'KA_T_DIRTY[$uuid]'; continue; }
+        ka_state_save_target "$uuid" || true
+    done
+    return 0
+}
+
+# Role: Append one sanitized key/value row to the checkpoint payload being built.
+# Kept as a helper so every field is written the same way and nothing forks per field.
+ka_state_payload_row() {
+    ka_single_line "$2"
+    KA_STATE_PAYLOAD+="$1"$'\t'"$REPLY"$'\n'
+}
+
 # Role: Save one monitored target's mutable scalar state using atomic file replacement.
 ka_state_save_target() {
     local uuid=$1 dir file
-    dir=$(ka_state_target_dir "$uuid")
-    mkdir -p "$dir/messages"
-    chmod 700 "$dir" "$dir/messages" 2>/dev/null || true
+    ka_state_target_dir "$uuid"; dir=$REPLY
+    # Created once, not re-made and re-chmodded on every checkpoint; both were forks on a
+    # path that runs for every target on every flush.
+    if [[ ! -d $dir/messages ]]; then
+        mkdir -p "$dir/messages"
+        chmod 700 "$dir" "$dir/messages" 2>/dev/null || true
+    fi
     file="$dir/state.tsv"
-    local payload
-    printf -v payload '%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n' \
-        uuid "$(ka_single_line "$uuid")" \
-        type "$(ka_single_line "${KA_T_TYPE[$uuid]}")" \
-        name "$(ka_single_line "${KA_T_NAME[$uuid]}")" \
-        directory "$(ka_single_line "${KA_T_DIR[$uuid]}")" \
-        service "$(ka_single_line "${KA_T_SERVICE[$uuid]}")" \
-        path "$(ka_single_line "${KA_T_PATH[$uuid]}")" \
-        term_pid "${KA_T_TERM_PID[$uuid]}" \
-        ai_pid "${KA_T_AI_PID[$uuid]}" \
-        ai_start "${KA_T_AI_START[$uuid]}" \
-        status "${KA_T_STATUS[$uuid]}" \
-        mode "${KA_T_MODE[$uuid]}" \
-        notifications "${KA_T_NOTIFY[$uuid]}" \
-        main_interval "${KA_T_MAIN_INTERVAL[$uuid]}" \
-        main_remaining "${KA_T_MAIN_REMAIN[$uuid]}" \
-        main_index "${KA_T_MAIN_INDEX[$uuid]}" \
-        secondary_enabled "${KA_T_SECONDARY_ENABLED[$uuid]}" \
-        secondary_interval "${KA_T_SECONDARY_INTERVAL[$uuid]}" \
-        secondary_remaining "${KA_T_SECONDARY_REMAIN[$uuid]}" \
-        secondary_done "${KA_T_SECONDARY_DONE[$uuid]:-0}" \
-        last_seen "$(ka_single_line "${KA_T_LAST_SEEN[$uuid]-}")" \
-        reason "$(ka_single_line "${KA_T_REASON[$uuid]-}")"
-    ka_atomic_write_value "$file" "$payload"
+    KA_STATE_PAYLOAD=''
+    ka_state_payload_row uuid                "$uuid"
+    ka_state_payload_row type                "${KA_T_TYPE[$uuid]}"
+    ka_state_payload_row name                "${KA_T_NAME[$uuid]}"
+    ka_state_payload_row directory           "${KA_T_DIR[$uuid]}"
+    ka_state_payload_row service             "${KA_T_SERVICE[$uuid]}"
+    ka_state_payload_row path                "${KA_T_PATH[$uuid]}"
+    ka_state_payload_row term_pid            "${KA_T_TERM_PID[$uuid]}"
+    ka_state_payload_row ai_pid              "${KA_T_AI_PID[$uuid]}"
+    ka_state_payload_row ai_start            "${KA_T_AI_START[$uuid]}"
+    ka_state_payload_row status              "${KA_T_STATUS[$uuid]}"
+    ka_state_payload_row mode                "${KA_T_MODE[$uuid]}"
+    ka_state_payload_row notifications       "${KA_T_NOTIFY[$uuid]}"
+    ka_state_payload_row main_interval       "${KA_T_MAIN_INTERVAL[$uuid]}"
+    ka_state_payload_row main_remaining      "${KA_T_MAIN_REMAIN[$uuid]}"
+    ka_state_payload_row main_index          "${KA_T_MAIN_INDEX[$uuid]}"
+    ka_state_payload_row secondary_enabled   "${KA_T_SECONDARY_ENABLED[$uuid]}"
+    ka_state_payload_row secondary_interval  "${KA_T_SECONDARY_INTERVAL[$uuid]}"
+    ka_state_payload_row secondary_remaining "${KA_T_SECONDARY_REMAIN[$uuid]}"
+    ka_state_payload_row secondary_done      "${KA_T_SECONDARY_DONE[$uuid]:-0}"
+    ka_state_payload_row last_seen           "${KA_T_LAST_SEEN[$uuid]-}"
+    ka_state_payload_row reason              "${KA_T_REASON[$uuid]-}"
+    ka_atomic_write_value "$file" "$KA_STATE_PAYLOAD"
+    unset 'KA_T_DIRTY[$uuid]'
     ka_atomic_write_value "$dir/secondary_message" "${KA_T_SECONDARY_MESSAGE[$uuid]-}"
 }
 
@@ -162,7 +196,7 @@ ka_state_load_target_dir() {
     done
 
     [[ -n $uuid && ${#uuid} -le 256 ]] || { ka_state_load_reject 'uuid is empty or unreasonably long'; return 1; }
-    safe_uuid=$(ka_safe_id "$uuid")
+    ka_safe_id "$uuid"; safe_uuid=$REPLY
     [[ ${dir##*/} == "$safe_uuid" ]] || { ka_state_load_reject 'target directory does not match stored uuid'; return 1; }
     [[ -n $type && -n $name && -n $directory ]] || { ka_state_load_reject 'type, name, and directory are required'; return 1; }
     [[ $service =~ ^org\.kde\.konsole(-[0-9]+)?$ ]] || { ka_state_load_reject 'invalid Konsole D-Bus service'; return 1; }
@@ -234,7 +268,7 @@ ka_state_load_target_dir() {
 ka_state_quarantine_target_dir() {
     local source=$1 reason=$2 base safe_base destination log
     base=${source##*/}
-    safe_base=$(ka_safe_id "$base")
+    ka_safe_id "$base"; safe_base=$REPLY
     [[ -n $safe_base ]] || safe_base=target
     if ! destination=$(mktemp -d "$KA_QUARANTINE_DIR/${safe_base}.XXXXXXXX"); then
         ka_warn "could not create quarantine destination for: $source"
@@ -303,6 +337,7 @@ ka_state_refresh_discovery() {
         return 1
     fi
     KA_DISCOVERY_STALE=0
+    ka_now_monotonic && KA_DISCOVERY_STAMP=$REPLY
 
     KA_D_UUIDS=()
     KA_D_TYPE=() KA_D_NAME=() KA_D_DIR=() KA_D_SERVICE=() KA_D_PATH=()
@@ -331,7 +366,7 @@ ka_state_copy_request_messages() {
 # Role: Count non-empty stored main messages for one monitored target.
 ka_state_message_count() {
     local uuid=$1 dir file count=0
-    dir=$(ka_state_target_dir "$uuid")
+    ka_state_target_dir "$uuid"; dir=$REPLY
     shopt -s nullglob
     for file in "$dir/messages"/[0-9][0-9][0-9]; do
         [[ -s $file ]] && ((count += 1))
@@ -343,7 +378,7 @@ ka_state_message_count() {
 # Role: Return one zero-based message by rotation index for a monitored target.
 ka_state_message_at() {
     local uuid=$1 index=$2 dir file number
-    dir=$(ka_state_target_dir "$uuid")
+    ka_state_target_dir "$uuid"; dir=$REPLY
     number=$((index + 1))
     printf -v file '%s/messages/%03d' "$dir" "$number"
     [[ -r $file ]] || return 1
@@ -358,7 +393,7 @@ ka_state_create_target() {
     ka_profile_validate_request "$request_dir" || return 1
 
     local target_dir main_interval secondary_interval
-    target_dir=$(ka_state_target_dir "$uuid")
+    ka_state_target_dir "$uuid"; target_dir=$REPLY
     mkdir -p "$target_dir"
     main_interval=$(ka_read_first_line "$request_dir/main_interval")
     secondary_interval=$(ka_read_first_line "$request_dir/secondary_interval")
@@ -403,7 +438,7 @@ ka_state_configure_target() {
     ka_profile_validate_request "$request_dir" || return 1
 
     local target_dir
-    target_dir=$(ka_state_target_dir "$uuid")
+    ka_state_target_dir "$uuid"; target_dir=$REPLY
     KA_T_MODE[$uuid]=$(ka_read_first_line "$request_dir/delivery_mode")
     KA_T_NOTIFY[$uuid]=$(ka_read_first_line "$request_dir/notifications")
     KA_T_MAIN_INTERVAL[$uuid]=$(ka_read_first_line "$request_dir/main_interval")
@@ -425,7 +460,7 @@ ka_state_configure_target() {
 ka_state_delete_target() {
     local uuid=$1 dir
     ka_state_has_target "$uuid" || return 1
-    dir=$(ka_state_target_dir "$uuid")
+    ka_state_target_dir "$uuid"; dir=$REPLY
     rm -rf -- "$dir"
     ka_log_delete "$uuid"
     ka_state_unregister_uuid "$uuid"
@@ -434,7 +469,7 @@ ka_state_delete_target() {
     unset 'KA_T_STATUS[$uuid]' 'KA_T_MODE[$uuid]' 'KA_T_NOTIFY[$uuid]' 'KA_T_MAIN_INTERVAL[$uuid]'
     unset 'KA_T_MAIN_REMAIN[$uuid]' 'KA_T_MAIN_INDEX[$uuid]' 'KA_T_SECONDARY_ENABLED[$uuid]'
     unset 'KA_T_SECONDARY_INTERVAL[$uuid]' 'KA_T_SECONDARY_REMAIN[$uuid]' 'KA_T_SECONDARY_MESSAGE[$uuid]'
-    unset 'KA_T_LAST_SEEN[$uuid]' 'KA_T_REASON[$uuid]' 'KA_T_STRIKES[$uuid]'
+    unset 'KA_T_LAST_SEEN[$uuid]' 'KA_T_REASON[$uuid]' 'KA_T_STRIKES[$uuid]' 'KA_T_DIRTY[$uuid]'
     unset 'KA_T_PENDING_SUBMIT[$uuid]' 'KA_T_SECONDARY_DONE[$uuid]'
 }
 
@@ -516,7 +551,16 @@ ka_state_mark_unavailable() {
 # Reusing the snapshot removes that duplication. Pre-send validation deliberately keeps
 # using the live path, because a send must never rely on a snapshot.
 ka_state_validate_from_discovery() {
-    local uuid=$1 start
+    local uuid=$1 start age max_age
+    # Discovery can back off to tens of seconds when nobody is watching, and validating
+    # against a snapshot that old would delay noticing a Konsole-side change. Past this
+    # age the caller falls back to a live check, which is far cheaper than keeping
+    # discovery itself running fast.
+    ka_tunable KEEPALIVE_SNAPSHOT_MAX_AGE 10
+    max_age=$REPLY
+    ka_now_monotonic || return 1
+    age=$((REPLY - ${KA_DISCOVERY_STAMP:-0}))
+    ((age <= max_age)) || return 1
     # Return 1 only for "no usable snapshot", which is the caller's signal to fall back
     # to a live call. Every field must be present before the snapshot can be trusted.
     [[ -n ${KA_D_TERM_PID[$uuid]+x} && -n ${KA_D_FG_PID[$uuid]+x} ]] || return 1
@@ -580,22 +624,28 @@ ka_state_publish_index() {
     : >"$tmp"
     chmod 600 "$tmp" 2>/dev/null || true
 
+    local type name directory last reason
     for uuid in "${KA_T_UUIDS[@]}"; do
         status=${KA_T_STATUS[$uuid]}
+        ka_single_line "${KA_T_TYPE[$uuid]}";       type=$REPLY
+        ka_single_line "${KA_T_NAME[$uuid]}";       name=$REPLY
+        ka_single_line "${KA_T_DIR[$uuid]}";        directory=$REPLY
+        ka_single_line "${KA_T_LAST_SEEN[$uuid]-}"; last=$REPLY
+        ka_single_line "${KA_T_REASON[$uuid]-}";    reason=$REPLY
         printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-            "$uuid" "$(ka_single_line "${KA_T_TYPE[$uuid]}")" "$(ka_single_line "${KA_T_NAME[$uuid]}")" \
-            "$(ka_single_line "${KA_T_DIR[$uuid]}")" "$status" "${KA_T_MAIN_REMAIN[$uuid]}" \
+            "$uuid" "$type" "$name" "$directory" "$status" "${KA_T_MAIN_REMAIN[$uuid]}" \
             "${KA_T_MAIN_INTERVAL[$uuid]}" "${KA_T_SECONDARY_ENABLED[$uuid]}" \
             "${KA_T_SECONDARY_REMAIN[$uuid]}" "${KA_T_SECONDARY_INTERVAL[$uuid]}" \
-            "${KA_T_MODE[$uuid]}" "${KA_T_NOTIFY[$uuid]}" "$(ka_single_line "${KA_T_LAST_SEEN[$uuid]-}")" \
-            "$(ka_single_line "${KA_T_REASON[$uuid]-}")" >>"$tmp"
+            "${KA_T_MODE[$uuid]}" "${KA_T_NOTIFY[$uuid]}" "$last" "$reason" >>"$tmp"
     done
 
     for uuid in "${KA_D_UUIDS[@]}"; do
         ka_state_has_target "$uuid" && continue
+        ka_single_line "${KA_D_TYPE[$uuid]}"; type=$REPLY
+        ka_single_line "${KA_D_NAME[$uuid]}"; name=$REPLY
+        ka_single_line "${KA_D_DIR[$uuid]}";  directory=$REPLY
         printf '%s\t%s\t%s\t%s\tAVAILABLE\t0\t0\t0\t0\t0\t\t0\t\t\n' \
-            "$uuid" "$(ka_single_line "${KA_D_TYPE[$uuid]}")" "$(ka_single_line "${KA_D_NAME[$uuid]}")" \
-            "$(ka_single_line "${KA_D_DIR[$uuid]}")" >>"$tmp"
+            "$uuid" "$type" "$name" "$directory" >>"$tmp"
     done
     mv -f -- "$tmp" "$KA_INDEX_FILE"
 }
@@ -610,7 +660,7 @@ ka_state_index_row() {
 # Role: Read one scalar field from a persisted target state file for client-side rendering.
 ka_state_read_field() {
     local uuid=$1 wanted=$2 dir file key value
-    dir=$(ka_state_target_dir "$uuid")
+    ka_state_target_dir "$uuid"; dir=$REPLY
     file="$dir/state.tsv"
     [[ -r $file ]] || return 1
     while IFS=$'\t' read -r key value _; do
@@ -625,7 +675,7 @@ ka_state_read_field() {
 # Role: Seed a configuration request directory from one existing monitored target.
 ka_state_copy_target_to_request() {
     local uuid=$1 request_dir=$2 dir
-    dir=$(ka_state_target_dir "$uuid")
+    ka_state_target_dir "$uuid"; dir=$REPLY
     [[ -r $dir/state.tsv ]] || return 1
     mkdir -p "$request_dir/messages"
     ka_write_scalar "$request_dir/main_interval" "$(ka_state_read_field "$uuid" main_interval)"

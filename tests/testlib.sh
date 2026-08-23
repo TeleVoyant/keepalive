@@ -77,6 +77,14 @@ source_core() {
     ka_ensure_config_dirs
 }
 
+# Role: Print a target's runtime directory for tests that need it inline.
+# Production code reads REPLY directly; this wrapper exists only so test expressions stay
+# readable, without reintroducing a printing variant on the daemon's hot paths.
+target_dir() {
+    ka_state_target_dir "$1"
+    printf '%s' "$REPLY"
+}
+
 # Role: Remove isolated temporary data and return a test file's accumulated status.
 test_finish() {
     local rc=$TEST_FAIL

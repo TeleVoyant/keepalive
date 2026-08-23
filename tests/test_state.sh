@@ -34,7 +34,7 @@ assert_eq ACTIVE "${KA_T_STATUS[$uuid]}" 'new target starts active'
 assert_eq 60 "${KA_T_MAIN_REMAIN[$uuid]}" 'new target countdown starts at interval'
 assert_eq 'Avela' "${KA_T_NAME[$uuid]}" 'directory basename name is retained'
 assert_eq 'continue; $(do-not-run)' "$(ka_state_message_at "$uuid" 0)" 'target message remains literal data'
-assert_file "$(ka_state_target_dir "$uuid")/state.tsv" 'target checkpoint written'
+assert_file "$(target_dir "$uuid")/state.tsv" 'target checkpoint written'
 
 bad_update="$TEST_TMP/gapped-update"
 ka_state_copy_target_to_request "$uuid" "$bad_update"
@@ -64,12 +64,28 @@ assert_eq ACTIVE "${KA_T_STATUS[$uuid]}" 'resume transition'
 ka_konsole_validate_target() { KA_LIVE_VALIDATION_CALLS=$(( ${KA_LIVE_VALIDATION_CALLS:-0} + 1 )); return 0; }
 KA_LIVE_VALIDATION_CALLS=0
 KA_D_FG_PID[$uuid]=$$
+# The snapshot carries a freshness stamp: discovery can back off to tens of seconds when
+# nobody is watching, and health must not validate against data that old.
+ka_now_monotonic; KA_DISCOVERY_STAMP=$REPLY
 ka_state_validate_targets
 assert_eq 0 "$KA_LIVE_VALIDATION_CALLS" 'a discovered target is validated from the snapshot, without D-Bus'
 assert_eq ACTIVE "${KA_T_STATUS[$uuid]}" 'snapshot validation keeps a healthy target active'
 unset 'KA_D_TERM_PID[$uuid]'
 ka_state_validate_targets
 assert_eq 1 "$KA_LIVE_VALIDATION_CALLS" 'a target missing from discovery still falls back to a live call'
+
+# A snapshot older than the permitted age must also fall back, rather than reporting a
+# target healthy on the strength of stale data.
+KA_D_FG_PID[$uuid]=$$
+KA_D_TERM_PID[$uuid]=$$
+ka_now_monotonic; KA_DISCOVERY_STAMP=$((REPLY - 600))
+KA_LIVE_VALIDATION_CALLS=0
+ka_state_validate_targets
+assert_eq 1 "$KA_LIVE_VALIDATION_CALLS" 'a stale snapshot falls back to a live check'
+ka_now_monotonic; KA_DISCOVERY_STAMP=$REPLY
+KA_LIVE_VALIDATION_CALLS=0
+ka_state_validate_targets
+assert_eq 0 "$KA_LIVE_VALIDATION_CALLS" 'a fresh snapshot is trusted again' 
 # Keep the target out of the snapshot so the strike tests below exercise the live path.
 unset 'KA_D_FG_PID[$uuid]'
 
@@ -109,13 +125,13 @@ assert_eq 0 "${KA_T_SECONDARY_DONE[$uuid]}" 'reconfiguring re-arms the one-shot 
 
 # secondary_done is deliberately optional so checkpoints written before it existed load.
 ka_state_save_target "$uuid"
-state_file="$(ka_state_target_dir "$uuid")/state.tsv"
+state_file="$(target_dir "$uuid")/state.tsv"
 assert_contains "$state_file" 'secondary_done' 'the checkpoint records the one-shot state'
 grep -v '^secondary_done' "$state_file" > "$state_file.old" && mv "$state_file.old" "$state_file"
 saved_status=${KA_T_STATUS[$uuid]}
 ka_state_init_arrays
 assert_true 'a checkpoint without secondary_done still loads' \
-    ka_state_load_target_dir "$(ka_state_target_dir "$uuid")"
+    ka_state_load_target_dir "$(target_dir "$uuid")"
 assert_eq 0 "${KA_T_SECONDARY_DONE[$uuid]}" 'a missing secondary_done defaults to not-yet-sent'
 assert_eq "$saved_status" "${KA_T_STATUS[$uuid]}" 'the rest of the checkpoint is unaffected'
 
@@ -133,7 +149,7 @@ ka_state_publish_index
 assert_contains "$KA_INDEX_FILE" "$uuid" 'old unavailable UUID remains visible in merged index'
 assert_contains "$KA_INDEX_FILE" $'99999999-8888-4777-8666-555555555555\tClaude\tAvela\t/work/Avela\tAVAILABLE' 'replacement terminal is a separate AVAILABLE UUID, never reattached'
 ka_state_delete_target "$uuid"
-assert_false 'delete removes target record' test -d "$(ka_state_target_dir "$uuid")"
+assert_false 'delete removes target record' test -d "$(target_dir "$uuid")"
 assert_false 'delete removes independent runtime history' test -f "$(ka_log_path "$uuid")"
 
 test_finish

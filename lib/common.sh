@@ -29,20 +29,27 @@ ka_has_command() {
     command -v "$1" >/dev/null 2>&1
 }
 
-# Role: Return a string collapsed to one terminal-safe line for TSV/snapshot output.
+# Role: Collapse a string to one TSV-safe line in REPLY.
+#
+# Sets REPLY rather than printing: this is a pure string operation, but every caller
+# reached it through a command substitution, which forks. It runs about ten times per
+# checkpoint and per index row, and those run once a second per target, so it was one of
+# the daemon's largest single costs.
 ka_single_line() {
     local value=${1-}
     value=${value//$'\n'/ }
     value=${value//$'\r'/ }
     value=${value//$'\t'/ }
-    printf '%s' "$value"
+    REPLY=$value
 }
 
-# Role: Convert an identifier into a conservative filename-safe token.
+# Role: Convert an identifier into a conservative filename-safe token, in REPLY.
+# Sets REPLY for the same reason as ka_single_line: it is pure string work that sat behind
+# a command substitution on the daemon's per-second paths.
 ka_safe_id() {
     local value=${1-}
     value=${value//[^[:alnum:]_.-]/_}
-    printf '%s' "$value"
+    REPLY=$value
 }
 
 # Role: Generate a request identifier unique enough for one logged-in user session.

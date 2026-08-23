@@ -13,7 +13,7 @@ KA_T_AI_PID[$uuid]=$$; KA_T_AI_START[$uuid]=$(ka_proc_starttime $$); KA_T_STATUS
 KA_T_MODE[$uuid]=MESSAGE_ENTER; KA_T_NOTIFY[$uuid]=0; KA_T_MAIN_INTERVAL[$uuid]=10; KA_T_MAIN_REMAIN[$uuid]=1
 KA_T_MAIN_INDEX[$uuid]=0; KA_T_SECONDARY_ENABLED[$uuid]=1; KA_T_SECONDARY_INTERVAL[$uuid]=5
 KA_T_SECONDARY_REMAIN[$uuid]=3; KA_T_SECONDARY_MESSAGE[$uuid]='nudge'; KA_T_LAST_SEEN[$uuid]=''; KA_T_REASON[$uuid]=''
-dir=$(ka_state_target_dir "$uuid"); mkdir -p "$dir/messages"; ka_write_scalar "$dir/messages/001" one; ka_write_scalar "$dir/messages/002" two
+dir=$(target_dir "$uuid"); mkdir -p "$dir/messages"; ka_write_scalar "$dir/messages/001" one; ka_write_scalar "$dir/messages/002" two
 
 VALIDATION_RC=0
 # Role: Mock target validation so scheduler tests can select success or timeout.
@@ -143,14 +143,32 @@ KA_T_STATUS[$uuid]=ACTIVE
 KA_T_MAIN_REMAIN[$uuid]=1
 KA_T_MODE[$uuid]=MESSAGE_ENTER
 KA_T_PENDING_SUBMIT[$uuid]=0
-rm -f "$(ka_state_target_dir "$uuid")"/messages/*
+rm -f "$(target_dir "$uuid")"/messages/*
 ka_error_reset
 assert_false 'a send with no stored messages fails' ka_scheduler_send_main "$uuid" MANUAL
 assert_eq ACTIVE "${KA_T_STATUS[$uuid]}" 'the target stays usable instead of becoming unavailable'
 assert_eq "${KA_T_MAIN_INTERVAL[$uuid]}" "${KA_T_MAIN_REMAIN[$uuid]}" 'the event is consumed so it does not retry every tick'
 assert_contains "$(ka_log_path "$uuid")" 'reconfigure it' 'the operator is told how to recover'
 assert_true 'the reason reaches the client' [ -n "$KA_LAST_ERROR" ]
-ka_write_scalar "$(ka_state_target_dir "$uuid")/messages/001" one
-ka_write_scalar "$(ka_state_target_dir "$uuid")/messages/002" two
+ka_write_scalar "$(target_dir "$uuid")/messages/001" one
+ka_write_scalar "$(target_dir "$uuid")/messages/002" two
+
+# A countdown decrement no longer rewrites a whole checkpoint every tick; it marks the
+# target dirty and a periodic flush persists it.
+KA_T_STATUS[$uuid]=ACTIVE
+KA_T_SECONDARY_ENABLED[$uuid]=0
+KA_T_MAIN_REMAIN[$uuid]=500
+KA_T_MAIN_INTERVAL[$uuid]=1500
+unset 'KA_T_DIRTY[$uuid]'
+ka_state_save_target "$uuid"
+before=$(grep '^main_remaining' "$(target_dir "$uuid")/state.tsv")
+ka_scheduler_tick 1
+assert_eq 1 "${KA_T_DIRTY[$uuid]:-0}" 'a tick marks the target dirty instead of checkpointing it'
+assert_eq "$before" "$(grep '^main_remaining' "$(target_dir "$uuid")/state.tsv")" \
+    'the checkpoint is untouched by a bare countdown decrement'
+ka_state_flush_dirty
+assert_eq 0 "${KA_T_DIRTY[$uuid]:-0}" 'flushing clears the dirty mark'
+assert_eq "main_remaining	${KA_T_MAIN_REMAIN[$uuid]}" \
+    "$(grep '^main_remaining' "$(target_dir "$uuid")/state.tsv")" 'the flush persists the current countdown'
 
 test_finish

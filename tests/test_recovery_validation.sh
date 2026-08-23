@@ -15,7 +15,7 @@ seed_checkpoint() {
     KA_T_MODE[$uuid]=MESSAGE_ENTER; KA_T_NOTIFY[$uuid]=0; KA_T_MAIN_INTERVAL[$uuid]=120; KA_T_MAIN_REMAIN[$uuid]=60
     KA_T_MAIN_INDEX[$uuid]=0; KA_T_SECONDARY_ENABLED[$uuid]=1; KA_T_SECONDARY_INTERVAL[$uuid]=30
     KA_T_SECONDARY_REMAIN[$uuid]=20; KA_T_SECONDARY_MESSAGE[$uuid]='nudge'; KA_T_LAST_SEEN[$uuid]=''; KA_T_REASON[$uuid]=''
-    dir=$(ka_state_target_dir "$uuid")
+    dir=$(target_dir "$uuid")
     mkdir -p "$dir/messages"
     ka_write_scalar "$dir/messages/001" ping
     ka_state_save_target "$uuid"
@@ -60,15 +60,15 @@ for uuid in "$valid_uuid" "$gap_uuid" "$start_uuid" "$range_uuid" "$required_uui
     seed_checkpoint "$uuid"
 done
 
-mv -- "$(ka_state_target_dir "$gap_uuid")/messages/001" "$(ka_state_target_dir "$gap_uuid")/messages/002"
-replace_checkpoint_field "$(ka_state_target_dir "$start_uuid")/state.tsv" ai_start invalid
-replace_checkpoint_field "$(ka_state_target_dir "$range_uuid")/state.tsv" main_remaining 121
-rm -f -- "$(ka_state_target_dir "$required_uuid")/secondary_message"
-replace_checkpoint_field "$(ka_state_target_dir "$identity_uuid")/state.tsv" uuid "$replacement_uuid"
+mv -- "$(target_dir "$gap_uuid")/messages/001" "$(target_dir "$gap_uuid")/messages/002"
+replace_checkpoint_field "$(target_dir "$start_uuid")/state.tsv" ai_start invalid
+replace_checkpoint_field "$(target_dir "$range_uuid")/state.tsv" main_remaining 121
+rm -f -- "$(target_dir "$required_uuid")/secondary_message"
+replace_checkpoint_field "$(target_dir "$identity_uuid")/state.tsv" uuid "$replacement_uuid"
 external_message="$TEST_TMP/external-message"
 ka_write_scalar "$external_message" 'external message must not be followed'
-rm -f -- "$(ka_state_target_dir "$message_link_uuid")/messages/001"
-ln -s -- "$external_message" "$(ka_state_target_dir "$message_link_uuid")/messages/001"
+rm -f -- "$(target_dir "$message_link_uuid")/messages/001"
+ln -s -- "$external_message" "$(target_dir "$message_link_uuid")/messages/001"
 external_record="$TEST_TMP/external-record"
 mkdir -p "$external_record"
 ln -s -- "$external_record" "$KA_TARGETS_DIR/unsafe-link"

@@ -7,7 +7,8 @@ source_core
 assert_eq '00:00' "$(ka_format_duration 0)" 'format zero duration'
 assert_eq '25:00' "$(ka_format_duration 1500)" 'format minute duration'
 assert_eq '01:01:01' "$(ka_format_duration 3661)" 'format hour duration'
-assert_eq 'a_b-c.d' "$(ka_safe_id 'a b-c.d')" 'sanitize filename identifier'
+ka_safe_id 'a b-c.d'
+assert_eq 'a_b-c.d' "$REPLY" 'sanitize filename identifier'
 assert_true 'positive integer accepted' ka_is_positive_int 42
 assert_false 'zero is not positive' ka_is_positive_int 0
 

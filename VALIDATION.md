@@ -11,7 +11,7 @@ The release candidate passed:
 Bash syntax:                 PASS
 Function-role comment lint:  PASS
 Test files:                  14 / 14 PASS
-Assertions:                  322 / 322 PASS
+Assertions:                  328 / 328 PASS
 systemd-analyze verify:      PASS
 Installer layout simulation: PASS (non-root + mocked systemctl)
 Daemon/client integration:   PASS (real Bash processes/FIFO + mocked qdbus)
@@ -93,6 +93,9 @@ Run the same aggregate command with:
 - A repeated clock-read failure warns once per episode rather than several times a second.
 - A target whose message files are missing stays usable and is told to reconfigure, rather than becoming an unrecoverable UNAVAILABLE record.
 - Classifier entries with CRLF endings load correctly, and a pattern that cannot compile is refused with the offending line named.
+- Discovery backs off on client presence alone, so a monitored target no longer pins it to the fast cadence forever.
+- Health validation refuses a discovery snapshot older than its permitted age and falls back to a live check.
+- A countdown decrement marks a target dirty rather than rewriting its whole checkpoint every tick.
 - User installer places source, symlink, and systemd units correctly and enables the socket entrypoint.
 - `keepalive.socket` and `keepalive.service` pass `systemd-analyze verify`.
 

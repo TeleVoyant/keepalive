@@ -45,7 +45,10 @@ ka_konsole_session_name() {
     [[ -n $cwd ]] || cwd='?'
     local name=${cwd##*/}
     [[ -n $name && $name != '?' ]] || name='unknown'
-    printf '%s\t%s\n' "$(ka_single_line "$name")" "$(ka_single_line "$cwd")"
+    local safe_name safe_cwd
+    ka_single_line "$name"; safe_name=$REPLY
+    ka_single_line "$cwd";  safe_cwd=$REPLY
+    printf '%s\t%s\n' "$safe_name" "$safe_cwd"
 }
 
 # Role: Discover recognized AI CLI sessions across all live Konsole services.
@@ -84,10 +87,15 @@ ka_konsole_discover() {
             name_info=$(ka_konsole_session_name "$ai_pid" "$fgpid")
             IFS=$'\t' read -r name cwd <<<"$name_info"
             cmd=$(ka_konsole_process_label "$fgpid")
+            local s_uuid s_type s_service s_path s_cmd
+            ka_single_line "$uuid";     s_uuid=$REPLY
+            ka_single_line "$ai_type";  s_type=$REPLY
+            ka_single_line "$service";  s_service=$REPLY
+            ka_single_line "$path";     s_path=$REPLY
+            ka_single_line "$cmd";      s_cmd=$REPLY
             printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-                "$(ka_single_line "$uuid")" "$(ka_single_line "$ai_type")" \
-                "$name" "$cwd" "$(ka_single_line "$service")" "$(ka_single_line "$path")" \
-                "$term_pid" "$fgpid" "$ai_pid" "$ai_start" "$(ka_single_line "$cmd")"
+                "$s_uuid" "$s_type" "$name" "$cwd" "$s_service" "$s_path" \
+                "$term_pid" "$fgpid" "$ai_pid" "$ai_start" "$s_cmd"
         done < <(ka_konsole_session_paths "$service")
     done < <(ka_qdbus_konsole_services)
     printf '#COMPLETE\n'

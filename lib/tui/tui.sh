@@ -62,7 +62,8 @@ ka_tui_load_target_fields() {
     KA_F_MAIN_REMAIN=0 KA_F_MAIN_INTERVAL=0 KA_F_MAIN_INDEX=0
     KA_F_SEC_ENABLED=0 KA_F_SEC_REMAIN=0 KA_F_SEC_INTERVAL=0 KA_F_SEC_DONE=0
     KA_F_LAST='' KA_F_REASON=''
-    file="$(ka_state_target_dir "$uuid")/state.tsv"
+    ka_state_target_dir "$uuid"
+    file="$REPLY/state.tsv"
     [[ -r $file ]] || return 1
     while IFS= read -r line; do
         if [[ $line == *$'\t'* ]]; then
@@ -315,7 +316,8 @@ ka_tui_render_detail_header() {
 ka_tui_render_detail() {
     local uuid=$1 secondary cols frozen value_w bar_w
     ka_tui_load_target_fields "$uuid" || return 1
-    secondary=$(cat "$(ka_state_target_dir "$uuid")/secondary_message" 2>/dev/null || true)
+    ka_state_target_dir "$uuid"
+    secondary=$(cat "$REPLY/secondary_message" 2>/dev/null || true)
 
     ka_tui_frame_begin
     if ka_tui_too_small 52 16; then
@@ -399,7 +401,7 @@ ka_tui_render_timer_row() {
 # Kept separate so the glob-option change stays local instead of leaking to the caller.
 ka_tui_render_message_rotation() {
     local uuid=$1 index=$2 dir file number=0 marker text_w had_nullglob=0
-    dir=$(ka_state_target_dir "$uuid")
+    ka_state_target_dir "$uuid"; dir=$REPLY
     text_w=$(ka_tui_field_width 12 12)
     shopt -q nullglob && had_nullglob=1
     shopt -s nullglob
@@ -456,7 +458,9 @@ ka_tui_logs() {
 # Role: Run the detail control loop for one existing keep-alive until the user returns/deletes it.
 ka_tui_detail() {
     local uuid=$1 key status type name
-    while [[ -r $(ka_state_target_dir "$uuid")/state.tsv ]]; do
+    ka_state_target_dir "$uuid"
+    local state_file="$REPLY/state.tsv"
+    while [[ -r $state_file ]]; do
         ka_tui_render_detail "$uuid" || return 0
         ka_tui_read_key 1 || continue
         key=$KA_KEY
