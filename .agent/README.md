@@ -1,8 +1,11 @@
 # Keep Alive Manager: Agent Memory
 
 This directory is a durable, evidence-based handoff for future work on this
-repository. It records the repository understanding produced from a full source,
-test, documentation, service-unit, and history review on 2026-08-21.
+repository.
+
+It records the repository understanding produced from a full source, test, documentation,
+service-unit, and history review, most recently refreshed for the 1.0.0 release on
+2026-08-23.
 
 It does **not** contain hidden model instructions, private chain-of-thought, secrets,
 or transient platform state. It contains the useful project context another
@@ -12,30 +15,17 @@ maintainer or coding agent needs in order to continue safely.
 
 - Repository: `TeleVoyant/keepalive`
 - Branch: `master`
-- Reviewed baseline commit: `d75123f` (`fix(keepalive): harden scheduling, subprocess deadlines, and runtime recovery`)
-- Product version: `0.1.0`
+- Reviewed baseline commit: `96b5931` (`perf(daemon): cut CPU with monitored targets by roughly five times`)
+- Release: **1.0.0**, the first public release. Licensed MIT.
+- Product version: `1.0.0`
 - Implementation: Bash 5+, Linux `/proc`, Konsole D-Bus, `systemd --user`
-- History at review time: three commits (`1e67c2b` implementation, then `55c8f72`
-  and `d75123f` hardening)
-- Current worktree fixes:
-  1. the TUI tracks renderer identity and clears the visible alternate screen on
-     first draw, view transition, and resize while retaining low-flicker
-     same-view redraws;
-  2. `keepalive.service` no longer sets `PrivateTmp=yes`, which had been breaking
-     every session's display name on the live workstation;
-  3. a full `lib/tui/*` overhaul: correct key decoding (unrecognized escape
-     sequences no longer exit the client), no `set -e` escapes from action loops,
-     width-exact frames, safe truncation, control-byte stripping, complete
-     `--ascii`, colored segment headers with defined fallbacks, change-driven
-     repaint, and no leaked client scratch files.
-  4. a backend pass: wizard prompt input fixed (custom messages and intervals were
-     silently rejected), refusal reasons propagated to clients, transient D-Bus
-     failures debounced instead of destroying targets, bounded event logs, a clean
-     stop no longer logged as a failure, daemon CPU cut roughly fourfold, and a
-     scriptable CLI with `--json`.
-  See [RISKS.md](RISKS.md) for the evidence behind each.
-- Working tree before this directory was added: clean and aligned with
-  `origin/master`
+- History at review time: nine commits - `1e67c2b` implementation, then eight hardening
+  and performance passes ending at `96b5931`
+- State: released. Everything the earlier "current worktree fixes" list tracked has
+  shipped and is described in [CHANGELOG.md](../CHANGELOG.md). See [RISKS.md](RISKS.md)
+  for the evidence behind each, and read its dated "Resolved on" sections before assuming
+  a listed problem is still present.
+- Working tree: clean and aligned with `origin/master` at each tagged release
 
 ## Memory map
 
@@ -48,6 +38,17 @@ maintainer or coding agent needs in order to continue safely.
 - [RISKS.md](RISKS.md): reproduced defects, implementation caveats, known
   qualification boundaries, and recommended test additions. Read the dated
   "Resolved on" sections before assuming a listed problem is still present.
+
+The user-facing documentation is now the better starting point for most questions, and
+these notes deliberately do not duplicate it:
+
+- [`../docs/CONFIGURATION.md`](../docs/CONFIGURATION.md): every environment knob with its
+  default and the reasoning for it.
+- [`../docs/TROUBLESHOOTING.md`](../docs/TROUBLESHOOTING.md): symptom-first diagnosis.
+- [`../docs/TESTING.md`](../docs/TESTING.md): what each of the 328 assertions covers and
+  the conventions for adding one.
+- [`../CONTRIBUTING.md`](../CONTRIBUTING.md): the conventions the automated checks
+  enforce.
 
 ## Fast orientation
 
@@ -76,3 +77,8 @@ When memory and code differ, trust them in this order:
 After meaningful changes, update this directory or delete stale claims. Always
 rerun `./scripts/dev-check.sh` (or at minimum `./tests/run.sh` plus Bash syntax
 checks) before treating a change as complete.
+
+`dev-check.sh` now also fails when the version in `keepalive` disagrees with any of the
+four documents that repeat it or with `CHANGELOG.md`, so a release bump is mechanical.
+The full release procedure is in
+[`../docs/MAINTENANCE.md`](../docs/MAINTENANCE.md#cutting-a-release).

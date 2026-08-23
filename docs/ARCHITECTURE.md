@@ -132,6 +132,39 @@ Monitored target records are retained independently. `index.tsv` is a merged sna
 
 Therefore an old unavailable Avela and a new available Avela can appear simultaneously if their UUIDs differ.
 
+### Cadence and why it follows client presence
+
+Discovery and health serve different purposes, and conflating them is a mistake this
+project has already made once.
+
+**Discovery** enumerates every Konsole session and classifies its foreground process. It
+is what produces `AVAILABLE` rows, and those rows exist only for a client to display. One
+pass costs up to three bounded D-Bus calls per session - measured at 472 ms against a live
+bus with a typical session count - so it is by far the most expensive recurring work the
+daemon does.
+
+**Health** validates the identity of already-monitored targets. It is what protects
+delivery, so it runs on its own cadence regardless of whether anyone is watching.
+
+Discovery therefore backs off on **client presence alone**, never on target count. A
+client counts as attached for `KEEPALIVE_CLIENT_PRESENCE_TTL` after its last request;
+after that, discovery drops from `KEEPALIVE_DISCOVERY_INTERVAL` to
+`KEEPALIVE_IDLE_DISCOVERY_INTERVAL`. Keying this off target count instead pinned discovery
+to the fast cadence forever the moment a single keep-alive existed, which cost roughly
+15.7% of a core indefinitely with nobody there to see the result.
+
+Backing discovery off exposes a coupling: health reuses the discovery snapshot to avoid
+duplicating work, so a slower discovery would silently age the data health depends on.
+`KA_DISCOVERY_STAMP` records when a pass committed, and health refuses a snapshot older
+than `KEEPALIVE_SNAPSHOT_MAX_AGE`, falling back to a live check. For a handful of targets
+that fallback is far cheaper than keeping discovery itself fast. Pre-send validation is
+always live and never consults the snapshot.
+
+A pass is also bounded by `KEEPALIVE_DISCOVERY_BUDGET_MS`. Without it, a degraded bus
+blocks the daemon loop, which then overshoots the suspend gap and silently stops
+advancing every countdown. On expiry the pass returns what it has and reports itself
+incomplete.
+
 ## Timers
 
 Each monitored target stores integer seconds:
@@ -151,7 +184,24 @@ to preservation rather than subtraction, preventing sleep/resume catch-up bursts
 An unexpected backward monotonic reading also preserves all countdowns and resets
 timer, health, discovery, publication, and cleanup anchors.
 
-Secondary events are checked before main when both become due on the same tick.
+Secondary events are checked before main when both become due on the same tick. The
+secondary prompt is one-shot: it fires once and then records `secondary_done` rather than
+repeating until reconfigured.
+
+### Checkpoint durability
+
+A countdown decrement does not rewrite the target's checkpoint. It marks the target dirty,
+and `ka_state_flush_dirty` persists every dirty target on the
+`KEEPALIVE_CHECKPOINT_INTERVAL` cadence and on clean shutdown. State transitions and
+deliveries still checkpoint immediately, because those are the events that must not be
+lost.
+
+The trade is bounded and deliberate. Recovery already treats daemon downtime as a
+preserved gap rather than burning it down, so the worst case after an ungraceful kill is a
+countdown resuming at most one flush interval stale - it appears to gain a few seconds. A
+clean restart loses only the restart gap itself. Writing every countdown for every target
+once a second bought nothing against that, and cost a full checkpoint rewrite per target
+per second.
 
 ## Message rotation
 
@@ -187,6 +237,28 @@ as transient and leaves the prior ACTIVE/PAUSED status intact for retry. Definit
 UUID/PID/start-time/ancestry mismatches still become sticky UNAVAILABLE.
 
 No durable active binding is restored after full logout/reboot.
+
+## Cost conventions in the daemon loop
+
+Two idioms in the source exist for measured reasons rather than taste, and both look
+unusual out of context.
+
+**Pure string helpers return through `REPLY`.** `ka_single_line`, `ka_safe_id`,
+`ka_state_target_dir`, `ka_now_monotonic`, `ka_now_ms`, and `ka_tunable` set the shared
+`REPLY` variable instead of printing. Each call through `$(...)` forks a subshell at
+roughly 0.5-1 ms, and these run about ten times per checkpoint and per index row, once a
+second per target. Converting them cut `ka_state_save_target` from 14.75 ms to 5.00 ms,
+`ka_state_publish_index` from 12.25 ms to 4.25 ms, and a two-target scheduler tick from
+32.50 ms to 11.00 ms.
+
+The cost of the idiom is that `REPLY` is a single shared register: it must be read on the
+line immediately after the call. Where a function legitimately reads it twice, an
+intervening call deliberately re-sets it.
+
+**Read-only D-Bus queries prefer `dbus-send` over `qdbus`.** `qdbus6` pays Qt
+initialization on every invocation, measured at 12.8 ms against `dbus-send`'s 2.4 ms.
+`qdbus` remains the fallback and the only path when `KEEPALIVE_QDBUS` is set, which is how
+the test mock stays authoritative.
 
 ## Bounded external processes
 

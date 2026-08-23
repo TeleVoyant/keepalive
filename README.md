@@ -4,7 +4,19 @@ Keep Alive Manager is a **Konsole-only, KDE/Wayland-friendly per-user keep-alive
 
 It evolves the original single-session Bash keep-alive into one persistent manager that can safely control multiple Claude Code, Codex, Kimi, and other recognized AI CLI sessions at the same time. The daemon owns timers and target state. Running `keepalive` from any terminal opens a disposable TUI client; closing that TUI does **not** stop active keep-alives.
 
-Version: **0.1.0**
+Version: **1.0.0** · [Changelog](CHANGELOG.md) · [MIT licensed](LICENSE)
+
+## Documentation
+
+| Document | What it covers |
+|---|---|
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Process model, identity, state schemas, IPC, scheduler, recovery |
+| [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) | Every environment variable, with defaults and when to change them |
+| [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) | Symptom-first fixes, from `unknown` session names to CPU cost |
+| [`docs/TESTING.md`](docs/TESTING.md) | What the 328 assertions cover, and how to add one |
+| [`docs/MAINTENANCE.md`](docs/MAINTENANCE.md) | Safety invariants, module map, live checklist, release flow |
+| [`docs/VALIDATION.md`](docs/VALIDATION.md) | Evidence recorded for this release |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | Conventions the automated checks enforce |
 
 ## Design goals
 
@@ -73,9 +85,11 @@ The TUI itself may be launched from another terminal emulator; **only Konsole se
 
 ## Installation
 
-Do not use `sudo`.
+Do not use `sudo`. Keep Alive Manager installs entirely under your home directory.
 
 ```bash
+git clone https://github.com/TeleVoyant/keepalive.git
+cd keepalive
 ./scripts/install.sh
 ```
 
@@ -681,7 +695,9 @@ See [`docs/TESTING.md`](docs/TESTING.md) and the current [`docs/VALIDATION.md`](
 
 ```text
 keepalive-manager/
-├── keepalive                 public entrypoint
+├── keepalive                 public entrypoint (declares KEEPALIVE_VERSION)
+├── LICENSE                   MIT
+├── CHANGELOG.md              release history
 ├── lib/
 │   ├── common.sh             safe utility/data helpers
 │   ├── xdg.sh                runtime/config paths
@@ -710,7 +726,8 @@ keepalive-manager/
 │   └── package.sh
 ├── tests/
 │   ├── run.sh
-│   └── test_*.sh
+│   ├── test_*.sh
+│   └── fixtures/             qdbus mock, pty driver, VT renderer
 └── docs/
     ├── ARCHITECTURE.md
     ├── MAINTENANCE.md
@@ -727,7 +744,7 @@ Every Bash function is expected to have an adjacent `# Role:` comment. A test en
 - Discovery is polling-based (default 3 seconds) rather than native D-Bus signal subscription.
 - AI classification is best-effort and extensible, not mathematically exhaustive.
 - Simple Bash string-length truncation cannot perfectly model every complex Unicode grapheme/cell-width case. `--no-icons`/`--ascii` provide compatibility paths.
-- The included automated tests use a mocked qdbus endpoint because this build environment does not expose your live KDE/Konsole user D-Bus session. **Live Parrot/KDE runtime validation on the target workstation remains the final integration gate.**
+- The automated suite drives a mocked qdbus endpoint, so it runs anywhere without a KDE session. That mock is a stand-in, not a proof: it cannot catch a change that only misbehaves against a real bus, so live validation on a KDE/Konsole workstation remains the final integration gate before a release. Release 1.0.0 was validated that way - discovery, delivery, clean-restart recovery, ungraceful-kill recovery, and CPU cost were all measured against live Konsole sessions.
 
 ## Uninstall
 
@@ -736,3 +753,21 @@ Every Bash function is expected to have an adjacent `# Role:` comment. A test en
 ```
 
 The uninstaller removes the units, installed source tree, and command symlink. It intentionally leaves the persistent profile at `~/.config/keepalive` so preferences are not destroyed accidentally.
+
+## Changelog
+
+Release history is in [CHANGELOG.md](CHANGELOG.md).
+
+## Contributing
+
+Issues and pull requests are welcome at
+[github.com/TeleVoyant/keepalive](https://github.com/TeleVoyant/keepalive).
+
+Before opening a pull request, run `./scripts/dev-check.sh`; it must end with
+`ALL VALIDATION CHECKS PASSED`. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the
+conventions the checks enforce and [`docs/TESTING.md`](docs/TESTING.md) for what the
+suite covers.
+
+## License
+
+Released under the [MIT License](LICENSE). Copyright (c) 2026 TeleVoyant.

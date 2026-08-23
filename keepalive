@@ -3,7 +3,7 @@
 # This one command acts as the TUI client, maintenance CLI, and hidden systemd daemon.
 set -Eeuo pipefail
 
-KEEPALIVE_VERSION='0.1.0'
+KEEPALIVE_VERSION='1.0.0'
 export KEEPALIVE_VERSION
 
 # Resolve symlinks so an installed ~/.local/bin/keepalive can find its lib/ directory.

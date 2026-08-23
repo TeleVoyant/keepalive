@@ -3,10 +3,8 @@
 ## Repository state at review
 
 - Branch `master` tracked `origin/master` with no pre-existing changes.
-- Current baseline HEAD is `d75123f fix(keepalive): harden scheduling, subprocess
-  deadlines, and runtime recovery`, following `55c8f72 fix(keepalive): propagate
-  send failures and enforce canonical message rotations` and the original
-  implementation commit `1e67c2b`.
+- Current baseline HEAD is `96b5931 perf(daemon): cut CPU with monitored targets by
+  roughly five times`, the ninth commit and the basis of the **1.0.0** release.
 - `VALIDATION.md` and `docs/VALIDATION.md` were byte-identical.
 - `.agents/` and `.codex/` existed as empty read-only environment directories;
   there was no repository `AGENTS.md`.
@@ -219,7 +217,8 @@ systemctl --user restart keepalive.service
 | `test_ipc.sh` | Two request IDs through one FIFO with independent responses. |
 | `test_konsole_mock.sh` | Discovery/identity validation, qdbus timeout classification, notification deadline. |
 | `test_tui_primitives.sh` | ASCII progress/urgency, icon-free state, view-aware clear and resize sequences, width-exact frame rules, truncation safety and control stripping, non-collapsing TSV split, 7-bit glyph set, status cell width, segment-bar width/fallback, and key decoding (arrows, page/home/end, unrecognized sequences, Escape pushback). |
-| `test_function_comments.sh` | Adjacent `# Role:` convention. |
+| `test_function_comments.sh` | Adjacent `# Role:` convention, and no self-referential `local` declaration. |
+| `test_tui_pty.sh` | The real client driven through `pty.fork()`: key classes that once exited it, wizard cancel from step one and from a later step, Escape pushback, and a VT-rendered screen check that no key-hint line is drawn twice. Skips cleanly without `python3`. |
 | `test_install_layout.sh` | Non-root install/uninstall with mocked systemctl. |
 | `test_service_integration.sh` | Cross-process daemon/client lifecycle, mocked sendText success/failure/timeout with specific reasons, and the full public-CLI lifecycle: delete, create, pause/idempotent pause, resume, `--json` validated by a real parser, and a duplicate-create refusal. |
 
@@ -229,11 +228,13 @@ directories. Root-based CI attempts to run installation/integration behavior as
 
 ## Important uncovered areas
 
-Automated tests do not drive full wizard/detail/log loops through a pseudo-terminal,
-validate terminal-specific wrapping/cell widths, simulate multiple simultaneous mutating clients,
-inject crashes between multi-file checkpoint/profile writes, or use real systemd
-socket activation. There is no CI workflow file in the repository. See `RISKS.md`
-for specific recommended regressions.
+Automated tests do not validate terminal-specific wrapping and cell widths, simulate
+multiple simultaneous mutating clients, inject crashes between multi-file
+checkpoint/profile writes, or use real systemd socket activation. See `RISKS.md` for
+specific recommended regressions.
+
+`.github/workflows/ci.yml` runs `scripts/dev-check.sh` as the blocking job, with
+ShellCheck as a separate advisory job.
 
 The repository explicitly leaves these to live-host qualification:
 
@@ -254,12 +255,14 @@ live on 2026-08-22 after the mocked suite had passed:
   session. Discovery cost scales with total sessions on the bus, so the suite cannot
   observe the polling model's real CPU behavior on a desktop with many Konsole
   windows.
-- **Interactive behavior.** No committed test drives the client through a
-  pseudo-terminal, so key handling, navigation, and `set -e` escapes from loop bodies
-  were invisible to the suite. Three real TUI defects hid behind a fully green run:
-  unrecognized escape sequences quitting the client, a swallowed key after `Esc`, and
-  a cancelled wizard exiting with status 1. Unit-level key decoding is now covered;
-  driving a real pty is still an open gap. See `RISKS.md`.
+- **Interactive behavior.** Key handling, navigation, and `set -e` escapes from loop
+  bodies were once invisible to the suite, and three real TUI defects hid behind a fully
+  green run: unrecognized escape sequences quitting the client, a swallowed key after
+  `Esc`, and a cancelled wizard exiting with status 1. **This gap is now closed** by
+  `test_tui_pty.sh`, which drives the real client through a pseudo-terminal, plus
+  `tests/fixtures/vt-render.py`, which renders a capture into the screen a user would
+  actually see. What remains uncovered is cell-width behavior in a specific font, which a
+  VT emulator cannot model.
 
 ## Safe change checklist by area
 
@@ -386,6 +389,18 @@ and will be included unless the packaging policy is changed.
 - `docs/ARCHITECTURE.md` is the intended high-level model.
 - `docs/MAINTENANCE.md` holds invariants and the live workstation checklist.
 - `docs/TESTING.md` describes the harness and qualification boundary.
-- `docs/VALIDATION.md` and root `VALIDATION.md` are the current release report.
+- `docs/CONFIGURATION.md` is the complete environment-knob reference, including the
+  reasoning behind each default and a drop-in recipe for applying changes to the daemon.
+- `docs/TROUBLESHOOTING.md` is symptom-first user diagnosis.
+- `docs/VALIDATION.md` and root `VALIDATION.md` are the current release report and are
+  kept byte-identical.
+- `CHANGELOG.md` is the release history; `dev-check.sh` requires a released section
+  matching `KEEPALIVE_VERSION`.
+- `CONTRIBUTING.md` states the conventions the automated checks enforce.
+- `LICENSE` is MIT.
 - `.agent/` adds implementation-level handoff details and separates observed risks
   from advertised behavior.
+
+Version lives only in `KEEPALIVE_VERSION` in `keepalive`. Four documents repeat it and
+`scripts/dev-check.sh` fails on drift, so a bump is mechanical. The release procedure is
+in `docs/MAINTENANCE.md`.

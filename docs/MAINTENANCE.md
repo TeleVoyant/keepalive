@@ -196,3 +196,28 @@ On the real KDE workstation:
 32. Kill the daemon with SIGKILL, leaving its FIFO behind, then run a client; it must time out rather than hang.
 33. Start the daemon with a deliberately invalid knob such as `KEEPALIVE_HEALTH_INTERVAL=2s`; it must warn once and keep running on the default.
 34. Remove a target's message files while it is active; the target must stay usable and the log must say to reconfigure it.
+35. Leave one active target with no client attached for a minute; discovery must back off to `KEEPALIVE_IDLE_DISCOVERY_INTERVAL`, and attaching a client must return it to the fast cadence.
+36. Restart the daemon cleanly with a known remaining time; the countdown must lose only the restart gap, not a whole checkpoint interval.
+37. `kill -9` the daemon; systemd must restart it, the countdown must resume at most `KEEPALIVE_CHECKPOINT_INTERVAL` stale, and `quarantine/` must stay empty.
+
+## Cutting a release
+
+Version lives in exactly one place, `KEEPALIVE_VERSION` in `keepalive`. Four documents
+repeat it, and `scripts/dev-check.sh` fails if any of them drifts, so the bump is
+mechanical rather than a thing to remember.
+
+1. Update `KEEPALIVE_VERSION` in `keepalive`.
+2. Update the version line in `README.md`, `VALIDATION.md`, `docs/VALIDATION.md`, and
+   `.agent/README.md`.
+3. Add the released section to `CHANGELOG.md` as `## [x.y.z] - YYYY-MM-DD`, and add the
+   matching link reference at the bottom of the file. `dev-check.sh` requires this
+   section to exist, because a tag is cut from it.
+4. Run `./scripts/dev-check.sh`; it must end with `ALL VALIDATION CHECKS PASSED`.
+5. Work through the live integration checklist above on a real KDE/Konsole workstation.
+   The suite's qdbus mock cannot stand in for this, and a release has never gone out
+   without it.
+6. Refresh `VALIDATION.md` and `docs/VALIDATION.md` with the observed assertion count
+   and the live evidence.
+7. Commit, then tag: `git tag -a vX.Y.Z -m 'Keep Alive Manager X.Y.Z'` and
+   `git push origin master --follow-tags`.
+8. Publish the GitHub release with the changelog section as its body.

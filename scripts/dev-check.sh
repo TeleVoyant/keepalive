@@ -34,6 +34,36 @@ check_shellcheck() {
     shellcheck -x "${files[@]}"
 }
 
+# Role: Confirm every documented version string still matches the one the tool reports.
+# The version appears in the executable and in four documents. Nothing but habit kept them
+# aligned, and a release that ships mismatched numbers is confusing in a way no test caught.
+check_version() {
+    section 'Version consistency'
+    local declared file found status=0
+    declared=$(sed -n "s/^KEEPALIVE_VERSION='\(.*\)'/\1/p" "$ROOT/keepalive")
+    if [[ -z $declared ]]; then
+        printf 'FAIL: keepalive does not declare KEEPALIVE_VERSION\n' >&2
+        return 1
+    fi
+    for file in README.md VALIDATION.md docs/VALIDATION.md .agent/README.md; do
+        found=$(grep -oE '[0-9]+\.[0-9]+\.[0-9]+' "$ROOT/$file" | head -1)
+        if [[ $found != "$declared" ]]; then
+            printf 'FAIL: %s declares %s, expected %s\n' "$file" "${found:-none}" "$declared" >&2
+            status=1
+            continue
+        fi
+        printf 'ok  %s\n' "$file"
+    done
+    # A release tag is cut from CHANGELOG.md, so an unreleased version there is a mistake.
+    if ! grep -q "^## \[$declared\]" "$ROOT/CHANGELOG.md"; then
+        printf 'FAIL: CHANGELOG.md has no released section for %s\n' "$declared" >&2
+        status=1
+    else
+        printf 'ok  CHANGELOG.md\n'
+    fi
+    return "$status"
+}
+
 # Role: Run the complete dependency-free project test suite.
 check_tests() {
     section 'Tests'
@@ -66,6 +96,7 @@ check_systemd_units() {
 main() {
     check_syntax
     check_shellcheck
+    check_version
     check_tests
     check_systemd_units
     section 'Result'

@@ -142,9 +142,16 @@ is optional in the aggregate developer check.
 | `systemd/*` | User FIFO socket activation and daemon supervision. |
 | `scripts/install.sh` | Per-user installed tree, symlink, units, socket enablement. |
 | `scripts/uninstall.sh` | Removes installed app/units, intentionally retains profile. |
-| `scripts/dev-check.sh` | Syntax, optional ShellCheck, tests, systemd verify. |
+| `scripts/dev-check.sh` | Syntax, optional ShellCheck, version consistency, tests, systemd verify. |
 | `scripts/package.sh` | ZIP release artifact plus SHA-256. |
 | `tests/*` | Dependency-free unit, mock integration, layout, and lint tests. |
+| `tests/fixtures/qdbus-mock` | Scriptable stand-in for the Konsole D-Bus surface. |
+| `tests/fixtures/pty-drive.py` | Drives a command under a real pty with scripted keys and output waits. Optional. |
+| `tests/fixtures/vt-render.py` | Renders a capture into the screen a user would see, catching stale frame tails. Optional. |
+| `docs/*` | Architecture, configuration, troubleshooting, testing, maintenance, validation. |
+| `CHANGELOG.md` | Release history. Checked by `dev-check.sh` against `KEEPALIVE_VERSION`. |
+| `CONTRIBUTING.md` | Conventions the automated checks enforce. |
+| `LICENSE` | MIT. |
 
 All runtime modules are sourced eagerly even for most CLI roles. `ka_xdg_init` is
 called at entrypoint load time. Non-early commands then initialize presentation,

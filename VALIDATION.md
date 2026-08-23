@@ -1,7 +1,7 @@
 # Validation Report
 
 Date: 2026-08-23
-Version: 0.1.0
+Version: 1.0.0
 
 ## Automated result
 
@@ -10,6 +10,7 @@ The release candidate passed:
 ```text
 Bash syntax:                 PASS
 Function-role comment lint:  PASS
+Version consistency:         PASS (keepalive + 4 documents + CHANGELOG)
 Test files:                  14 / 14 PASS
 Assertions:                  328 / 328 PASS
 systemd-analyze verify:      PASS
@@ -98,6 +99,52 @@ Run the same aggregate command with:
 - A countdown decrement marks a target dirty rather than rewriting its whole checkpoint every tick.
 - User installer places source, symlink, and systemd units correctly and enables the socket entrypoint.
 - `keepalive.socket` and `keepalive.service` pass `systemd-analyze verify`.
+
+## Live workstation evidence for 1.0.0
+
+Measured on the target KDE/Parrot workstation on 2026-08-23 against a live Plasma
+session, a live Konsole user D-Bus, and the installed daemon managing two real Claude
+Code sessions.
+
+### Recovery
+
+| Scenario | Expected | Observed |
+|---|---|---|
+| `systemctl --user restart` | Countdowns lose only the restart gap | Both targets lost exactly the 3 s gap (14:48 to 14:45, 02:02 to 01:59) |
+| `kill -9` on the daemon | systemd restarts it; countdown resumes at most one checkpoint interval stale | Restarted automatically; countdowns resumed 2 s stale; `quarantine/` empty; no journal warnings |
+
+Both targets recovered from checkpoints in each case without being recreated.
+
+### Daemon CPU
+
+Two active targets, sampled on one core:
+
+| State | Before this release | 1.0.0 |
+|---|---:|---:|
+| Client attached | 36.4% | **20.7%** |
+| Unattended | 38.4% | **7.5%** |
+
+Component timings behind that:
+
+| Operation | Before | 1.0.0 |
+|---|---:|---:|
+| `ka_state_save_target` | 14.75 ms | 5.00 ms |
+| `ka_state_publish_index` | 12.25 ms | 4.25 ms |
+| `ka_scheduler_tick` (2 targets) | 32.50 ms | 11.00 ms |
+
+One measurement caveat worth recording, because it invalidated several earlier readings:
+six orphaned daemons from ad-hoc scripts without cleanup traps were running alongside the
+real one, each polling at roughly 0.8%. Always confirm
+`ps -eo args | grep '[k]eepalive --service'` returns exactly one process before profiling.
+
+### Static and interface checks
+
+- `keepalive doctor` reports all critical checks passing, naming `/run/user/1000 (xdg)` as
+  the runtime source and finding 3 Konsole D-Bus services.
+- Bash syntax clean across all 26 shell files.
+- No stale command-substitution call sites remain for any of the nine helpers converted to
+  return through `REPLY`.
+- Both sites that read `REPLY` twice do so around a deliberate intervening re-set.
 
 ## Remaining live-host qualification gate
 
