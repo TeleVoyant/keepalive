@@ -194,7 +194,10 @@ ka_cli_doctor() {
     else
         printf '%-30s WARN (user manager unavailable)\n' 'systemd --user'
     fi
-    printf '%-30s %s\n' 'XDG_RUNTIME_DIR' "${XDG_RUNTIME_DIR:-fallback: $KA_RUNTIME_BASE}"
+    printf '%-30s %s (%s)\n' 'runtime directory' "$KA_RUNTIME_BASE" "${KA_RUNTIME_SOURCE:-unknown}"
+    if [[ ${KA_RUNTIME_SOURCE:-} == fallback ]]; then
+        printf '%-30s %s\n' '' 'no session runtime directory found; a running daemon may be elsewhere'
+    fi
 
     if [[ -n ${KA_QDBUS:-} ]]; then services=$(ka_qdbus_konsole_services | grep -c . || true); fi
     printf '%-30s %s\n' 'Konsole D-Bus services' "$services"

@@ -85,6 +85,43 @@ FG_PID  AI_PID  AI_STARTTIME  FG_COMMAND
 String fields are converted to one line before output. Discovery is ephemeral;
 the `discovery/` runtime directory is created but currently not populated.
 
+## Runtime directory resolution
+
+`ka_xdg_resolve_runtime_base` picks the base in precedence order and records the choice in
+`KA_RUNTIME_SOURCE`:
+
+```text
+xdg       $XDG_RUNTIME_DIR when set and present
+per-user  /run/user/$UID when it is a directory this user owns
+fallback  /tmp/keepalive-$UID, hardened by ka_runtime_secure
+```
+
+The middle step exists because contexts that never run `pam_systemd` - `su`, `sudo -u`,
+cron, non-interactive remote exec - inherit no `XDG_RUNTIME_DIR`. Without it a client there
+addresses `/tmp` while the daemon listens under `/run/user/$UID`, and simply reports the
+service as unavailable. Only the guessable `/tmp` base is checked for a symlink and for
+ownership; the other two are already session-managed.
+
+## Control FIFO signalling
+
+Clients open the FIFO **read/write**. Opening a FIFO write-only blocks until a reader
+appears, so a FIFO left behind by a daemon that died - it creates its own when systemd has
+not, and `RemoveOnStop` covers only the socket unit's - would block the client forever with
+no output. An `O_RDWR` open never blocks, so a dead daemon degrades to the ordinary
+response timeout, which is bounded by `KEEPALIVE_RESPONSE_TIMEOUT_MS`.
+
+## Daemon loop failure policy
+
+`ka_service_try` runs each periodic task and turns a failure into a warning carrying the
+real status, because the loop runs under `set -e` and one failed write would otherwise
+abort the daemon into a restart loop. Discovery is deliberately not wrapped: its non-zero
+return is the "budget exceeded" signal the caller already handles.
+`ka_service_runtime_present` ends the loop cleanly when the runtime directory disappears,
+which means the session ended.
+
+Lock contention is not a failure: a second instance logs and exits 0, so systemd does not
+retry it until the start limit trips.
+
 ## D-Bus transport
 
 Read-only session queries go through `dbus-send` when available, and `qdbus` otherwise.

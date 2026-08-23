@@ -214,6 +214,10 @@ persistent config directory.
 | `KEEPALIVE_MAX_MESSAGE_LENGTH` | Maximum characters per message | `2000` |
 | `KEEPALIVE_ATOMIC_SUBMIT` | Send text and submit in one `sendText` | `0` |
 | `KEEPALIVE_SKIP_SHELLCHECK` | Skip the optional ShellCheck stage in `dev-check.sh` | unset |
+| `KEEPALIVE_PER_USER_RUNTIME` | Override the `/run/user/$UID` candidate (tests) | `/run/user/$UID` |
+| `KEEPALIVE_RESPONSE_TIMEOUT_MS` | Client wait for a daemon response | `8000` |
+| `KEEPALIVE_CLEANUP_INTERVAL` | Seconds between stale request/response sweeps | `300` |
+| `KEEPALIVE_STALE_REQUEST_MINUTES` | Age before an abandoned request directory is swept | `30` |
 | `KEEPALIVE_QDBUS_TIMEOUT` | Per-qdbus-call deadline, positive integer seconds | `2` |
 | `KEEPALIVE_NOTIFY_SEND` | Explicit executable notification helper override | `notify-send` |
 | `KEEPALIVE_NOTIFY_TIMEOUT` | Per-notification deadline, positive integer seconds | `2` |
@@ -292,5 +296,10 @@ name/pattern without adding another order slot.
 32. The runtime base is verified before use when it is not an XDG runtime directory.
 33. The secondary prompt fires once per arming; only CONFIGURE re-arms it.
 34. `e` is a one-shot action, not a mode toggle; `E` is the persistent mode change.
-35. Never write `local a=$1 b="$a..."`: bash expands every assignment word before creating
+35. Resolve the runtime base by precedence and record the source; never assume
+    `XDG_RUNTIME_DIR` is set, or a client outside a PAM session addresses the wrong directory.
+36. Never open the control FIFO write-only; that blocks forever when no reader exists.
+37. Periodic daemon work degrades failures to warnings; only a vanished runtime directory
+    ends the loop, and it ends it cleanly.
+38. Never write `local a=$1 b="$a..."`: bash expands every assignment word before creating
     any of them, so the second reads an outer `a` and fails under `set -u` without one.

@@ -45,6 +45,13 @@ ka_scheduler_send_main() {
     ((index >= 0 && index < count)) || index=0
     message=$(ka_state_message_at "$uuid" "$index")
 
+    # Consume this timer event before delivering. The reset used to happen afterwards, so
+    # a crash between the send and the checkpoint left the countdown at zero and the
+    # restarted daemon delivered the same event again. Resetting first matches the
+    # existing policy that a failed attempt still consumes its event.
+    KA_T_MAIN_REMAIN[$uuid]=${KA_T_MAIN_INTERVAL[$uuid]}
+    ka_state_save_target "$uuid" || return
+
     local submit_only=${KA_T_PENDING_SUBMIT[$uuid]:-0}
     if [[ ${KA_T_MODE[$uuid]} == ENTER_ONLY ]]; then
         detail='[ENTER]'
@@ -78,7 +85,7 @@ ka_scheduler_send_main() {
         ka_notify_send_failed "${KA_T_NOTIFY[$uuid]}" "${KA_T_NAME[$uuid]}" "$detail"
         delivery_failed=1
     fi
-    KA_T_MAIN_REMAIN[$uuid]=${KA_T_MAIN_INTERVAL[$uuid]}
+    # Second checkpoint: persist the rotation advance or the pending-submit state.
     ka_state_save_target "$uuid" || return
     # A failed transport attempt still consumes this timer event, but callers must
     # receive failure rather than an incorrect IPC success response.
@@ -104,6 +111,10 @@ ka_scheduler_send_secondary() {
         return 4
     fi
 
+    # Consume this timer event before delivering, for the same crash-window reason as MAIN.
+    KA_T_SECONDARY_REMAIN[$uuid]=${KA_T_SECONDARY_INTERVAL[$uuid]}
+    ka_state_save_target "$uuid" || return
+
     message=${KA_T_SECONDARY_MESSAGE[$uuid]}
     if [[ ${KA_T_MODE[$uuid]} == ENTER_ONLY ]]; then detail='[ENTER]'; else detail=$message; fi
 
@@ -127,10 +138,10 @@ ka_scheduler_send_secondary() {
         ka_notify_send_failed "${KA_T_NOTIFY[$uuid]}" "${KA_T_NAME[$uuid]}" "$detail"
         delivery_failed=1
     fi
-    KA_T_SECONDARY_REMAIN[$uuid]=${KA_T_SECONDARY_INTERVAL[$uuid]}
+    # Second checkpoint: persist the one-shot flag or the pending-submit state.
     ka_state_save_target "$uuid" || return
-    # Match MAIN semantics: reset after an attempted event, while returning a
-    # transport error so manual IPC callers are not told the send succeeded.
+    # Match MAIN semantics: the event is consumed even on failure, while callers still
+    # receive a transport error rather than a false success.
     ((delivery_failed == 0)) || return 5
 }
 

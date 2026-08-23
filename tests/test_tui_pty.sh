@@ -40,6 +40,9 @@ export KEEPALIVE_QDBUS="$MOCK"
 export FAKE_PID_FILE="$ai_pid_file"
 export FAKE_UUID='12345678-1234-4123-8123-123456789abc'
 export KEEPALIVE_DISCOVERY_INTERVAL=1 KEEPALIVE_HEALTH_INTERVAL=1
+# This file launches many short-lived clients against one daemon; a loaded machine can
+# push a round trip past the default budget, which would look like an unreachable service.
+export KEEPALIVE_RESPONSE_TIMEOUT_MS=20000
 
 service_log="$TEST_TMP/service.log"
 "$TEST_ROOT/keepalive" --service >"$service_log" 2>&1 &
@@ -69,9 +72,25 @@ assert_true 'a recognized AI session is discovered before the TUI assertions' \
 # quitting. Sending keys on a fixed delay races the client's startup and its redraws,
 # which made these assertions intermittently report a timeout.
 tui_exit() {
-    local keys=$1 settle=${2:-0.3}
-    python3 "$DRIVER" 110 40 "$settle" "@navigate,${keys}" -- "$TEST_ROOT/keepalive" 2>&1 >/dev/null |
-        sed -n 's/^exit=//p'
+    local keys=$1 settle=${2:-0.3} result
+    result=$(python3 "$DRIVER" 110 40 "$settle" "@navigate,${keys}" -- "$TEST_ROOT/keepalive" 2>&1 >/dev/null |
+        sed -n 's/^exit=//p')
+    # Retry only a plain exit timeout, and only once. Bash's `read -n1` reconfigures the
+    # terminal for every keystroke, and tcsetattr can discard input arriving in that
+    # window; a human types far too slowly to hit it, a scripted driver occasionally does,
+    # and the dropped key is always the final quit.
+    #
+    # A client that never drew at all reports START-TIMEOUT and is retried for the same
+    # reason: it says nothing about the keys.
+    #
+    # This cannot mask the defect these assertions exist for: a key that wrongly exits the
+    # client shows up as WAIT-TIMEOUT on the following redraw wait, which is never retried,
+    # and a genuinely broken quit key times out on both attempts.
+    if [[ $result == TIMEOUT || $result == START-TIMEOUT:* ]]; then
+        result=$(python3 "$DRIVER" 110 40 "$settle" "@navigate,${keys}" -- "$TEST_ROOT/keepalive" 2>&1 >/dev/null |
+            sed -n 's/^exit=//p')
+    fi
+    printf '%s' "$result"
 }
 
 # Every one of these key classes used to quit the client, because an unrecognized escape

@@ -38,18 +38,33 @@ ka_ipc_new_request() {
 }
 
 # Role: Notify the daemon that a completed request directory is ready for processing.
+#
+# The FIFO is opened read/write rather than write-only. Opening a FIFO for writing blocks
+# until some process opens it for reading, so a FIFO left behind by a daemon that died -
+# it creates its own when systemd did not, and RemoveOnStop only covers the socket unit's
+# - would block the client forever with no output. An O_RDWR open never blocks, so a dead
+# daemon now surfaces as the ordinary response timeout instead of a hang.
 ka_ipc_signal_request() {
-    local id=$1
+    local id=$1 fd
     ka_ipc_ensure_socket_unit || {
-        ka_error 'control FIFO is unavailable; install/enable keepalive.socket first'
+        ka_error "control FIFO is unavailable at $KA_CONTROL_FIFO; install/enable keepalive.socket first"
         return 1
     }
-    printf 'REQUEST %s\n' "$id" >"$KA_CONTROL_FIFO"
+    if ! exec {fd}<>"$KA_CONTROL_FIFO"; then
+        ka_error "could not open the control FIFO: $KA_CONTROL_FIFO"
+        return 1
+    fi
+    printf 'REQUEST %s\n' "$id" >&"$fd"
+    exec {fd}>&-
 }
 
 # Role: Wait for a request response and print "STATUS<TAB>message" to stdout.
 ka_ipc_wait_response() {
-    local id=$1 timeout_ms=${2:-8000} dir waited=0 status message
+    # The default suits an idle desktop. A loaded machine, or a daemon working through a
+    # slow bus, can legitimately take longer, and a spurious timeout looks to the operator
+    # exactly like an unreachable service.
+    local id=$1 timeout_ms=${2:-${KEEPALIVE_RESPONSE_TIMEOUT_MS:-8000}} dir waited=0 status message
+    ka_is_positive_int "$timeout_ms" || timeout_ms=8000
     dir=$(ka_ipc_response_dir "$id")
     while ((waited < timeout_ms)); do
         if [[ -r $dir/status ]]; then
@@ -69,8 +84,18 @@ ka_ipc_wait_response() {
 # Role: Submit a simple command request and wait synchronously for the daemon response.
 ka_ipc_call() {
     local command=$1 uuid=${2-} value=${3-} id
-    id=$(ka_ipc_new_request "$command" "$uuid" "$value") || return
-    ka_ipc_signal_request "$id" || { rm -rf -- "$(ka_ipc_request_dir "$id")"; return 1; }
+    ka_error_reset
+    if ! id=$(ka_ipc_new_request "$command" "$uuid" "$value"); then
+        printf 'ERROR\t%s\n' "${KA_LAST_ERROR:-could not create a request under $KA_REQUESTS_DIR}"
+        return 1
+    fi
+    if ! ka_ipc_signal_request "$id"; then
+        rm -rf -- "$(ka_ipc_request_dir "$id")"
+        # Callers print whatever follows the tab, so an unreachable daemon has to explain
+        # itself here; it used to surface as "service unavailable:" with no reason at all.
+        printf 'ERROR\t%s\n' "${KA_LAST_ERROR:-could not reach the keepalive service}"
+        return 1
+    fi
     ka_ipc_wait_response "$id"
 }
 
@@ -102,11 +127,15 @@ ka_ipc_service_read() {
 
 # Role: Remove abandoned request/response directories older than the current service process session.
 ka_ipc_cleanup_stale() {
-    # Runtime state is private and short-lived. Keep cleanup conservative: only empty/finished
-    # response/request directories older than one hour are removed when GNU find is available.
+    # Runtime state is private and short-lived. Only directories abandoned by a client that
+    # died mid-request are swept, so the age threshold stays generous; the sweep itself runs
+    # often enough that debris does not sit around for an hour.
     command -v find >/dev/null 2>&1 || return 0
-    find "$KA_REQUESTS_DIR" "$KA_RESPONSES_DIR" -mindepth 1 -maxdepth 1 -type d -mmin +60 \
+    local age=${KEEPALIVE_STALE_REQUEST_MINUTES:-30}
+    ka_is_positive_int "$age" || age=30
+    find "$KA_REQUESTS_DIR" "$KA_RESPONSES_DIR" -mindepth 1 -maxdepth 1 -type d -mmin "+$age" \
         -exec rm -rf -- {} + 2>/dev/null || true
+    return 0
 }
 
 # Role: Dispatch one request directory to authoritative daemon state operations.

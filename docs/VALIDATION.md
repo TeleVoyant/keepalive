@@ -11,7 +11,7 @@ The release candidate passed:
 Bash syntax:                 PASS
 Function-role comment lint:  PASS
 Test files:                  14 / 14 PASS
-Assertions:                  283 / 283 PASS
+Assertions:                  300 / 300 PASS
 systemd-analyze verify:      PASS
 Installer layout simulation: PASS (non-root + mocked systemctl)
 Daemon/client integration:   PASS (real Bash processes/FIFO + mocked qdbus)
@@ -82,6 +82,12 @@ Run the same aggregate command with:
 - The secondary prompt fires automatically once per arming and re-arms only on reconfiguration, while manual secondary sends stay available.
 - Checkpoints written before `secondary_done` existed still load and default to not-yet-sent.
 - No `local` declaration reads a name it defines in the same statement, which bash expands before creating any of them.
+- A client outside a PAM session still finds the daemon: the runtime base falls back to `/run/user/$UID` before `/tmp`, and `doctor` names the rule that chose it.
+- A control FIFO left behind by a killed daemon times out the client instead of blocking it forever.
+- A failing periodic daemon task warns and continues rather than aborting the daemon into a systemd restart loop.
+- A vanished runtime directory ends the daemon cleanly, and lock contention exits successfully instead of being retried.
+- A timer event is consumed and checkpointed before delivery, so a crash between sending and checkpointing cannot repeat it.
+- An unreachable daemon reports a reason rather than an empty one.
 - User installer places source, symlink, and systemd units correctly and enables the socket entrypoint.
 - `keepalive.socket` and `keepalive.service` pass `systemd-analyze verify`.
 

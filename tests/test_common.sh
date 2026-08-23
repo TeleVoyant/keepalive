@@ -49,15 +49,45 @@ ka_cleanup_staged_dirs "$staging_root"
 assert_false 'abandoned staging directories are swept' test -d "$staging_root/orphan.staged.1"
 assert_false 'abandoned rollback directories are swept' test -d "$staging_root/orphan.trash.2"
 
-# The predictable /tmp fallback must refuse an unsafe base.
-saved_runtime=$XDG_RUNTIME_DIR
+# Runtime base precedence. A client whose environment lacks XDG_RUNTIME_DIR - su, sudo,
+# cron, non-interactive remote exec - must still find the directory the daemon uses,
+# instead of silently addressing /tmp and reporting the service as unavailable.
+saved_runtime=${XDG_RUNTIME_DIR:-}
+per_user_stub="$TEST_TMP/peruser"
+mkdir -p "$per_user_stub"
+export KEEPALIVE_PER_USER_RUNTIME="$per_user_stub"
+
+export XDG_RUNTIME_DIR="$TEST_TMP/session"
+mkdir -p "$XDG_RUNTIME_DIR"
+ka_xdg_resolve_runtime_base
+assert_eq "$TEST_TMP/session" "$KA_RUNTIME_BASE" 'an available XDG_RUNTIME_DIR wins'
+assert_eq xdg "$KA_RUNTIME_SOURCE" 'the XDG source is recorded'
+
 unset XDG_RUNTIME_DIR
+ka_xdg_resolve_runtime_base
+assert_eq "$per_user_stub" "$KA_RUNTIME_BASE" 'without XDG_RUNTIME_DIR the per-user runtime directory is used'
+assert_eq per-user "$KA_RUNTIME_SOURCE" 'the per-user source is recorded'
+
+export KEEPALIVE_PER_USER_RUNTIME="$TEST_TMP/absent"
+ka_xdg_resolve_runtime_base
+assert_eq "/tmp/keepalive-$UID" "$KA_RUNTIME_BASE" 'with neither available the /tmp fallback is used'
+assert_eq fallback "$KA_RUNTIME_SOURCE" 'the fallback source is recorded'
+
+# Only the guessable /tmp fallback needs ownership and symlink checks.
+KA_RUNTIME_SOURCE=fallback
 KA_RUNTIME_BASE="$TEST_TMP/evil"
 ln -s /tmp "$KA_RUNTIME_BASE"
-assert_false 'a symlinked runtime base is refused' ka_runtime_secure
+assert_false 'a symlinked fallback base is refused' ka_runtime_secure
 rm -f "$KA_RUNTIME_BASE"
 KA_RUNTIME_BASE="$TEST_TMP/fallback"
-assert_true 'an owned runtime base is accepted' ka_runtime_secure
-export XDG_RUNTIME_DIR=$saved_runtime
+assert_true 'an owned fallback base is accepted' ka_runtime_secure
+KA_RUNTIME_SOURCE=xdg
+KA_RUNTIME_BASE="$TEST_TMP/evil2"
+ln -s /tmp "$KA_RUNTIME_BASE"
+assert_true 'a session-managed base is not second-guessed' ka_runtime_secure
+rm -f "$KA_RUNTIME_BASE"
+
+unset KEEPALIVE_PER_USER_RUNTIME
+[[ -n $saved_runtime ]] && export XDG_RUNTIME_DIR=$saved_runtime
 
 test_finish

@@ -85,13 +85,21 @@ def drive(cols, rows, settle, keys, command, timeout=40.0):
 
     # Let the first frame settle before sending anything.
     pump(max(settle, 1.0))
+    sent_any = False
     for key in keys:
         if isinstance(key, tuple):
             if not wait_for(key[1]):
                 # Report the missed synchronisation instead of sending the rest of the
                 # keys blind, which surfaces later as a confusing exit timeout.
-                return 'WAIT-TIMEOUT:' + key[1], bytes(captured)
+                #
+                # A wait that fails before any key was sent means the client never got as
+                # far as drawing, which is an environment problem - a slow or busy daemon -
+                # rather than anything the keys did. Naming it separately lets a caller
+                # retry that case without also retrying a key that wrongly exited a view.
+                label = 'WAIT-TIMEOUT:' if sent_any else 'START-TIMEOUT:'
+                return label + key[1], bytes(captured)
             continue
+        sent_any = True
         scan['pos'] = len(captured)
         os.write(fd, key)
         if not pump(settle):

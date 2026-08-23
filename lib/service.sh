@@ -5,10 +5,7 @@
 ka_service_acquire_lock() {
     local lockfile="$KA_RUNTIME_DIR/manager.lock"
     exec {KA_MANAGER_LOCK_FD}>"$lockfile"
-    flock -n "$KA_MANAGER_LOCK_FD" || {
-        ka_error 'another Keep Alive service instance is already running'
-        return 1
-    }
+    flock -n "$KA_MANAGER_LOCK_FD" || return 1
 }
 
 # Role: Publish lightweight service metadata used by diagnostics and operator tooling.
@@ -46,6 +43,30 @@ ka_service_recover_targets() {
             fi
         fi
     done
+}
+
+# Role: Run one periodic daemon task, degrading a failure into a warning.
+#
+# The loop runs under `set -e`, so an unguarded transient I/O failure - a full tmpfs, a
+# permissions change, a runtime directory being replaced - aborts the daemon outright.
+# `Restart=on-failure` then retries every RestartSec until StartLimitBurst trips and the
+# unit stays dead. Periodic work must survive one bad cycle and try again on the next.
+ka_service_try() {
+    local label=$1 rc=0
+    shift
+    # Captured explicitly: an `if` whose condition fails and which has no else branch
+    # evaluates to 0, so reading $? afterwards would always report success.
+    "$@" || rc=$?
+    ((rc == 0)) && return 0
+    ka_warn "$label failed (status $rc); continuing"
+    return 0
+}
+
+# Role: Report whether the runtime directory still exists.
+# Its disappearance means the login session ended and there is nothing left to own, which
+# is a clean stop rather than an error to retry.
+ka_service_runtime_present() {
+    [[ -d $KA_RUNTIME_DIR ]]
 }
 
 # Role: Choose the discovery cadence from whether any client is currently watching.
@@ -95,9 +116,14 @@ ka_service_loop() {
             continue
         fi
         now=$REPLY
+        if ! ka_service_runtime_present; then
+            ka_info "runtime directory $KA_RUNTIME_DIR disappeared; the session has ended"
+            return 0
+        fi
+
         elapsed=$((now - last_tick))
         if ((elapsed < 0)); then
-            ka_scheduler_tick "$elapsed"
+            ka_service_try 'timer tick' ka_scheduler_tick "$elapsed"
             ka_warn "monotonic clock moved backward $((-elapsed))s; scheduler anchors reset"
             last_tick=$now
             last_health=$now
@@ -107,16 +133,18 @@ ka_service_loop() {
             last_status=$now
             continue
         elif ((elapsed > 0)); then
-            ka_scheduler_tick "$elapsed"
+            ka_service_try 'timer tick' ka_scheduler_tick "$elapsed"
             last_tick=$now
         fi
 
         if ((now - last_health >= ${KEEPALIVE_HEALTH_INTERVAL:-2})); then
-            ka_state_validate_targets
+            ka_service_try 'target validation' ka_state_validate_targets
             last_health=$now
         fi
 
         if ((now - last_discovery >= ${KA_DISCOVERY_INTERVAL:-3})); then
+            # Not wrapped in ka_service_try: a non-zero return here means "the pass hit
+            # its budget", which is a normal signal handled below, not a failure to warn about.
             if ka_state_refresh_discovery; then
                 stale_logged=0
             elif ((stale_logged == 0)); then
@@ -129,7 +157,7 @@ ka_service_loop() {
         fi
 
         if ((now - last_publish >= 1)); then
-            ka_state_publish_index
+            ka_service_try 'index publication' ka_state_publish_index
             # Re-evaluated once a second, not once per iteration.
             ka_service_discovery_interval
             last_publish=$now
@@ -137,12 +165,12 @@ ka_service_loop() {
 
         # Diagnostics only; clients read the index, not this file.
         if ((now - last_status >= ${KEEPALIVE_STATUS_INTERVAL:-15})); then
-            ka_service_write_status online
+            ka_service_try 'service status write' ka_service_write_status online
             last_status=$now
         fi
 
-        if ((now - last_cleanup >= 3600)); then
-            ka_ipc_cleanup_stale
+        if ((now - last_cleanup >= ${KEEPALIVE_CLEANUP_INTERVAL:-300})); then
+            ka_service_try 'stale request cleanup' ka_ipc_cleanup_stale
             last_cleanup=$now
         fi
     done
@@ -166,7 +194,13 @@ ka_service_main() {
     ka_dbus_use_send && ka_info "read-only D-Bus transport: $KA_DBUS_SEND"
     ka_classifier_init
     ka_state_init_arrays
-    ka_service_acquire_lock || return
+    # Another instance already owns the runtime state, so there is nothing for this one to
+    # do. Exiting successfully keeps systemd from treating it as a failure and restarting
+    # every RestartSec until the start limit trips.
+    if ! ka_service_acquire_lock; then
+        ka_info 'another Keep Alive service instance owns the runtime state; exiting quietly'
+        return 0
+    fi
     ka_ipc_service_open
 
     trap ka_service_cleanup EXIT
@@ -175,6 +209,9 @@ ka_service_main() {
     trap 'exit 129' HUP
 
     ka_cleanup_staged_dirs "$KA_RUNTIME_DIR"
+    # Sweep once at startup too; waiting a full interval leaves debris from the previous
+    # daemon lifetime visible for no reason.
+    ka_ipc_cleanup_stale
     ka_state_load_all_targets
     ka_state_refresh_discovery
     ka_service_recover_targets

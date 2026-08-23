@@ -182,6 +182,28 @@ keepalive delete <uuid>
 Refused operations return the daemon's specific reason rather than a generic
 failure, both on the CLI and in the TUI.
 
+### Remote and non-desktop access
+
+The client finds the daemon through the runtime directory, resolved in this order:
+
+1. `$XDG_RUNTIME_DIR`
+2. `/run/user/$UID` when it is a directory you own
+3. `/tmp/keepalive-$UID`
+
+An interactive SSH login normally gets `XDG_RUNTIME_DIR` from `pam_systemd`. Step 2 covers
+everything that does not — `su`, `sudo -u`, cron, non-interactive remote exec — which would
+otherwise look in `/tmp` while the daemon listens under `/run/user/$UID` and simply report
+the service as unavailable. `keepalive doctor` prints the directory in use and which rule
+chose it.
+
+Two limits are worth knowing when working remotely:
+
+- The daemon is `PartOf=graphical-session.target` and user lingering is intentionally not
+  enabled, so it stops when the graphical session ends. Konsole is gone by then anyway.
+- If a daemon is killed outright, its control FIFO can outlive it. Clients open the FIFO
+  read/write so this cannot hang them; a request simply times out after
+  `KEEPALIVE_RESPONSE_TIMEOUT_MS`.
+
 ### Tuning
 
 | Variable | Meaning | Default |
@@ -191,6 +213,8 @@ failure, both on the CLI and in the TUI.
 | `KEEPALIVE_DISCOVERY_BUDGET_MS` | Wall-clock budget for one discovery pass | `1000` |
 | `KEEPALIVE_VALIDATION_STRIKES` | Consecutive unreachable checks before a target is given up on | `5` |
 | `KEEPALIVE_LOG_MAX_LINES` | Retained event-log lines per target | `2000` |
+| `KEEPALIVE_RESPONSE_TIMEOUT_MS` | How long a client waits for a daemon response | `8000` |
+| `KEEPALIVE_CLEANUP_INTERVAL` | Seconds between stale request/response sweeps | `300` |
 | `KEEPALIVE_MAX_MESSAGES` / `KEEPALIVE_MAX_MESSAGE_LENGTH` | Rotation and message-size limits | `64` / `2000` |
 
 Only a bare `Esc` means back/cancel. Arrow, function, keypad, and other escape

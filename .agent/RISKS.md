@@ -638,6 +638,80 @@ consumes a queued message and completes a pending submit if one is owed. `E` map
 new `SET_MODE` operation and pins `ENTER_ONLY`. Both are explicit sets, so each key
 reaches a known state rather than flipping whichever way the target happened to be.
 
+## Resolved on 2026-08-23: remote and non-session clients find the daemon
+
+`KA_RUNTIME_BASE` was `${XDG_RUNTIME_DIR:-/tmp/keepalive-$UID}`, so a client in any context
+that never ran `pam_systemd` - `su`, `sudo -u`, cron, non-interactive remote exec - silently
+addressed `/tmp/keepalive-$UID` while the daemon listened under `/run/user/$UID`, and
+reported the service as unavailable.
+
+`ka_xdg_resolve_runtime_base` now tries `$XDG_RUNTIME_DIR`, then `/run/user/$UID` when it is
+a directory this user owns, then the `/tmp` fallback, and records which one it picked in
+`KA_RUNTIME_SOURCE`. `ka_runtime_secure` hardens only the fallback, and `doctor` prints the
+base together with its source.
+
+Verified with the installed client: `env -u XDG_RUNTIME_DIR keepalive status` reported
+`service unavailable` before and `Keep Alive service: online` after.
+
+## Resolved on 2026-08-23: an unread control FIFO no longer hangs clients
+
+`ka_ipc_signal_request` wrote with `> "$KA_CONTROL_FIFO"`. Opening a FIFO write-only blocks
+until a reader appears, so a FIFO left behind by a daemon that died - it creates its own
+when systemd has not, and `RemoveOnStop` covers only the socket unit's - froze the client
+indefinitely with no output. Verified: the real client hung until killed.
+
+The FIFO is now opened read/write, which never blocks, so a dead daemon surfaces as the
+ordinary response timeout. Verified: the same scenario now returns in 8 s with
+`Timed out waiting for keepalive service`.
+
+## Resolved on 2026-08-23: a transient I/O failure no longer kills the daemon
+
+Periodic work ran unguarded under `set -e`, so one failed write - a full tmpfs, a
+permissions change - aborted the daemon, and `Restart=on-failure` retried every 2 s until
+`StartLimitBurst=5` in 10 s tripped and the unit stayed dead. Verified by making the runtime
+directory unwritable.
+
+`ka_service_try` now runs each periodic task and degrades a failure to a warning carrying
+the real status. Discovery is deliberately *not* wrapped: its non-zero return means "the
+pass hit its budget", a normal signal handled by the caller. `ka_service_runtime_present`
+additionally exits cleanly when the runtime directory disappears, because that means the
+session ended rather than something to retry.
+
+## Resolved on 2026-08-23: smaller reliability items
+
+- **Unhelpful diagnostics.** An unreachable daemon produced `service unavailable:` with no
+  reason. `ka_ipc_call` now emits the recorded reason, and the FIFO error names the path.
+- **Duplicate send across a crash.** The timer reset and checkpoint happened *after*
+  delivery, so a crash in between left the countdown at zero and the restarted daemon
+  delivered again. The event is now consumed and checkpointed before delivery, which
+  matches the existing policy that a failed attempt still consumes its event; a second
+  checkpoint afterwards persists the rotation advance or pending-submit state.
+- **Lock contention restart loop.** A second instance failing `flock` returned 1, which
+  systemd treated as a failure. It now logs and exits 0, because another instance owning
+  the runtime state is not an error.
+- **Slow sweeps.** Stale request/response cleanup ran hourly and first ran an hour after
+  start. It now runs every `KEEPALIVE_CLEANUP_INTERVAL` (default 300 s) and once at startup,
+  with the age threshold in `KEEPALIVE_STALE_REQUEST_MINUTES` (default 30).
+- **Fixed response budget.** The client's 8 s wait is now `KEEPALIVE_RESPONSE_TIMEOUT_MS`,
+  because a loaded machine can legitimately exceed it and a spurious timeout is
+  indistinguishable to the operator from an unreachable service.
+
+## Known: the pseudo-terminal suite is not perfectly deterministic
+
+`tests/test_tui_pty.sh` launches real clients against a real daemon, so it inherits real
+timing. Measured after hardening: roughly one harness timeout in fifteen full runs, never a
+behavioural assertion.
+
+Mitigations in place: the driver synchronises on expected output rather than sleeps and
+scans only output produced since the last key; a wait that fails *before any key is sent*
+is reported as `START-TIMEOUT` and retried once, because it means the client never drew and
+says nothing about the keys; a plain exit `TIMEOUT` is retried once, because bash's
+`read -n1` reconfigures the terminal per keystroke and `tcsetattr` can discard input
+arriving in that window.
+
+Deliberately not retried: `WAIT-TIMEOUT`, which is what a key wrongly exiting a view looks
+like. That keeps the defect these tests exist for detectable.
+
 ## Mitigated, format unchanged: positional TSV parsing around empty fields
 
 Every consumer now decodes empty columns correctly: the TUI uses `ka_tui_split_tsv`,

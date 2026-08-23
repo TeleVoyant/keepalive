@@ -31,4 +31,20 @@ ka_service_recover_targets
 assert_eq ACTIVE "${KA_T_STATUS[$uuid]}" 'transient recovery validation timeout does not make target unavailable'
 assert_contains "$(ka_log_path "$uuid")" 'recovery validation deferred' 'transient recovery validation timeout is logged as deferred'
 
+# Periodic daemon work must survive a transient I/O failure. Unguarded, the loop runs
+# under `set -e`, so one failed write aborted the daemon and Restart=on-failure retried
+# until the start limit tripped and the unit stayed dead.
+source "$TEST_ROOT/lib/service.sh"
+# Role: Stand in for a periodic task that fails.
+failing_task() { return 7; }
+assert_true 'a failing periodic task does not abort the daemon' ka_service_try 'probe' failing_task
+warned=$(ka_service_try 'probe' failing_task 2>&1)
+assert_eq 1 "$(grep -c 'status 7' <<<"$warned")" 'the failure is reported with its real status'
+assert_eq '' "$(ka_service_try 'probe' true 2>&1)" 'a succeeding task stays quiet' 
+
+# The runtime directory disappearing means the session ended, not an error to retry.
+assert_true 'a present runtime directory is detected' ka_service_runtime_present
+KA_RUNTIME_DIR="$TEST_TMP/gone"
+assert_false 'a vanished runtime directory is detected' ka_service_runtime_present
+
 test_finish
