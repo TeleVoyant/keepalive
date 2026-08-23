@@ -110,6 +110,24 @@ not, and `RemoveOnStop` covers only the socket unit's - would block the client f
 no output. An `O_RDWR` open never blocks, so a dead daemon degrades to the ordinary
 response timeout, which is bounded by `KEEPALIVE_RESPONSE_TIMEOUT_MS`.
 
+## Tuning knob resolution
+
+`ka_tunable NAME DEFAULT` validates an environment knob into `REPLY` and warns once per
+name. Nothing interpolates a knob directly into `(( ))`: a non-numeric value is read as a
+variable name and aborts the shell under `set -u`, and a numeric-looking one such as `2s`
+makes the expression fail, which - with `set -e` suppressed inside an `if` condition -
+silently disables the guarded work for the life of the daemon. `KEEPALIVE_SEND_GAP` is a
+duration and carries its own pattern check because it is handed to `sleep`.
+
+## Control channel policy
+
+`ka_ipc_service_read` returns 0 for a line, 1 for the idle timeout, 2 for anything else.
+The distinction matters because that read is the loop's only pacing: bash returns >128 when
+`-t` expires, while EOF or a bad descriptor returns immediately and would turn the daemon
+into a busy spin that never crashes and so never looks unhealthy. An abnormal read reopens
+the FIFO, and five consecutive failures end the process so the service manager can restart
+a working instance.
+
 ## Daemon loop failure policy
 
 `ka_service_try` runs each periodic task and turns a failure into a warning carrying the

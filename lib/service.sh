@@ -76,9 +76,9 @@ ka_service_runtime_present() {
 # Sets KA_DISCOVERY_INTERVAL and forks nothing: it is consulted from the loop, where a
 # command substitution would cost more than the polling it is meant to avoid.
 ka_service_discovery_interval() {
-    local fast=${KEEPALIVE_DISCOVERY_INTERVAL:-3} idle=${KEEPALIVE_IDLE_DISCOVERY_INTERVAL:-30}
-    ka_is_positive_int "$fast" || fast=3
-    ka_is_positive_int "$idle" || idle=30
+    local fast idle
+    ka_tunable KEEPALIVE_DISCOVERY_INTERVAL 3;       fast=$REPLY
+    ka_tunable KEEPALIVE_IDLE_DISCOVERY_INTERVAL 30; idle=$REPLY
     if ((${#KA_T_UUIDS[@]} != 0)); then
         KA_DISCOVERY_INTERVAL=$fast
         return 0
@@ -87,7 +87,8 @@ ka_service_discovery_interval() {
     [[ -r $KA_CLIENT_PRESENCE_FILE ]] && { read -r seen <"$KA_CLIENT_PRESENCE_FILE" || true; }
     [[ $seen =~ ^[0-9]+$ ]] || seen=0
     printf -v now '%(%s)T' -1
-    if ((now - seen <= ${KEEPALIVE_CLIENT_PRESENCE_TTL:-20})); then
+    ka_tunable KEEPALIVE_CLIENT_PRESENCE_TTL 20
+    if ((now - seen <= REPLY)); then
         KA_DISCOVERY_INTERVAL=$fast
     else
         KA_DISCOVERY_INTERVAL=$idle
@@ -96,8 +97,15 @@ ka_service_discovery_interval() {
 
 # Role: Run the single-threaded daemon loop that interleaves IPC, timers, health, and discovery.
 ka_service_loop() {
+    local control_read=0
     local now last_tick elapsed last_health last_discovery last_publish last_cleanup last_status
-    local stale_logged=0
+    local stale_logged=0 clock_warned=0 control_failures=0
+    # Resolved once: these are process-wide settings, and validating them here keeps an
+    # operator typo out of every arithmetic expression below.
+    local health_interval status_interval cleanup_interval
+    ka_tunable KEEPALIVE_HEALTH_INTERVAL 2;    health_interval=$REPLY
+    ka_tunable KEEPALIVE_STATUS_INTERVAL 15;   status_interval=$REPLY
+    ka_tunable KEEPALIVE_CLEANUP_INTERVAL 300; cleanup_interval=$REPLY
     ka_now_monotonic || { ka_error 'monotonic clock source is unavailable'; return 1; }
     last_tick=$REPLY
     last_health=$last_tick
@@ -107,14 +115,38 @@ ka_service_loop() {
     last_status=$last_tick
 
     while true; do
-        if ka_ipc_service_read 0.20; then
-            [[ -n ${KA_IPC_LINE:-} ]] && ka_ipc_handle_line "$KA_IPC_LINE" || true
-        fi
+        ka_ipc_service_read 0.20 && control_read=0 || control_read=$?
+        case $control_read in
+            0)
+                control_failures=0
+                [[ -n ${KA_IPC_LINE:-} ]] && ka_ipc_handle_line "$KA_IPC_LINE" || true
+                ;;
+            1)
+                # Idle timeout: this is what paces the loop.
+                control_failures=0
+                ;;
+            *)
+                # Not a timeout, so the descriptor returned immediately and the loop has
+                # lost its pacing. Reopen rather than spin, and give up if that keeps
+                # failing so the service manager can restart a working instance.
+                control_failures=$((control_failures + 1))
+                ka_warn "control FIFO read failed ($control_failures); reopening"
+                if ((control_failures > 5)) || ! ka_ipc_service_reopen; then
+                    ka_error 'control FIFO is unusable; stopping so it can be recreated'
+                    return 1
+                fi
+                continue
+                ;;
+        esac
 
         if ! ka_now_monotonic; then
-            ka_warn 'monotonic clock read failed; countdowns remain preserved'
+            # Rate limited: paced only by the read above, this would otherwise write five
+            # identical warnings a second for as long as the condition lasts.
+            ((clock_warned == 1)) || ka_warn 'monotonic clock read failed; countdowns remain preserved'
+            clock_warned=1
             continue
         fi
+        clock_warned=0
         now=$REPLY
         if ! ka_service_runtime_present; then
             ka_info "runtime directory $KA_RUNTIME_DIR disappeared; the session has ended"
@@ -137,7 +169,7 @@ ka_service_loop() {
             last_tick=$now
         fi
 
-        if ((now - last_health >= ${KEEPALIVE_HEALTH_INTERVAL:-2})); then
+        if ((now - last_health >= health_interval)); then
             ka_service_try 'target validation' ka_state_validate_targets
             last_health=$now
         fi
@@ -164,12 +196,12 @@ ka_service_loop() {
         fi
 
         # Diagnostics only; clients read the index, not this file.
-        if ((now - last_status >= ${KEEPALIVE_STATUS_INTERVAL:-15})); then
+        if ((now - last_status >= status_interval)); then
             ka_service_try 'service status write' ka_service_write_status online
             last_status=$now
         fi
 
-        if ((now - last_cleanup >= ${KEEPALIVE_CLEANUP_INTERVAL:-300})); then
+        if ((now - last_cleanup >= cleanup_interval)); then
             ka_service_try 'stale request cleanup' ka_ipc_cleanup_stale
             last_cleanup=$now
         fi

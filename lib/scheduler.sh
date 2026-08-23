@@ -40,7 +40,17 @@ ka_scheduler_send_main() {
     fi
 
     count=$(ka_state_message_count "$uuid")
-    ((count > 0)) || { ka_state_mark_unavailable "$uuid" 'No main messages remain in target state'; return 4; }
+    if ((count == 0)); then
+        # A missing rotation is a configuration fault, not evidence that the Konsole
+        # session is gone. Marking the target UNAVAILABLE made it unrecoverable, because
+        # an unavailable record cannot be reconfigured - only deleted and rebuilt. Consume
+        # the event so this does not retry every tick, and leave the target usable.
+        KA_LAST_ERROR='no main messages are stored for this target; reconfigure it'
+        KA_T_MAIN_REMAIN[$uuid]=${KA_T_MAIN_INTERVAL[$uuid]}
+        ka_state_save_target "$uuid" || return
+        ka_log_event "$uuid" CONFIG "$KA_LAST_ERROR" FAILED
+        return 4
+    fi
     index=${KA_T_MAIN_INDEX[$uuid]}
     ((index >= 0 && index < count)) || index=0
     message=$(ka_state_message_at "$uuid" "$index")
@@ -212,7 +222,10 @@ ka_scheduler_tick() {
         return 0
     fi
     ((elapsed > 0)) || return 0
-    if ((elapsed > ${KEEPALIVE_SUSPEND_GAP:-2})); then
+    local suspend_gap
+    ka_tunable KEEPALIVE_SUSPEND_GAP 2
+    suspend_gap=$REPLY
+    if ((elapsed > suspend_gap)); then
         ka_scheduler_preserve_gap "$elapsed"
         return 0
     fi

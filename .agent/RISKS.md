@@ -696,6 +696,60 @@ session ended rather than something to retry.
   because a loaded machine can legitimately exceed it and a spurious timeout is
   indistinguishable to the operator from an unreachable service.
 
+## Resolved on 2026-08-23: tuning knobs cannot break the daemon
+
+Six sites interpolated an environment value straight into `(( ))`, which fails two
+different ways, both reproduced against a real daemon:
+
+```text
+KEEPALIVE_SUSPEND_GAP=abc      -> "abc: unbound variable" under set -u, daemon aborts
+KEEPALIVE_HEALTH_INTERVAL=2s   -> "value too great for base", the condition is false
+                                  forever and health validation silently never runs again
+```
+
+The second is the worse one: `set -e` is suppressed inside an `if` condition, so nothing
+crashes and nothing is logged. Every knob now goes through `ka_tunable`, which validates,
+falls back to the documented default, and warns once per name. The service loop resolves
+its cadences once at entry into locals. `KEEPALIVE_SEND_GAP` is a duration rather than an
+integer and gets its own pattern check, since it is handed to `sleep`.
+
+Verified: a daemon started with two bad knobs now runs normally and emits exactly one
+warning for each.
+
+## Resolved on 2026-08-23: a degenerate control read can no longer become a busy spin
+
+`ka_ipc_service_read` returned non-zero for both the idle timeout and an abnormal read, and
+the loop treated them identically. That read is the loop's *only* pacing. Measured: a
+genuine timeout returns 142 after 205 ms, while EOF or an unreadable descriptor returns 1
+in about 5 ms - 58 iterations in 0.3 s, roughly 190/s against the intended 5/s. Nothing
+crashes, so the unit looks perfectly healthy while burning a core.
+
+The read now returns 0 for a line, 1 for the idle timeout, and 2 for anything else. The
+loop reopens the FIFO on an abnormal read and gives up after five consecutive failures so
+the service manager can restart a working instance.
+
+## Resolved on 2026-08-23: an unreadable clock no longer floods the journal
+
+The monotonic-read failure warned on every iteration, about five times a second for as long
+as the condition lasted, while the discovery warning right below it was already rate
+limited. It now warns once per episode and resets when the clock recovers.
+
+## Resolved on 2026-08-23: a missing rotation is recoverable
+
+`ka_scheduler_send_main` marked a target sticky `UNAVAILABLE` when its message files were
+gone. The Konsole session and AI process are fine in that case; the configuration is not.
+An unavailable record cannot be reconfigured, only deleted and rebuilt, so a data problem
+made the target unrecoverable. It now consumes the event, logs a `CONFIG` failure naming
+the fix, records the reason for the client, and leaves the target usable.
+
+## Resolved on 2026-08-23: classifier config fails loudly
+
+`classifiers.tsv` is hand-edited, and two plausible mistakes failed silently. A file saved
+with CRLF endings left a carriage return on the pattern, so `notepad\r` never matched; the
+loader now strips it. A pattern that cannot compile was registered and swallowed by the
+`2>/dev/null` on the match; the loader now probes each pattern, refuses the entry, and
+names the offending line.
+
 ## Known: the pseudo-terminal suite is not perfectly deterministic
 
 `tests/test_tui_pty.sh` launches real clients against a real daemon, so it inherits real

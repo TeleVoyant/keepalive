@@ -7,9 +7,8 @@ declare -gA KA_LOG_WRITES=()
 
 # Role: Return the retained event-log line budget for one target.
 ka_log_max_lines() {
-    local value=${KEEPALIVE_LOG_MAX_LINES:-2000}
-    ka_is_positive_int "$value" || value=2000
-    printf '%s' "$value"
+    ka_tunable KEEPALIVE_LOG_MAX_LINES 2000
+    printf '%s' "$REPLY"
 }
 
 # Role: Trim one runtime event log to its retention budget.
@@ -47,7 +46,10 @@ ka_log_event() {
     local writes=$(( ${KA_LOG_WRITES[$uuid]:-0} + 1 ))
     KA_LOG_WRITES[$uuid]=$writes
     # Checking every write would fork `tail` per event; amortize it instead.
-    if ((writes % ${KEEPALIVE_LOG_CHECK_EVERY:-200} == 0)); then
+    local check_every
+    ka_tunable KEEPALIVE_LOG_CHECK_EVERY 200
+    check_every=$REPLY
+    if ((writes % check_every == 0)); then
         ka_log_trim "$path"
     fi
     return 0

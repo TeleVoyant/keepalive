@@ -41,4 +41,33 @@ ka_ipc_wait_response 'no-such-request' >/dev/null 2>&1 || true
 assert_true 'the response wait honours its configured budget' [ $((SECONDS - start)) -lt 5 ]
 unset KEEPALIVE_RESPONSE_TIMEOUT_MS
 
+# The control read is the daemon loop's only pacing, so an immediate return must be
+# distinguishable from an idle timeout; otherwise a broken descriptor becomes a busy spin
+# that never crashes and so never looks unhealthy.
+pacing_fifo="$TEST_TMP/pacing.fifo"
+mkfifo -m 600 "$pacing_fifo"
+exec {KA_CONTROL_FD}<>"$pacing_fifo"
+# Statuses are captured inline rather than through a command substitution: a subshell
+# brings its own view of the descriptor table, which is exactly what is under test here.
+read_rc=0; ka_ipc_service_read 0.10 2>/dev/null || read_rc=$?
+assert_eq 1 "$read_rc" 'an idle timeout is reported as a timeout'
+
+printf 'REQUEST xyz\n' >&"$KA_CONTROL_FD"
+read_rc=0; ka_ipc_service_read 0.10 2>/dev/null || read_rc=$?
+assert_eq 0 "$read_rc" 'an available line is reported as success'
+assert_eq 'REQUEST xyz' "$KA_IPC_LINE" 'the line is delivered to the caller'
+
+# Two ways the read can return immediately, both of which would remove the loop's pacing:
+# a descriptor that cannot be read at all, and one already at end of file.
+exec {KA_CONTROL_FD}>&-
+KA_CONTROL_FD=99
+read_rc=0; ka_ipc_service_read 0.10 2>/dev/null || read_rc=$?
+assert_eq 2 "$read_rc" 'an unreadable descriptor is reported as abnormal, not as a timeout'
+
+: >"$TEST_TMP/empty"
+exec {KA_CONTROL_FD}<"$TEST_TMP/empty"
+read_rc=0; ka_ipc_service_read 0.10 2>/dev/null || read_rc=$?
+assert_eq 2 "$read_rc" 'a descriptor at end of file is reported as abnormal'
+exec {KA_CONTROL_FD}<&-
+
 test_finish

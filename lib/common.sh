@@ -97,6 +97,31 @@ ka_clamp() {
     printf '%d' "$value"
 }
 
+# Names already reported as misconfigured, so one bad value warns once rather than on
+# every loop iteration.
+declare -gA KA_TUNABLE_WARNED=()
+
+# Role: Read a positive-integer tuning knob into REPLY, falling back on anything invalid.
+#
+# Interpolating an environment value straight into (( )) is unsafe twice over. A
+# non-numeric value such as "abc" is treated as a variable name and aborts the shell under
+# `set -u`. A numeric-looking one such as "2s" makes the expression itself fail, and since
+# `set -e` is suppressed inside an `if` condition the guarded work then silently never
+# runs again - health validation stopping for the life of the daemon, with nothing in the
+# log to say so. Every knob goes through here instead.
+ka_tunable() {
+    local name=$1 fallback=$2 value=${!1:-}
+    if ka_is_positive_int "$value"; then
+        REPLY=$value
+        return 0
+    fi
+    if [[ -n $value && -z ${KA_TUNABLE_WARNED[$name]+x} ]]; then
+        KA_TUNABLE_WARNED[$name]=1
+        ka_warn "$name=$value is not a positive integer; using the default of $fallback"
+    fi
+    REPLY=$fallback
+}
+
 # Role: Validate that a value is a non-negative base-10 integer.
 ka_is_uint() {
     [[ ${1-} =~ ^[0-9]+$ ]]

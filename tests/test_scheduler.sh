@@ -136,4 +136,21 @@ ka_scheduler_send_secondary "$uuid" MANUAL
 assert_eq 1 "${#DELIVERIES[@]}" 'a manual secondary send still works after the one-shot'
 assert_eq 1 "${KA_T_SECONDARY_DONE[$uuid]}" 'a manual send does not re-arm the one-shot'
 
+# A missing rotation is a configuration fault, not evidence the Konsole session is gone.
+# Marking the target UNAVAILABLE made it unrecoverable: an unavailable record cannot be
+# reconfigured, only deleted and rebuilt.
+KA_T_STATUS[$uuid]=ACTIVE
+KA_T_MAIN_REMAIN[$uuid]=1
+KA_T_MODE[$uuid]=MESSAGE_ENTER
+KA_T_PENDING_SUBMIT[$uuid]=0
+rm -f "$(ka_state_target_dir "$uuid")"/messages/*
+ka_error_reset
+assert_false 'a send with no stored messages fails' ka_scheduler_send_main "$uuid" MANUAL
+assert_eq ACTIVE "${KA_T_STATUS[$uuid]}" 'the target stays usable instead of becoming unavailable'
+assert_eq "${KA_T_MAIN_INTERVAL[$uuid]}" "${KA_T_MAIN_REMAIN[$uuid]}" 'the event is consumed so it does not retry every tick'
+assert_contains "$(ka_log_path "$uuid")" 'reconfigure it' 'the operator is told how to recover'
+assert_true 'the reason reaches the client' [ -n "$KA_LAST_ERROR" ]
+ka_write_scalar "$(ka_state_target_dir "$uuid")/messages/001" one
+ka_write_scalar "$(ka_state_target_dir "$uuid")/messages/002" two
+
 test_finish

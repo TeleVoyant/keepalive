@@ -531,9 +531,8 @@ ka_state_validate_from_discovery() {
 
 # Role: Return the consecutive-transient-failure budget before a target is given up on.
 ka_state_strike_limit() {
-    local value=${KEEPALIVE_VALIDATION_STRIKES:-5}
-    ka_is_positive_int "$value" || value=5
-    printf '%s' "$value"
+    ka_tunable KEEPALIVE_VALIDATION_STRIKES 5
+    printf '%s' "$REPLY"
 }
 
 # Role: Validate every non-unavailable monitored target and update last-seen metadata.

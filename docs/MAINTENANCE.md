@@ -56,7 +56,10 @@ Do not merge changes that weaken these rules:
 34. Resolve the runtime base by precedence; never assume `XDG_RUNTIME_DIR` is set.
 35. Never open the control FIFO write-only.
 36. Periodic daemon work warns and continues; only a vanished runtime directory stops the loop.
-37. Never give `keepalive.service` a private mount namespace. `PrivateTmp`,
+37. Read numeric tuning knobs through `ka_tunable`; never interpolate one into `(( ))`.
+38. Keep the control read able to tell an idle timeout from a broken descriptor.
+39. Never mark a target UNAVAILABLE for a configuration fault; unavailable records cannot be reconfigured.
+40. Never give `keepalive.service` a private mount namespace. `PrivateTmp`,
     `PrivateDevices`, `ProtectSystem`, `ProtectHome`, `ProtectProc`, and the
     `ProtectKernel*` family all break `/proc/PID/cwd` and `/proc/PID/exe` resolution
     for processes the daemon does not own, silently reducing every session to
@@ -191,3 +194,5 @@ On the real KDE workstation:
 30. Enable the secondary prompt and let it fire; it must not fire a second time until reconfigured.
 31. Run `env -u XDG_RUNTIME_DIR keepalive status` and `keepalive doctor`; both must find the running daemon and name the runtime source.
 32. Kill the daemon with SIGKILL, leaving its FIFO behind, then run a client; it must time out rather than hang.
+33. Start the daemon with a deliberately invalid knob such as `KEEPALIVE_HEALTH_INTERVAL=2s`; it must warn once and keep running on the default.
+34. Remove a target's message files while it is active; the target must stay usable and the log must say to reconfigure it.

@@ -63,7 +63,11 @@ ka_ipc_wait_response() {
     # The default suits an idle desktop. A loaded machine, or a daemon working through a
     # slow bus, can legitimately take longer, and a spurious timeout looks to the operator
     # exactly like an unreachable service.
-    local id=$1 timeout_ms=${2:-${KEEPALIVE_RESPONSE_TIMEOUT_MS:-8000}} dir waited=0 status message
+    local id=$1 timeout_ms=${2-} dir waited=0 status message
+    if [[ -z $timeout_ms ]]; then
+        ka_tunable KEEPALIVE_RESPONSE_TIMEOUT_MS 8000
+        timeout_ms=$REPLY
+    fi
     ka_is_positive_int "$timeout_ms" || timeout_ms=8000
     dir=$(ka_ipc_response_dir "$id")
     while ((waited < timeout_ms)); do
@@ -119,10 +123,28 @@ ka_ipc_service_open() {
     exec {KA_CONTROL_FD}<>"$KA_CONTROL_FIFO"
 }
 
-# Role: Read at most one FIFO control line with a short timeout for scheduler interleaving.
+# Role: Read at most one FIFO control line, separating an idle timeout from a broken read.
+#
+# Returns 0 with a line, 1 on the normal idle timeout, and 2 when the read failed for any
+# other reason. That distinction matters because this read is the loop's only pacing: bash
+# returns >128 when -t expires, but EOF or a bad descriptor returns immediately, which
+# turns the daemon into a busy spin that never crashes and so never looks unhealthy.
 ka_ipc_service_read() {
-    local timeout=${1:-0.20}
-    IFS= read -r -t "$timeout" -u "$KA_CONTROL_FD" KA_IPC_LINE
+    local timeout=${1:-0.20} rc=0
+    KA_IPC_LINE=''
+    IFS= read -r -t "$timeout" -u "$KA_CONTROL_FD" KA_IPC_LINE || rc=$?
+    ((rc == 0)) && return 0
+    ((rc > 128)) && return 1
+    return 2
+}
+
+# Role: Reopen the control FIFO after an abnormal read, replacing the old descriptor.
+ka_ipc_service_reopen() {
+    if [[ -n ${KA_CONTROL_FD:-} ]]; then
+        exec {KA_CONTROL_FD}>&- 2>/dev/null || true
+    fi
+    KA_CONTROL_FD=
+    ka_ipc_service_open
 }
 
 # Role: Remove abandoned request/response directories older than the current service process session.
@@ -131,8 +153,9 @@ ka_ipc_cleanup_stale() {
     # died mid-request are swept, so the age threshold stays generous; the sweep itself runs
     # often enough that debris does not sit around for an hour.
     command -v find >/dev/null 2>&1 || return 0
-    local age=${KEEPALIVE_STALE_REQUEST_MINUTES:-30}
-    ka_is_positive_int "$age" || age=30
+    local age
+    ka_tunable KEEPALIVE_STALE_REQUEST_MINUTES 30
+    age=$REPLY
     find "$KA_REQUESTS_DIR" "$KA_RESPONSES_DIR" -mindepth 1 -maxdepth 1 -type d -mmin "+$age" \
         -exec rm -rf -- {} + 2>/dev/null || true
     return 0

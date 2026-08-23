@@ -90,4 +90,26 @@ rm -f "$KA_RUNTIME_BASE"
 unset KEEPALIVE_PER_USER_RUNTIME
 [[ -n $saved_runtime ]] && export XDG_RUNTIME_DIR=$saved_runtime
 
+# Tuning knobs must never reach (( )) unvalidated. A non-numeric value is read as a
+# variable name and aborts the shell under `set -u`; a numeric-looking one such as "2s"
+# makes the expression fail, and because `set -e` is suppressed inside an `if` condition
+# the guarded work then silently never runs again.
+KA_TUNABLE_WARNED=()
+PROBE_KNOB=5;   ka_tunable PROBE_KNOB 7 2>/dev/null; assert_eq 5 "$REPLY" 'a valid knob is used as given'
+PROBE_KNOB=abc; ka_tunable PROBE_KNOB 7 2>/dev/null; assert_eq 7 "$REPLY" 'a non-numeric knob falls back'
+PROBE_KNOB=2s;  ka_tunable PROBE_KNOB 7 2>/dev/null; assert_eq 7 "$REPLY" 'a numeric-looking knob falls back'
+PROBE_KNOB=0;   ka_tunable PROBE_KNOB 7 2>/dev/null; assert_eq 7 "$REPLY" 'zero falls back'
+PROBE_KNOB=-3;  ka_tunable PROBE_KNOB 7 2>/dev/null; assert_eq 7 "$REPLY" 'a negative knob falls back'
+unset PROBE_KNOB; ka_tunable PROBE_KNOB 7 2>/dev/null; assert_eq 7 "$REPLY" 'an unset knob uses the default'
+
+# Captured through files, not command substitution: a subshell would discard the
+# warned-once bookkeeping and make the second call look noisy again.
+KA_TUNABLE_WARNED=()
+NOISY_KNOB=nope
+ka_tunable NOISY_KNOB 4 2>"$TEST_TMP/warn.first"
+ka_tunable NOISY_KNOB 4 2>"$TEST_TMP/warn.second"
+assert_eq 1 "$(grep -c 'not a positive integer' "$TEST_TMP/warn.first")" 'a bad knob is reported once'
+assert_eq 0 "$(wc -c <"$TEST_TMP/warn.second")" 'the same bad knob stays quiet afterwards'
+unset NOISY_KNOB
+
 test_finish

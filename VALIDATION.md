@@ -11,7 +11,7 @@ The release candidate passed:
 Bash syntax:                 PASS
 Function-role comment lint:  PASS
 Test files:                  14 / 14 PASS
-Assertions:                  300 / 300 PASS
+Assertions:                  322 / 322 PASS
 systemd-analyze verify:      PASS
 Installer layout simulation: PASS (non-root + mocked systemctl)
 Daemon/client integration:   PASS (real Bash processes/FIFO + mocked qdbus)
@@ -88,6 +88,11 @@ Run the same aggregate command with:
 - A vanished runtime directory ends the daemon cleanly, and lock contention exits successfully instead of being retried.
 - A timer event is consumed and checkpointed before delivery, so a crash between sending and checkpointing cannot repeat it.
 - An unreachable daemon reports a reason rather than an empty one.
+- An invalid tuning knob warns once and falls back to its default, instead of aborting the daemon or silently disabling the work it guards.
+- The control read distinguishes an idle timeout from a broken descriptor, so a degenerate read cannot become a busy spin.
+- A repeated clock-read failure warns once per episode rather than several times a second.
+- A target whose message files are missing stays usable and is told to reconfigure, rather than becoming an unrecoverable UNAVAILABLE record.
+- Classifier entries with CRLF endings load correctly, and a pattern that cannot compile is refused with the offending line named.
 - User installer places source, symlink, and systemd units correctly and enables the socket entrypoint.
 - `keepalive.socket` and `keepalive.service` pass `systemd-analyze verify`.
 

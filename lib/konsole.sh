@@ -54,8 +54,8 @@ ka_konsole_session_name() {
 ka_konsole_discover() {
     local service path uuid term_pid fgpid class ai_type ai_pid ai_start name_info name cwd cmd
     local budget deadline
-    budget=${KEEPALIVE_DISCOVERY_BUDGET_MS:-1000}
-    ka_is_positive_int "$budget" || budget=1000
+    ka_tunable KEEPALIVE_DISCOVERY_BUDGET_MS 1000
+    budget=$REPLY
     ka_now_ms
     deadline=$((REPLY + budget))
     while IFS= read -r service; do
@@ -169,7 +169,13 @@ ka_konsole_send_raw() {
 ka_konsole_deliver() {
     local service=$1 path=$2 mode=$3 message=${4-} submit_only=${5:-0}
     local submit_seq=${KEEPALIVE_SUBMIT_SEQ:-$'\r'}
+    # A duration, not an integer, so ka_tunable does not apply. It is handed to `sleep`,
+    # where a malformed value would fail the pause between the message and its submit.
     local send_gap=${KEEPALIVE_SEND_GAP:-0.15}
+    if [[ ! $send_gap =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        ka_warn "KEEPALIVE_SEND_GAP=$send_gap is not a duration in seconds; using 0.15"
+        send_gap=0.15
+    fi
 
     case $mode in
         ENTER_ONLY)

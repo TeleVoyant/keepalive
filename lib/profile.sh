@@ -75,8 +75,9 @@ ka_profile_validate_main_messages() {
             ka_error 'at least one non-empty main message is required'
             return 1
         }
-        local max_count=${KEEPALIVE_MAX_MESSAGES:-64}
-        ka_is_positive_int "$max_count" || max_count=64
+        local max_count
+        ka_tunable KEEPALIVE_MAX_MESSAGES 64
+        max_count=$REPLY
         ((count <= max_count)) || {
             ka_error "main message rotation has $count entries; the limit is $max_count"
             return 1
@@ -101,8 +102,9 @@ ka_profile_validate_main_messages() {
                 ka_error "main message $expected must be one non-empty logical line"
                 return 1
             }
-            local max_len=${KEEPALIVE_MAX_MESSAGE_LENGTH:-2000}
-            ka_is_positive_int "$max_len" || max_len=2000
+            local max_len
+            ka_tunable KEEPALIVE_MAX_MESSAGE_LENGTH 2000
+            max_len=$REPLY
             ((${#content} <= max_len)) || {
                 ka_error "main message $expected is ${#content} characters; the limit is $max_len"
                 return 1
@@ -132,8 +134,9 @@ ka_profile_validate_request() {
     if [[ $secondary_enabled == 1 ]]; then
         [[ -n $secondary_content ]] || { ka_error 'enabled secondary message cannot be empty'; return 1; }
         [[ $secondary_content != *$'\n'* ]] || { ka_error 'secondary message must be one logical line'; return 1; }
-        local max_len=${KEEPALIVE_MAX_MESSAGE_LENGTH:-2000}
-        ka_is_positive_int "$max_len" || max_len=2000
+        local max_len
+        ka_tunable KEEPALIVE_MAX_MESSAGE_LENGTH 2000
+        max_len=$REPLY
         ((${#secondary_content} <= max_len)) || {
             ka_error "secondary message is ${#secondary_content} characters; the limit is $max_len"
             return 1

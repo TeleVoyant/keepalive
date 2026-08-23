@@ -23,9 +23,8 @@ ka_qdbus_find() {
 # Every bounded call needed this value, and reading it through a command substitution
 # cost one fork per call on the daemon's hottest path.
 ka_dbus_timeout_resolve() {
-    local value=${KEEPALIVE_QDBUS_TIMEOUT:-2}
-    ka_is_positive_int "$value" || value=2
-    KA_DBUS_TIMEOUT=$value
+    ka_tunable KEEPALIVE_QDBUS_TIMEOUT 2
+    KA_DBUS_TIMEOUT=$REPLY
 }
 
 # Role: Return a validated positive qdbus subprocess timeout in integer seconds.

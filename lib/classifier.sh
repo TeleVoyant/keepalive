@@ -61,10 +61,24 @@ ka_classifier_add() {
 ka_classifier_load_user_registry() {
     local path="$KA_CONFIG_DIR/classifiers.tsv"
     [[ -r $path ]] || return 0
-    local name patterns
+    local name patterns line_no=0 probe_rc
     while IFS=$'\t' read -r name patterns _; do
+        line_no=$((line_no + 1))
+        # A file saved with CRLF endings leaves a carriage return on the last field, which
+        # becomes part of the regex and makes the entry silently never match.
+        name=${name%$'\r'}
+        patterns=${patterns%$'\r'}
         [[ -n $name && -n $patterns ]] || continue
         [[ $name == \#* ]] && continue
+        # Reject a pattern that will not compile, rather than registering an entry that can
+        # never match and gives the operator nothing to go on. `=~` returns 2 for a bad
+        # regex, against 0 or 1 for a decided match.
+        probe_rc=0
+        [[ '' =~ $patterns ]] 2>/dev/null || probe_rc=$?
+        if ((probe_rc > 1)); then
+            ka_warn "classifiers.tsv line $line_no: '$name' has an invalid regular expression; ignoring it"
+            continue
+        fi
         ka_classifier_add "$name" "$patterns"
     done <"$path"
 }

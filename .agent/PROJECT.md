@@ -301,5 +301,11 @@ name/pattern without adding another order slot.
 36. Never open the control FIFO write-only; that blocks forever when no reader exists.
 37. Periodic daemon work degrades failures to warnings; only a vanished runtime directory
     ends the loop, and it ends it cleanly.
-38. Never write `local a=$1 b="$a..."`: bash expands every assignment word before creating
+38. Read every numeric tuning knob through `ka_tunable`; never interpolate one into
+    `(( ))`, where a bad value either aborts the daemon or silently disables the work.
+39. The control read must distinguish an idle timeout from an abnormal one; it is the
+    loop's only pacing.
+40. A configuration fault is not identity loss: never mark a target UNAVAILABLE for
+    missing data, because an unavailable record cannot be reconfigured.
+41. Never write `local a=$1 b="$a..."`: bash expands every assignment word before creating
     any of them, so the second reads an outer `a` and fails under `set -u` without one.
