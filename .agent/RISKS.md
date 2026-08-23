@@ -375,10 +375,9 @@ Not defects; recorded so the next agent does not have to rediscover them.
   instead of waiting a whole interval after a transport failure, and optionally skipping
   a send while the AI process is visibly busy.
 - **CI — added on 2026-08-23.** `.github/workflows/ci.yml` runs the aggregate developer
-  check on every push and pull request. ShellCheck runs as a separate advisory job with
-  `continue-on-error`, because the codebase has never been verified against it and no
-  ShellCheck is available in the development environment; promote it to required once the
-  findings are cleared. `KEEPALIVE_SKIP_SHELLCHECK=1` excludes it from the blocking job.
+  check on every push and pull request. ShellCheck is a second blocking job as of 1.0.0;
+  its findings were triaged and cleared. `KEEPALIVE_SKIP_SHELLCHECK=1` excludes it from
+  the aggregate job so the two failures stay distinguishable.
 
 ## Superseded: discovery cost scales with total Konsole sessions, not targets
 
@@ -799,6 +798,65 @@ Three causes, all fixed:
 
 Tests keep one printing wrapper, `target_dir` in `testlib.sh`, purely so test expressions
 stay readable; production has a single idiom.
+
+## Resolved on 2026-08-23: ShellCheck findings triaged and the gate closed
+
+ShellCheck had never run against this codebase - none was available in the development
+environment - so CI carried it as an advisory job. The first real run reported 181
+findings. Two were genuine defects, and both had evaded the existing checks.
+
+**A self-referential `local` that the project's own lint missed.**
+`ka_scheduler_preserve_clock_reset` opened with:
+
+```bash
+local elapsed=$1 uuid backwards=$((-elapsed))
+```
+
+This is the same class as the `ka_state_load_target_dir` bug already recorded here, and it
+failed the same way: bash expands every assignment word before creating any of the locals,
+so `elapsed` inside the arithmetic resolved to the **caller's** `elapsed` through dynamic
+scoping. `ka_scheduler_tick` happens to declare one with the same value, which is the only
+reason it worked. Demonstrated both failure modes directly:
+
+| Context | Result |
+|---|---|
+| Called standalone | `elapsed: unbound variable`, aborting the daemon under `set -u` |
+| Caller with `elapsed=-99`, argument `-7` | Logs `99` - the caller's value, silently wrong |
+
+The lint in `test_function_comments.sh` was supposed to catch exactly this and did not: it
+searched for `$name` and `${name}`, but arithmetic context needs no sigil, so a bare
+`elapsed` inside `$(( ))` was invisible to it. The lint now matches whole-word occurrences
+inside `$(( ))` and `(( ))` as well, and was confirmed to fail on the live bug before the
+fix was applied.
+
+**A conditional that could store the opposite value.** `lib/tui/wizard.sh` used
+`[[ $choice == 1 ]] && ka_write_scalar ... ENTER_ONLY || ka_write_scalar ... MESSAGE_ENTER`.
+A failed ENTER_ONLY write falls through to the `||` branch and stores MESSAGE_ENTER, so a
+transient write failure would silently select the other delivery mode. Now an `if`/`else`.
+
+Two further changes were hardening rather than defects: `scripts/install.sh` now uses
+`${share:?}` so an empty expansion aborts instead of building a path at the filesystem
+root, and eight test sites that ran a bare `[[ ]]` followed by `assert_eq 0 "$?"` were
+rewritten - under `set -e` a failing condition aborted the whole file instead of reporting
+one failed assertion, so any failure there would have been reported confusingly.
+
+**The rest were false positives from the module architecture**, and one was dangerous.
+ShellCheck could not resolve the `"${BASH_SOURCE[0]%/*}/..."` source paths, so it analysed
+each file alone: globals assigned in one module and read in another looked unused, and
+associative-array subscripts looked arithmetic. `source-path=SCRIPTDIR` and
+`external-sources=true` in `.shellcheckrc` removed roughly half. Of the codes now disabled
+project-wide, SC2004 is the one to understand before ever re-enabling:
+
+```bash
+declare -A a; k=mykey; a[$k]=5
+$(( a[$k] - 1 ))   #  4  correct
+$(( a[k]  - 1 ))   # -1  reads the literal key "k"
+```
+
+Following it would silently corrupt every target lookup in the daemon. Each disabled code
+carries its justification in `.shellcheckrc`.
+
+ShellCheck now reports **0 findings across 37 files** and is a blocking CI job.
 
 ## Known: the pseudo-terminal suite is not perfectly deterministic
 

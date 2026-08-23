@@ -41,7 +41,15 @@ while IFS= read -r file; do
         first=${first%%=*}
         rest=${definition#*local *=}
         [[ $rest == *" "* ]] || continue
-        if [[ ${rest#* } == *"\$$first"* || ${rest#* } == *"\${$first"* ]]; then
+        tail=${rest#* }
+        # `$name` and `${name}` cover normal expansion. Arithmetic context does not need a
+        # sigil - `local a=$1 b=$((-a))` reads an outer `a` with nothing to grep for - so
+        # bare occurrences inside $(( )) and (( )) have to be matched as whole words.
+        arithmetic=0
+        if [[ $tail == *'$(('* || $tail == *'(('* ]]; then
+            grep -qE "\\(\\([^)]*\\b$first\\b" <<<"$tail" && arithmetic=1
+        fi
+        if [[ $tail == *"\$$first"* || $tail == *"\${$first"* ]] || ((arithmetic)); then
             printf 'self-referential local: %s:%s %s\n' "$file" "$lineno" "$definition"
             ((self_referential += 1))
         fi

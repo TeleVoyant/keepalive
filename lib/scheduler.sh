@@ -207,7 +207,11 @@ ka_scheduler_preserve_gap() {
 
 # Role: Preserve target countdowns explicitly when the monotonic source moves backward.
 ka_scheduler_preserve_clock_reset() {
-    local elapsed=$1 uuid backwards=$((-elapsed))
+    local elapsed=$1 uuid
+    # Second statement deliberately: bash expands every assignment word in one `local`
+    # before creating any of them, so computing this alongside `elapsed` would read an
+    # outer `elapsed` instead - which happened to be the caller's, with the same value.
+    local backwards=$((-elapsed))
     for uuid in "${KA_T_UUIDS[@]}"; do
         [[ ${KA_T_STATUS[$uuid]} == UNAVAILABLE ]] && continue
         ka_log_event "$uuid" TIMER "monotonic clock moved backward ${backwards}s; countdown preserved" PRESERVED

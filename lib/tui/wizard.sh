@@ -293,7 +293,13 @@ ka_wizard_step_delivery() {
             1) choice=0 ;;
             2) choice=1 ;;
             ENTER)
-                [[ $choice == 1 ]] && ka_write_scalar "$config_dir/delivery_mode" ENTER_ONLY || ka_write_scalar "$config_dir/delivery_mode" MESSAGE_ENTER
+                # An if/else, not `A && B || C`: a failed ENTER_ONLY write would otherwise
+                # fall through and store MESSAGE_ENTER, silently choosing the other mode.
+                if [[ $choice == 1 ]]; then
+                    ka_write_scalar "$config_dir/delivery_mode" ENTER_ONLY
+                else
+                    ka_write_scalar "$config_dir/delivery_mode" MESSAGE_ENTER
+                fi
                 return 0
                 ;;
             ESC) return 2 ;;

@@ -142,7 +142,7 @@ is optional in the aggregate developer check.
 | `systemd/*` | User FIFO socket activation and daemon supervision. |
 | `scripts/install.sh` | Per-user installed tree, symlink, units, socket enablement. |
 | `scripts/uninstall.sh` | Removes installed app/units, intentionally retains profile. |
-| `scripts/dev-check.sh` | Syntax, optional ShellCheck, version consistency, tests, systemd verify. |
+| `scripts/dev-check.sh` | Syntax, ShellCheck, version consistency, tests, systemd verify. |
 | `scripts/package.sh` | ZIP release artifact plus SHA-256. |
 | `tests/*` | Dependency-free unit, mock integration, layout, and lint tests. |
 | `tests/fixtures/qdbus-mock` | Scriptable stand-in for the Konsole D-Bus surface. |
@@ -220,7 +220,7 @@ persistent config directory.
 | `KEEPALIVE_MAX_MESSAGES` | Maximum main-rotation entries | `64` |
 | `KEEPALIVE_MAX_MESSAGE_LENGTH` | Maximum characters per message | `2000` |
 | `KEEPALIVE_ATOMIC_SUBMIT` | Send text and submit in one `sendText` | `0` |
-| `KEEPALIVE_SKIP_SHELLCHECK` | Skip the optional ShellCheck stage in `dev-check.sh` | unset |
+| `KEEPALIVE_SKIP_SHELLCHECK` | Skip the ShellCheck stage in `dev-check.sh` | unset |
 | `KEEPALIVE_PER_USER_RUNTIME` | Override the `/run/user/$UID` candidate (tests) | `/run/user/$UID` |
 | `KEEPALIVE_RESPONSE_TIMEOUT_MS` | Client wait for a daemon response | `8000` |
 | `KEEPALIVE_CLEANUP_INTERVAL` | Seconds between stale request/response sweeps | `300` |

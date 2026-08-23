@@ -111,14 +111,14 @@ for i in {1..80}; do [[ -p $XDG_RUNTIME_DIR/keepalive/control.fifo ]] && break; 
 assert_true 'background daemon creates control FIFO' test -p "$XDG_RUNTIME_DIR/keepalive/control.fifo"
 
 list=$(run_keepalive list)
-[[ $list == *Claude* && $list == *Avela* && $list == *AVAILABLE* ]]
-assert_eq 0 "$?" 'public client sees mocked Claude session as AVAILABLE'
+rc=0; [[ $list == *Claude* && $list == *Avela* && $list == *AVAILABLE* ]] || rc=1
+assert_eq 0 "$rc" 'public client sees mocked Claude session as AVAILABLE'
 
 response=$(create_target_via_ipc "$old_uuid")
 assert_eq $'OK\tok' "$response" 'CREATE request crosses real FIFO/service process boundary'
 list=$(run_keepalive list)
-[[ $list == *Avela* && $list == *ACTIVE* ]]
-assert_eq 0 "$?" 'created target becomes ACTIVE in another client process'
+rc=0; [[ $list == *Avela* && $list == *ACTIVE* ]] || rc=1
+assert_eq 0 "$rc" 'created target becomes ACTIVE in another client process'
 
 # Exercise actual mocked qdbus sendText from daemon and verify message + carriage-return writes.
 run_keepalive refresh >/dev/null
@@ -153,8 +153,8 @@ assert_eq $'ERROR\tKonsole D-Bus validation timed out' "$response" \
     'bounded qdbus timeout reaches the client with its specific reason'
 rm -f -- "$qdbus_hang_file"
 list=$(run_keepalive list)
-[[ $list == *Avela* && $list == *ACTIVE* ]]
-assert_eq 0 "$?" 'transient qdbus timeout does not make target sticky unavailable'
+rc=0; [[ $list == *Avela* && $list == *ACTIVE* ]] || rc=1
+assert_eq 0 "$rc" 'transient qdbus timeout does not make target sticky unavailable'
 assert_contains "$XDG_RUNTIME_DIR/keepalive/logs/$old_uuid.log" 'Konsole D-Bus validation timed out' 'daemon records transient validation timeout'
 
 # The public CLI must be able to drive the whole lifecycle. Until now CREATE existed
@@ -167,20 +167,20 @@ assert_eq 'ok' "$delete_response" 'CLI delete removes an existing keep-alive'
 create_response=$(run_keepalive create "$old_uuid")
 assert_eq 'ok' "$create_response" 'CLI create builds a keep-alive from the saved profile'
 list=$(run_keepalive list)
-[[ $list == *Avela* && $list == *ACTIVE* ]]
-assert_eq 0 "$?" 'CLI-created keep-alive is ACTIVE'
+rc=0; [[ $list == *Avela* && $list == *ACTIVE* ]] || rc=1
+assert_eq 0 "$rc" 'CLI-created keep-alive is ACTIVE'
 
 assert_eq 'ok' "$(run_keepalive pause "$old_uuid")" 'CLI pause freezes the target'
 assert_eq 'already paused' "$(run_keepalive pause "$old_uuid")" 'CLI pause is idempotent'
 assert_eq 'ok' "$(run_keepalive resume "$old_uuid")" 'CLI resume restarts the countdown'
 
 json=$(run_keepalive list --json)
-[[ $json == *'"uuid": '* || $json == *'"uuid":"'* ]]
-assert_eq 0 "$?" 'CLI --json emits machine-readable rows'
-[[ $json == *'"status":"ACTIVE"'* ]]
-assert_eq 0 "$?" 'JSON output carries the target state'
-printf '%s' "$json" | python3 -c 'import json,sys; json.load(sys.stdin)' 2>/dev/null
-assert_eq 0 "$?" 'CLI --json output parses as valid JSON'
+rc=0; [[ $json == *'"uuid": '* || $json == *'"uuid":"'* ]] || rc=1
+assert_eq 0 "$rc" 'CLI --json emits machine-readable rows'
+rc=0; [[ $json == *'"status":"ACTIVE"'* ]] || rc=1
+assert_eq 0 "$rc" 'JSON output carries the target state'
+rc=0; printf '%s' "$json" | python3 -c 'import json,sys; json.load(sys.stdin)' 2>/dev/null || rc=1
+assert_eq 0 "$rc" 'CLI --json output parses as valid JSON'
 
 # A refused operation must return the daemon's specific reason, not a generic string.
 refusal=$(run_keepalive create "$old_uuid" 2>&1 || true)
@@ -191,8 +191,8 @@ assert_eq 'keepalive: ERROR: session already has a keep-alive (state: ACTIVE)' "
 kill "$KA_FAKE_AI_PID" 2>/dev/null || true
 sleep 2
 list=$(run_keepalive list)
-[[ $list == *Avela* && $list == *UNAVAILABLE* ]]
-assert_eq 0 "$?" 'lost original AI process becomes sticky UNAVAILABLE'
+rc=0; [[ $list == *Avela* && $list == *UNAVAILABLE* ]] || rc=1
+assert_eq 0 "$rc" 'lost original AI process becomes sticky UNAVAILABLE'
 
 # New process in same directory gets a different UUID and must remain a separate AVAILABLE row.
 printf '%s\n' "$new_uuid" >"$uuid_file"
@@ -201,8 +201,8 @@ sleep 2
 list=$(run_keepalive list)
 old_count=$(grep -c 'Avela' <<<"$list" || true)
 assert_eq 2 "$old_count" 'old unavailable and replacement available Avela rows coexist'
-[[ $list == *UNAVAILABLE* && $list == *AVAILABLE* ]]
-assert_eq 0 "$?" 'replacement UUID is never auto-reattached to old keep-alive'
+rc=0; [[ $list == *UNAVAILABLE* && $list == *AVAILABLE* ]] || rc=1
+assert_eq 0 "$rc" 'replacement UUID is never auto-reattached to old keep-alive'
 
 cleanup_integration
 trap - EXIT

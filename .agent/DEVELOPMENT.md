@@ -75,7 +75,7 @@ their callers.
 ## Primary developer commands
 
 ```bash
-./scripts/dev-check.sh       # syntax, optional ShellCheck, tests, systemd verify
+./scripts/dev-check.sh       # syntax, ShellCheck, version consistency, tests, systemd verify
 ./tests/run.sh               # all dependency-free tests
 bash -n keepalive            # single-file syntax example
 ./keepalive --version
@@ -234,7 +234,7 @@ checkpoint/profile writes, or use real systemd socket activation. See `RISKS.md`
 specific recommended regressions.
 
 `.github/workflows/ci.yml` runs `scripts/dev-check.sh` as the blocking job, with
-ShellCheck as a separate advisory job.
+ShellCheck as a second blocking job. Both must pass.
 
 The repository explicitly leaves these to live-host qualification:
 

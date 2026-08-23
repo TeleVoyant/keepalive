@@ -12,15 +12,16 @@ check_syntax() {
     local file
     while IFS= read -r -d '' file; do
         bash -n "$file"
-        printf 'ok  %s\n' "${file#$ROOT/}"
+        printf 'ok  %s\n' "${file#"$ROOT"/}"
     done < <(find "$ROOT" -type f \( -name '*.sh' -o -name keepalive \) -print0 | sort -z)
 }
 
 # Role: Run ShellCheck when installed while remaining usable on dependency-minimal hosts.
 check_shellcheck() {
-    section 'ShellCheck (optional)'
-    # CI runs ShellCheck as a separate non-blocking job, because the codebase has never
-    # been verified against it: no ShellCheck is available in the development environment.
+    section 'ShellCheck'
+    # Findings were cleared for 1.0.0 and CI gates on this. It still self-skips when
+    # ShellCheck is absent, so the suite stays runnable on a dependency-minimal host.
+    # The codes disabled project-wide, and why, are documented in .shellcheckrc.
     if [[ -n ${KEEPALIVE_SKIP_SHELLCHECK:-} ]]; then
         printf 'skip: disabled by KEEPALIVE_SKIP_SHELLCHECK\n'
         return 0

@@ -1,0 +1,39 @@
+# ShellCheck configuration.
+#
+# The modules are sourced through "${BASH_SOURCE[0]%/*}/..." paths that ShellCheck cannot
+# resolve statically, so without these it analyses every file in isolation.
+source-path=SCRIPTDIR
+external-sources=true
+
+# SC2004 ($ is unnecessary on arithmetic variables) is not merely noisy here, it is wrong.
+# Nearly every subscript in this codebase belongs to an associative array, where the
+# subscript is a string rather than an arithmetic expression:
+#
+#   declare -A a; k=mykey; a[$k]=5
+#   $(( a[$k] - 1 ))  ->  4     correct
+#   $(( a[k]  - 1 ))  -> -1     reads the literal key "k"
+#
+# Taking the advice would silently corrupt every target lookup in the daemon.
+disable=SC2004
+
+# SC2034 (appears unused) fires on the module architecture itself. Each lib/ module assigns
+# globals that other modules consume - the icon set, the glyph and palette tables, the
+# resolved runtime paths - which by design have no reader in their defining file.
+disable=SC2034
+
+# The codes below were each reviewed against every site that raises them, and every site
+# is deliberate. They are disabled at the project level rather than with two dozen inline
+# directives, which would be noise in their own right.
+#
+# SC2016  Tests assert that '$HOME' and '$(cmd)' are stored and returned as literal text.
+#         Single quotes are the assertion, not an oversight.
+# SC2317  Mock functions in tests replace a real one and are invoked indirectly by the
+#         code under test, so ShellCheck cannot see the call.
+# SC2015  `A && B || true` in cleanup traps: C is literally `true`, so the caveat the
+#         check warns about - C running when A succeeded - is the intended no-op.
+# SC2119  Test helpers deliberately call a function with no arguments.
+# SC2153  Cross-module names such as KA_I_DIR come from the icon set in lib/icons.sh; the
+#         suggested KA_F_* is an unrelated field variable that happens to look similar.
+# SC2324  `bar+=$glyph` builds a string one character at a time. Verified: bar="" then
+#         two appends of "#" yields "##", length 2 - an append, which is the intent.
+disable=SC2016,SC2317,SC2015,SC2119,SC2153,SC2324

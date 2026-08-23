@@ -74,6 +74,9 @@ ka_classifier_load_user_registry() {
         # never match and gives the operator nothing to go on. `=~` returns 2 for a bad
         # regex, against 0 or 1 for a decided match.
         probe_rc=0
+        # The status of the [[ ]] itself is the point here - 2 means the regex did not
+        # compile - so capturing it from a condition is deliberate.
+        # shellcheck disable=SC2319
         [[ '' =~ $patterns ]] 2>/dev/null || probe_rc=$?
         if ((probe_rc > 1)); then
             ka_warn "classifiers.tsv line $line_no: '$name' has an invalid regular expression; ignoring it"
@@ -113,6 +116,8 @@ ka_proc_ppid() {
     IFS= read -r stat <"/proc/$pid/stat" || return 1
     # Everything through the final ") " belongs to pid+comm; field 4 is then token 2.
     rest=${stat##*) }
+    # Unquoted on purpose: word splitting is what tokenizes the stat fields.
+    # shellcheck disable=SC2086
     set -- $rest
     [[ ${2:-} =~ ^[0-9]+$ ]] || return 1
     printf '%s' "$2"
@@ -124,6 +129,8 @@ ka_proc_starttime() {
     [[ $pid =~ ^[0-9]+$ && -r /proc/$pid/stat ]] || return 1
     IFS= read -r stat <"/proc/$pid/stat" || return 1
     rest=${stat##*) }
+    # Unquoted on purpose: word splitting is what tokenizes the stat fields.
+    # shellcheck disable=SC2086
     set -- $rest
     # stat field 22 becomes token 20 after removing pid and comm.
     [[ ${20:-} =~ ^[0-9]+$ ]] || return 1

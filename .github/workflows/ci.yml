@@ -20,18 +20,18 @@ jobs:
           command -v systemd-analyze || echo 'systemd-analyze absent; that stage self-skips'
 
       - name: Run the aggregate developer check
-        # ShellCheck is deliberately excluded here and runs as its own non-blocking job.
+        # ShellCheck runs as its own job below, so it is skipped here to keep the two
+        # failures distinguishable in the job list.
         env:
           KEEPALIVE_SKIP_SHELLCHECK: '1'
         run: ./scripts/dev-check.sh
 
   lint:
-    name: ShellCheck (advisory)
+    name: ShellCheck
     runs-on: ubuntu-latest
-    # Non-blocking on purpose: the codebase has never been verified against ShellCheck,
-    # so gating on it would fail every build until that debt is paid. Promote this to a
-    # required check once the findings are cleared.
-    continue-on-error: true
+    # Blocking as of 1.0.0. The findings were cleared, and the codes that remain disabled
+    # are listed with their justification in .shellcheckrc - one of them, SC2004, would
+    # actively corrupt associative-array lookups if followed.
     steps:
       - uses: actions/checkout@v4
 
@@ -40,5 +40,6 @@ jobs:
           mapfile -d '' -t files < <(
             find . -path ./.git -prune -o -type f \( -name '*.sh' -o -name keepalive \) -print0
           )
+          shellcheck --version | sed -n '2p'
           printf 'checking %d files\n' "${#files[@]}"
           shellcheck -x "${files[@]}"

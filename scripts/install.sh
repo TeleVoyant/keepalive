@@ -24,7 +24,8 @@ main() {
     units="$HOME/.config/systemd/user"
 
     mkdir -p "$share" "$bin" "$units"
-    rm -rf -- "$share/lib" "$share/systemd" "$share/docs" "$share/tests" "$share/scripts"
+    # ${share:?} so an empty expansion aborts instead of building a path at the filesystem root.
+    rm -rf -- "${share:?}/lib" "${share:?}/systemd" "${share:?}/docs" "${share:?}/tests" "${share:?}/scripts"
     cp -a -- "$root/lib" "$root/systemd" "$root/docs" "$root/tests" "$root/scripts" "$share/"
     cp -f -- "$root/keepalive" "$root/README.md" "$share/"
     chmod +x "$share/keepalive" "$share/scripts/"*.sh "$share/tests/"*.sh 2>/dev/null || true

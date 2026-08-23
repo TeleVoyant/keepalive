@@ -80,7 +80,7 @@ next attempt completes the pending line instead of repeating it.
 | `KEEPALIVE_DBUS_SEND` | autodetected | Path to `dbus-send`, preferred over `qdbus` for hot-path calls because it starts in roughly 2.4 ms against `qdbus6`'s 12.8 ms of Qt initialization. |
 | `KEEPALIVE_NOTIFY_SEND` | `notify-send` | Path to the desktop notification binary. |
 | `KEEPALIVE_MONOTONIC_FILE` | `/proc/uptime` | Source of monotonic time. A test seam for driving the clock deterministically. |
-| `KEEPALIVE_SKIP_SHELLCHECK` | unset | Set to any non-empty value to skip the optional ShellCheck stage in `scripts/dev-check.sh`. |
+| `KEEPALIVE_SKIP_SHELLCHECK` | unset | Set to any non-empty value to skip the ShellCheck stage in `scripts/dev-check.sh`. The stage also self-skips when ShellCheck is not installed. |
 
 ## Runtime directory resolution
 

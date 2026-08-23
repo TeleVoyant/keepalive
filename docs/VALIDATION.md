@@ -16,7 +16,7 @@ Assertions:                  328 / 328 PASS
 systemd-analyze verify:      PASS
 Installer layout simulation: PASS (non-root + mocked systemctl)
 Daemon/client integration:   PASS (real Bash processes/FIFO + mocked qdbus)
-ShellCheck:                   NOT RUN (not installed in build environment)
+ShellCheck:                  PASS (0 findings, 37 files, v0.10.0)
 ```
 
 Run the same aggregate command with:

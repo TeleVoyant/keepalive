@@ -18,9 +18,13 @@ Every change must pass:
 ./scripts/dev-check.sh
 ```
 
-It must end with `ALL VALIDATION CHECKS PASSED`. This runs Bash syntax checks, optional
-ShellCheck, version consistency, the full 328-assertion suite, and static systemd unit
-verification.
+It must end with `ALL VALIDATION CHECKS PASSED`. This runs Bash syntax checks, ShellCheck,
+version consistency, the full 328-assertion suite, and static systemd unit verification.
+CI gates on the same checks.
+
+ShellCheck must stay at zero findings. Before adding a code to `.shellcheckrc`, read the
+justifications already there - particularly SC2004, which is disabled because following it
+would corrupt associative-array lookups rather than because it is noisy.
 
 Anything touching D-Bus, Konsole, the TUI, or the scheduler also needs a pass through the
 live integration checklist in

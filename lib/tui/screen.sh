@@ -389,6 +389,7 @@ ka_tui_progress() {
 
     local full_char='█' empty_char='░'
     if [[ ${KA_ASCII_MODE:-0} == 1 ]]; then full_char='#'; empty_char='-'; fi
+    # shellcheck disable=SC2324  # bar is a string; += appends a glyph, which is the intent.
     local bar='' i
     for ((i=0; i<filled; i++)); do bar+=$full_char; done
     for ((i=0; i<empty; i++)); do bar+=$empty_char; done

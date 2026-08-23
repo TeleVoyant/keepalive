@@ -334,10 +334,12 @@ ka_tui_render_detail() {
 
     ka_tui_render_detail_header
     printf '%s  ' "$KA_G_V"; ka_icon_label "$KA_I_TERM" 'Target'; printf '          %s\n' "$(ka_tui_truncate "$KA_F_TYPE" "$value_w")"
+    # shellcheck disable=SC2153  # KA_I_DIR is the icon set from lib/icons.sh, not KA_F_DIR.
     printf '%s  ' "$KA_G_V"; ka_icon_label "$KA_I_DIR" 'Directory'; printf '       %s\n' "$(ka_tui_truncate "$KA_F_DIR" "$value_w")"
     printf '%s  ' "$KA_G_V"; ka_icon_label "$KA_I_SESSION" 'Session'; printf '         %s\n' "$(ka_tui_truncate "$uuid" "$value_w")"
     printf '%s\033[K\n%s  ' "$KA_G_V" "$KA_G_V"; ka_icon_label "$KA_I_ENTER" 'Delivery'
     printf '        %s\033[K\n' "$([[ $KA_F_MODE == MESSAGE_ENTER ]] && printf 'MESSAGE + ENTER' || printf 'ENTER ONLY')"
+    # shellcheck disable=SC2153  # KA_I_NOTIFY is the icon set, not KA_F_NOTIFY.
     printf '%s  ' "$KA_G_V"; ka_icon_label "$KA_I_NOTIFY" 'Notification'
     printf '    %s\033[K\n' "$([[ $KA_F_NOTIFY == 1 ]] && printf ON || printf OFF)"
 

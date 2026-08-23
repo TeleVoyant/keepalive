@@ -123,6 +123,7 @@ ka_service_loop() {
         case $control_read in
             0)
                 control_failures=0
+                # shellcheck disable=SC2015  # C is `true`; this deliberately swallows both.
                 [[ -n ${KA_IPC_LINE:-} ]] && ka_ipc_handle_line "$KA_IPC_LINE" || true
                 ;;
             1)

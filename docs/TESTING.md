@@ -139,8 +139,19 @@ validated that way; see [`VALIDATION.md`](VALIDATION.md).
 
 ## Continuous integration
 
-`.github/workflows/ci.yml` runs `scripts/dev-check.sh` as the blocking job. ShellCheck
-runs as a separate advisory job with `continue-on-error`, because the codebase has never
-been verified against it - no ShellCheck is available in the development environment, so
-making it blocking would fail CI on findings nobody has triaged. Treat its output as a
-backlog, not a gate.
+`.github/workflows/ci.yml` runs `scripts/dev-check.sh` and ShellCheck as two blocking
+jobs. ShellCheck was advisory until 1.0.0, when its findings were triaged and cleared.
+
+Reading `.shellcheckrc` is worthwhile before adding to it. Six codes are disabled
+project-wide with their reasoning recorded, and one of them matters beyond style: SC2004
+suggests dropping `$` from arithmetic subscripts, which is correct for indexed arrays and
+actively wrong here, because nearly every subscript in this codebase belongs to an
+associative array where the subscript is a string:
+
+```bash
+declare -A a; k=mykey; a[$k]=5
+$(( a[$k] - 1 ))   #  4  correct
+$(( a[k]  - 1 ))   # -1  reads the literal key "k"
+```
+
+Taking that advice would silently corrupt every target lookup in the daemon.
