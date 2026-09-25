@@ -76,9 +76,25 @@ SEND_MAIN
 SEND_SECONDARY
 ```
 
+## Backend boundary
+
+Terminal-specific behavior is split into adapters:
+
+- `konsole.sh` owns Konsole discovery, D-Bus identity checks, and `sendText` delivery;
+- `orca.sh` owns every volatile Orca command, JSON path, schema gate, and error mapping;
+- `transport.sh` is the small backend-neutral validation/delivery dispatcher used by the
+  scheduler, state health checks, and recovery.
+
+The state machine does not parse Orca JSON or know Orca CLI commands. `orca.sh` publishes
+the normalized `terminal-v1` contract: display metadata plus an exact runtime, handle,
+PTY, process-incarnation, worktree, host, tab, leaf, and agent binding. This seam is
+intentional because Orca's interface is evolving. Compatible changes stay inside the
+adapter and its mock; incompatible discovery schemas fail closed without replacing the
+previous Orca snapshot.
+
 ## Target identity
 
-Primary identity:
+Konsole primary identity:
 
 ```text
 Konsole org.kde.konsole.Session.shellSessionId UUID
@@ -95,6 +111,19 @@ foreground ancestry      recipient still belongs to original AI tree
 ```
 
 All checks are repeated immediately before every send.
+
+Orca manager identity:
+
+```text
+orca-<runtimeId>-<incarnationId>
+```
+
+The stored binding also includes the runtime-scoped terminal handle, PTY ID, worktree ID,
+execution host, tab, leaf, and `agentIdentity`. All must match a live `terminal show`
+response immediately before delivery. Schema drift or runtime unreachability is
+transient; a completed response showing a different runtime/incarnation/binding is
+definitive identity loss. Delivery uses one atomic `terminal send --text ... --enter`
+request.
 
 ## State machine
 
@@ -123,7 +152,9 @@ UNAVAILABLE is sticky. Discovery never changes it back to ACTIVE and never rebin
 
 ## Discovery versus monitored records
 
-Discovery cache is ephemeral and periodically rebuilt from current Konsole sessions.
+Discovery caches are ephemeral and periodically rebuilt from every enabled backend.
+Each backend commits independently: an incomplete Orca response retains only the prior
+Orca rows while a complete Konsole pass can still commit, and vice versa.
 
 Monitored target records are retained independently. `index.tsv` is a merged snapshot:
 
@@ -137,11 +168,12 @@ Therefore an old unavailable Avela and a new available Avela can appear simultan
 Discovery and health serve different purposes, and conflating them is a mistake this
 project has already made once.
 
-**Discovery** enumerates every Konsole session and classifies its foreground process. It
-is what produces `AVAILABLE` rows, and those rows exist only for a client to display. One
-pass costs up to three bounded D-Bus calls per session - measured at 472 ms against a live
-bus with a typical session count - so it is by far the most expensive recurring work the
-daemon does.
+**Discovery** enumerates each enabled backend. Konsole sessions are classified from their
+foreground process; Orca rows already carry an agent identity and are accepted only when
+connected, writable, non-orphaned, and structurally complete. Discovery produces
+`AVAILABLE` rows, and those rows exist only for a client to display. A Konsole pass costs
+up to three bounded D-Bus calls per session - measured at 472 ms against a live bus with a
+typical session count - so it remains the most expensive recurring work on that backend.
 
 **Health** validates the identity of already-monitored targets. It is what protects
 delivery, so it runs on its own cadence regardless of whether anyone is watching.
@@ -155,10 +187,11 @@ to the fast cadence forever the moment a single keep-alive existed, which cost r
 
 Backing discovery off exposes a coupling: health reuses the discovery snapshot to avoid
 duplicating work, so a slower discovery would silently age the data health depends on.
-`KA_DISCOVERY_STAMP` records when a pass committed, and health refuses a snapshot older
-than `KEEPALIVE_SNAPSHOT_MAX_AGE`, falling back to a live check. For a handful of targets
-that fallback is far cheaper than keeping discovery itself fast. Pre-send validation is
-always live and never consults the snapshot.
+Per-backend discovery stamps record when each pass committed. Health refuses a Konsole
+snapshot older than `KEEPALIVE_SNAPSHOT_MAX_AGE` or an Orca snapshot older than
+`KEEPALIVE_ORCA_SNAPSHOT_MAX_AGE`, falling back to a live adapter check. For a handful of
+targets that fallback is far cheaper than keeping discovery itself fast. Pre-send
+validation is always live and never consults the snapshot.
 
 A pass is also bounded by `KEEPALIVE_DISCOVERY_BUDGET_MS`. Without it, a degraded bus
 blocks the daemon loop, which then overshoots the suspend gap and silently stops
@@ -223,8 +256,9 @@ but returns failure to manual IPC callers and never advances main rotation.
 
 Target state is atomically checkpointed under `$XDG_RUNTIME_DIR`. On same-login
 restart, the daemon accepts a record only after validating all required fields,
-enums, booleans, numeric/range constraints, UUID-to-directory binding, Konsole
-service/path shape, required files, canonical message rotation, and message index.
+enums, booleans, numeric/range constraints, target-to-directory binding, the selected
+backend's normalized identity binding, required files, canonical message rotation, and
+message index.
 Symlinked target entries, message directories/files, and scalar files are rejected.
 
 Rejected records are moved from `targets/` to a uniquely created runtime
@@ -232,9 +266,9 @@ Rejected records are moved from `targets/` to a uniquely created runtime
 timestamp, and its matching event log when present. Only structurally valid
 records proceed to live identity validation and resume with stored durations.
 
-A bounded D-Bus timeout during recovery or periodic health validation is treated
+A bounded backend timeout during recovery or periodic health validation is treated
 as transient and leaves the prior ACTIVE/PAUSED status intact for retry. Definite
-UUID/PID/start-time/ancestry mismatches still become sticky UNAVAILABLE.
+identity mismatches still become sticky UNAVAILABLE.
 
 No durable active binding is restored after full logout/reboot.
 
@@ -262,8 +296,9 @@ the test mock stays authoritative.
 
 ## Bounded external processes
 
-Every qdbus invocation runs under GNU `timeout` with a two-second per-call default.
-The same boundary applies to optional `notify-send` calls. A pre-send validation
+Every qdbus invocation runs under GNU `timeout` with a two-second per-call default;
+every Orca CLI invocation has a three-second default. The same boundary applies to
+optional `notify-send` calls. A pre-send validation
 timeout fails and consumes only that scheduled/manual timer event without changing
 target identity or main rotation; a sendText timeout is a normal transport failure.
 Notification timeout/failure is always non-fatal.

@@ -5,6 +5,34 @@ All notable changes to Keep Alive Manager are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Orca terminal backend for agents launched inside Orca, discovered through the
+  `orca-ide` JSON CLI and delivered through its atomic text-plus-Enter operation.
+- Exact Orca identity binding across runtime, handle, PTY, process incarnation,
+  worktree, execution host, tab, leaf, and agent identity, revalidated before every send.
+- Backend-neutral transport dispatch plus independent per-backend discovery snapshots,
+  so a schema or availability failure in Orca cannot erase healthy Konsole rows.
+- Orca mock/unit coverage and a real daemon/FIFO/client integration test. The complete
+  suite now exercises 389 assertions across 16 files when optional dependencies exist.
+
+### Changed
+
+- Terminal-specific Orca commands, JSON fields, and error mappings are isolated in one
+  version-tolerant adapter. Unknown schemas fail closed and are treated as transient
+  during live validation, making future Orca CLI changes localized and safe.
+- Checkpoints and published list rows carry a backend discriminator; checkpoints written
+  before this field continue to load as Konsole targets.
+- `keepalive doctor` reports Konsole and Orca independently and requires at least one
+  usable terminal backend.
+
+### Fixed
+
+- Definitive pre-send identity failures now return their exact backend reason to manual
+  CLI/TUI callers instead of the generic `main send failed` fallback.
+
 ## [1.0.0] - 2026-08-23
 
 First public release. Keep Alive Manager keeps long-running terminal AI clients from

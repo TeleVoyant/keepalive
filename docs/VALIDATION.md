@@ -1,22 +1,23 @@
 # Validation Report
 
-Date: 2026-08-23
-Version: 1.0.0
+Date: 2026-09-25
+Version: 1.0.0 + unreleased Orca integration
 
 ## Automated result
 
-The release candidate passed:
+The current worktree passed:
 
 ```text
 Bash syntax:                 PASS
 Function-role comment lint:  PASS
 Version consistency:         PASS (keepalive + 4 documents + CHANGELOG)
-Test files:                  14 / 14 PASS
-Assertions:                  328 / 328 PASS
+Test files:                  16 / 16 PASS
+Assertions:                  389 / 389 PASS
 systemd-analyze verify:      PASS
 Installer layout simulation: PASS (non-root + mocked systemctl)
-Daemon/client integration:   PASS (real Bash processes/FIFO + mocked qdbus)
-ShellCheck:                  PASS (0 findings, 37 files, v0.10.0)
+Daemon/client integration:   PASS (real Bash processes/FIFO + mocked qdbus and Orca CLI)
+Live Orca read-only adapter: PASS (discovery + exact terminal-show identity validation)
+ShellCheck:                  SKIP locally (not installed; CI remains the blocking gate)
 ```
 
 Run the same aggregate command with:
@@ -34,6 +35,18 @@ Run the same aggregate command with:
 - Claude/Gemini/Aider wrapper signatures are recognized while an ordinary shell remains unclassified.
 - Mocked Konsole discovery records the expected `shellSessionId`, service, path, and PID.
 - Strict identity validation rejects a different session UUID.
+- Mocked Orca discovery excludes ordinary shell terminals and records the exact runtime,
+  handle, PTY, incarnation, worktree, execution-host, tab, leaf, and agent binding.
+- Orca text plus Enter uses one atomic terminal-send request.
+- An Orca-only daemon starts with Konsole disabled and supports discovery, CREATE, manual
+  delivery, transient runtime outage, and sticky terminal-incarnation replacement across
+  the real FIFO/client process boundary.
+- Missing or changed Orca JSON fields fail closed. Repeated unsupported-schema validation
+  blocks delivery without consuming reachability strikes or making identity sticky.
+- Konsole and Orca discovery snapshots commit independently; one incomplete backend pass
+  cannot erase the other backend's rows.
+- Checkpoints without a backend remain compatible as Konsole, while unknown backends and
+  runtime/incarnation rebinding are rejected before recovery.
 - Multiple client request IDs can traverse the same FIFO and receive independent responses.
 - A real background service process can be controlled by a separate public `keepalive` client process.
 - CREATE crosses the real FIFO/request-directory boundary and produces ACTIVE target state.
@@ -158,9 +171,15 @@ The following still require deliberate runtime qualification rather than being c
 4. KDE notification delivery;
 5. Nerd Font glyph cell widths in the user's configured Konsole font, including the powerline caps and wedges;
 6. real laptop suspend/resume lifecycle.
+7. one harmless live send to a disposable Orca agent, including the returned acceptance receipt;
+8. live Orca restart/terminal replacement behavior through the installed systemd daemon.
 
 The complete live checklist is in `docs/MAINTENANCE.md`.
 
 ## Confidence statement
 
-The implementation has high confidence for the designed Bash state machine, IPC, data safety, timer semantics, UUID/no-reattach behavior, installer layout, and daemon/client lifecycle exercised by the included tests. The project intentionally labels live KDE workstation qualification as a separate final gate rather than treating mocked D-Bus validation as proof of the physical host environment.
+The implementation has high confidence for the designed Bash state machine, IPC, data
+safety, timer semantics, backend-qualified no-reattach behavior, installer layout, and
+daemon/client lifecycle exercised by the included tests. The installed Orca CLI's current
+discovery and identity-read contract was verified read-only. Live delivery remains an
+explicit final gate rather than treating a mocked acceptance receipt as proof.

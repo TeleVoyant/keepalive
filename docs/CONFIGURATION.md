@@ -25,11 +25,26 @@ Two variables are deliberately outside that helper because they are not integers
 `KEEPALIVE_SEND_GAP` is a decimal duration and is range-checked separately, and
 `KEEPALIVE_SUBMIT_SEQ` is an arbitrary string.
 
+Backend switches accept exactly `auto`, `1`, or `0`. An invalid value warns and behaves
+as `auto`.
+
+## Terminal backends
+
+| Variable | Default | Meaning |
+|---|---:|---|
+| `KEEPALIVE_KONSOLE_ENABLED` | `auto` | `auto` enables Konsole when qdbus is available; `1` requests it explicitly; `0` disables it. |
+| `KEEPALIVE_ORCA_ENABLED` | `auto` | `auto` enables Orca when both `orca-ide` and `jq` are available; `1` requests it explicitly; `0` disables it. |
+
+At least one usable backend is required. An explicitly requested backend that is missing
+is reported, but the daemon may still run when the other backend is usable. These are
+daemon settings; place them in a systemd drop-in rather than only exporting them in a
+client shell.
+
 ## Cadence and scheduling
 
 | Variable | Default | Meaning |
 |---|---:|---|
-| `KEEPALIVE_DISCOVERY_INTERVAL` | `3` | Seconds between full discovery passes **while a client is attached**. Discovery enumerates Konsole sessions and classifies their foreground processes; it is what populates the `AVAILABLE` rows a client displays. |
+| `KEEPALIVE_DISCOVERY_INTERVAL` | `3` | Seconds between full discovery passes **while a client is attached**. Discovery queries each enabled terminal backend; it is what populates the `AVAILABLE` rows a client displays. |
 | `KEEPALIVE_IDLE_DISCOVERY_INTERVAL` | `30` | Seconds between discovery passes when no client has been seen recently. Discovery exists to serve clients, so with nobody watching it backs off. This is the single largest lever on idle CPU. |
 | `KEEPALIVE_CLIENT_PRESENCE_TTL` | `20` | Seconds a client is still considered attached after its last request. Governs the switch between the two cadences above. |
 | `KEEPALIVE_HEALTH_INTERVAL` | `2` | Seconds between health checks of **monitored** targets. Independent of discovery: a monitored target is validated on this cadence whether or not anyone is watching. |
@@ -43,11 +58,13 @@ Two variables are deliberately outside that helper because they are not integers
 | Variable | Default | Meaning |
 |---|---:|---|
 | `KEEPALIVE_QDBUS_TIMEOUT` | `2` | Seconds any single D-Bus call may take before it is killed. Bounds the blast radius of a wedged Konsole. |
+| `KEEPALIVE_ORCA_TIMEOUT` | `3` | Seconds any single `orca-ide` operation may take before it is killed. |
 | `KEEPALIVE_DISCOVERY_BUDGET_MS` | `1000` | Milliseconds one whole discovery pass may take. Each session costs up to three bounded D-Bus calls, so without a pass budget a degraded bus blocks the daemon loop, overshoots the suspend gap, and silently stops advancing every countdown. On expiry the pass returns what it has and marks itself incomplete. |
 | `KEEPALIVE_RESPONSE_TIMEOUT_MS` | `8000` | Milliseconds a client waits for the daemon to answer before reporting the service unreachable. Raise it on a heavily loaded machine or a slow remote link. |
 | `KEEPALIVE_NOTIFY_TIMEOUT` | `2` | Seconds `notify-send` may take. A missing or hung notification daemon must never delay delivery. |
 | `KEEPALIVE_SNAPSHOT_MAX_AGE` | `10` | Seconds a discovery snapshot may be reused for health validation. Past this the daemon falls back to a live check, which for a handful of targets is far cheaper than keeping discovery itself fast. Pre-send validation is always live and ignores this. |
-| `KEEPALIVE_VALIDATION_STRIKES` | `5` | Consecutive transient validation failures tolerated before a target is given up on and marked `UNAVAILABLE`. Debouncing prevents one D-Bus hiccup from destroying a healthy target. |
+| `KEEPALIVE_ORCA_SNAPSHOT_MAX_AGE` | `35` | Equivalent maximum age for Orca's authoritative terminal-list snapshot. It spans the default idle discovery interval; pre-send validation still calls Orca live. |
+| `KEEPALIVE_VALIDATION_STRIKES` | `5` | Consecutive reachability failures tolerated before a target is given up on and marked `UNAVAILABLE`. An unsupported Orca response schema does not consume this budget because it proves nothing about target identity or reachability. |
 
 ## Delivery
 
@@ -57,7 +74,9 @@ Two variables are deliberately outside that helper because they are not integers
 | `KEEPALIVE_SEND_GAP` | `0.15` | Seconds between sending the message text and sending the submit sequence. A decimal duration, not an integer. The gap exists because some AI CLIs debounce input and would otherwise submit before rendering the text. A malformed value warns and falls back. |
 | `KEEPALIVE_ATOMIC_SUBMIT` | `0` | Set to `1` to send text and submit in a single `sendText` call. This removes the partial-delivery state entirely, but defeats the debounce protection above, so it is opt-in. |
 
-With the default two-step delivery, a failure between the two steps is recorded as
+These three delivery knobs apply to Konsole. Orca exposes an atomic text-plus-Enter
+operation, which the Orca adapter always uses. With Konsole's default two-step delivery,
+a failure between the two steps is recorded as
 **owed** rather than retried blindly - a blind retry would append the message twice. The
 next attempt completes the pending line instead of repeating it.
 
@@ -78,6 +97,8 @@ next attempt completes the pending line instead of repeating it.
 | `KEEPALIVE_PER_USER_RUNTIME` | `/run/user/$UID` | The per-user runtime directory checked when `XDG_RUNTIME_DIR` is unset. See [Runtime directory resolution](#runtime-directory-resolution). |
 | `KEEPALIVE_QDBUS` | autodetected | Path to the `qdbus` binary. Mainly a test seam; the suite points it at a mock. **Setting this also disables the `dbus-send` fast path below**, so every call is routed through the one binary you named - which is what makes the mock authoritative in tests, and what makes this a poor thing to set in production. |
 | `KEEPALIVE_DBUS_SEND` | autodetected | Path to `dbus-send`, preferred over `qdbus` for hot-path calls because it starts in roughly 2.4 ms against `qdbus6`'s 12.8 ms of Qt initialization. |
+| `KEEPALIVE_ORCA_CLI` | autodetected | Explicit path to Orca's CLI. Auto-detection looks for `orca-ide` and common install paths; it deliberately never executes bare `orca` on Linux. |
+| `KEEPALIVE_JQ` | autodetected | Explicit path to `jq`, required only by the Orca backend to validate and normalize CLI JSON. |
 | `KEEPALIVE_NOTIFY_SEND` | `notify-send` | Path to the desktop notification binary. |
 | `KEEPALIVE_MONOTONIC_FILE` | `/proc/uptime` | Source of monotonic time. A test seam for driving the clock deterministically. |
 | `KEEPALIVE_SKIP_SHELLCHECK` | unset | Set to any non-empty value to skip the ShellCheck stage in `scripts/dev-check.sh`. The stage also self-skips when ShellCheck is not installed. |
@@ -149,7 +170,7 @@ keepalive doctor
 ## Tuning for lower CPU
 
 The defaults are tuned for a responsive desktop. If the daemon is running on a machine
-where idle cost matters more than how quickly a newly opened Konsole tab appears in the
+where idle cost matters more than how quickly a newly opened terminal appears in the
 list:
 
 ```ini

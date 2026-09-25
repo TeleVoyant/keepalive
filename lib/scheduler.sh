@@ -3,18 +3,18 @@
 
 # Role: Validate a target immediately before input injection, marking it unavailable on failure.
 ka_scheduler_validate_before_send() {
-    local uuid=$1 rc reason
+    local uuid=$1 rc reason backend
     KA_SCHEDULER_VALIDATION_REASON=''
     [[ ${KA_T_STATUS[$uuid]-} != UNAVAILABLE ]] || return 1
-    if ka_konsole_validate_target "${KA_T_SERVICE[$uuid]}" "${KA_T_PATH[$uuid]}" "$uuid" \
-        "${KA_T_TERM_PID[$uuid]}" "${KA_T_AI_PID[$uuid]}" "${KA_T_AI_START[$uuid]}"; then
+    if ka_transport_validate_target "$uuid"; then
         return 0
     else
         rc=$?
     fi
-    reason=$(ka_konsole_validation_reason "$rc")
+    backend=${KA_T_BACKEND[$uuid]:-konsole}
+    reason=$(ka_transport_validation_reason "$backend" "$rc")
     KA_SCHEDULER_VALIDATION_REASON=$reason
-    if ka_konsole_validation_is_transient "$rc"; then
+    if ka_transport_validation_is_transient "$backend" "$rc"; then
         return 2
     fi
     ka_state_mark_unavailable "$uuid" "$reason"
@@ -28,9 +28,9 @@ ka_scheduler_send_main() {
     [[ ${KA_T_STATUS[$uuid]} == ACTIVE || $origin == MANUAL ]] || return 2
     if ka_scheduler_validate_before_send "$uuid"; then :; else
         validation_rc=$?
+        detail=${KA_SCHEDULER_VALIDATION_REASON:-'Target validation failed'}
+        KA_LAST_ERROR=$detail
         if ((validation_rc == 2)); then
-            detail=${KA_SCHEDULER_VALIDATION_REASON:-'Transient target validation failure'}
-            KA_LAST_ERROR=$detail
             ka_log_event "$uuid" MAIN "$detail" "$([[ $origin == MANUAL ]] && printf 'FAILED · manual' || printf FAILED)"
             ka_notify_send_failed "${KA_T_NOTIFY[$uuid]}" "${KA_T_NAME[$uuid]}" "$detail"
             KA_T_MAIN_REMAIN[$uuid]=${KA_T_MAIN_INTERVAL[$uuid]}
@@ -72,7 +72,7 @@ ka_scheduler_send_main() {
         detail=$message
     fi
 
-    if ka_konsole_deliver "${KA_T_SERVICE[$uuid]}" "${KA_T_PATH[$uuid]}" "${KA_T_MODE[$uuid]}" "$message" "$submit_only"; then
+    if ka_transport_deliver "$uuid" "${KA_T_MODE[$uuid]}" "$message" "$submit_only"; then
         KA_T_PENDING_SUBMIT[$uuid]=0
         ka_log_event "$uuid" MAIN "$detail" "$([[ $origin == MANUAL ]] && printf 'SENT · manual' || printf SENT)"
         ka_notify_sent "${KA_T_NOTIFY[$uuid]}" "${KA_T_NAME[$uuid]}" "$detail"
@@ -88,7 +88,8 @@ ka_scheduler_send_main() {
             KA_LAST_ERROR='message delivered but submit failed; the next attempt will only submit'
             failure='FAILED · submit owed'
         else
-            KA_LAST_ERROR='Konsole rejected the main send (transport failure)'
+            ka_transport_failure_reason "$uuid" main
+            KA_LAST_ERROR=$REPLY
         fi
         [[ $origin == MANUAL ]] && failure="$failure · manual"
         ka_log_event "$uuid" MAIN "$detail" "$failure"
@@ -110,9 +111,9 @@ ka_scheduler_send_secondary() {
     [[ ${KA_T_STATUS[$uuid]} == ACTIVE || $origin == MANUAL ]] || return 3
     if ka_scheduler_validate_before_send "$uuid"; then :; else
         validation_rc=$?
+        detail=${KA_SCHEDULER_VALIDATION_REASON:-'Target validation failed'}
+        KA_LAST_ERROR=$detail
         if ((validation_rc == 2)); then
-            detail=${KA_SCHEDULER_VALIDATION_REASON:-'Transient target validation failure'}
-            KA_LAST_ERROR=$detail
             ka_log_event "$uuid" SECONDARY "$detail" "$([[ $origin == MANUAL ]] && printf 'FAILED · manual' || printf FAILED)"
             ka_notify_send_failed "${KA_T_NOTIFY[$uuid]}" "${KA_T_NAME[$uuid]}" "$detail"
             KA_T_SECONDARY_REMAIN[$uuid]=${KA_T_SECONDARY_INTERVAL[$uuid]}
@@ -128,7 +129,7 @@ ka_scheduler_send_secondary() {
     message=${KA_T_SECONDARY_MESSAGE[$uuid]}
     if [[ ${KA_T_MODE[$uuid]} == ENTER_ONLY ]]; then detail='[ENTER]'; else detail=$message; fi
 
-    if ka_konsole_deliver "${KA_T_SERVICE[$uuid]}" "${KA_T_PATH[$uuid]}" "${KA_T_MODE[$uuid]}" "$message" "${KA_T_PENDING_SUBMIT[$uuid]:-0}"; then
+    if ka_transport_deliver "$uuid" "${KA_T_MODE[$uuid]}" "$message" "${KA_T_PENDING_SUBMIT[$uuid]:-0}"; then
         KA_T_PENDING_SUBMIT[$uuid]=0
         # Only an automatic delivery consumes the one-shot; a manual send is on demand.
         [[ $origin == MANUAL ]] || KA_T_SECONDARY_DONE[$uuid]=1
@@ -141,7 +142,8 @@ ka_scheduler_send_secondary() {
             KA_LAST_ERROR='message delivered but submit failed; the next attempt will only submit'
             failure='FAILED · submit owed'
         else
-            KA_LAST_ERROR='Konsole rejected the secondary send (transport failure)'
+            ka_transport_failure_reason "$uuid" secondary
+            KA_LAST_ERROR=$REPLY
         fi
         [[ $origin == MANUAL ]] && failure="$failure · manual"
         ka_log_event "$uuid" SECONDARY "$detail" "$failure"
@@ -173,7 +175,7 @@ ka_scheduler_send_enter_once() {
         return 3
     fi
 
-    if ka_konsole_deliver "${KA_T_SERVICE[$uuid]}" "${KA_T_PATH[$uuid]}" ENTER_ONLY ''; then
+    if ka_transport_deliver "$uuid" ENTER_ONLY ''; then
         KA_T_PENDING_SUBMIT[$uuid]=0
         ka_log_event "$uuid" MAIN '[ENTER] one-shot' 'SENT · manual'
         ka_notify_sent "${KA_T_NOTIFY[$uuid]}" "${KA_T_NAME[$uuid]}" '[ENTER]'
@@ -184,7 +186,8 @@ ka_scheduler_send_enter_once() {
         return 0
     fi
 
-    KA_LAST_ERROR='Konsole rejected the Enter send (transport failure)'
+    ka_transport_failure_reason "$uuid" Enter
+    KA_LAST_ERROR=$REPLY
     ka_log_event "$uuid" MAIN '[ENTER] one-shot' 'FAILED · manual'
     ka_notify_send_failed "${KA_T_NOTIFY[$uuid]}" "${KA_T_NAME[$uuid]}" '[ENTER]'
     KA_T_MAIN_REMAIN[$uuid]=${KA_T_MAIN_INTERVAL[$uuid]}

@@ -48,7 +48,7 @@ assert_eq 60 "$(ka_read_first_line "$KA_PROFILE_DIR/main_interval")" 'rejected C
 # generic string; the operator previously had to read the journal to learn why.
 ka_error_reset
 assert_false 'malformed CREATE fails' ka_state_create_target 'no-such-uuid' "$bad_req"
-assert_eq 'selected Konsole session is no longer available' "$KA_LAST_ERROR" \
+assert_eq 'selected terminal session is no longer available' "$KA_LAST_ERROR" \
     'refusal records an operator-facing reason for the IPC responder'
 ka_error_reset
 assert_eq '' "$KA_LAST_ERROR" 'the recorded reason can be cleared between operations'
@@ -123,16 +123,17 @@ ka_state_copy_target_to_request "$uuid" "$recfg"
 ka_state_configure_target "$uuid" "$recfg"
 assert_eq 0 "${KA_T_SECONDARY_DONE[$uuid]}" 'reconfiguring re-arms the one-shot secondary'
 
-# secondary_done is deliberately optional so checkpoints written before it existed load.
+# secondary_done and backend are deliberately optional so older Konsole checkpoints load.
 ka_state_save_target "$uuid"
 state_file="$(target_dir "$uuid")/state.tsv"
 assert_contains "$state_file" 'secondary_done' 'the checkpoint records the one-shot state'
-grep -v '^secondary_done' "$state_file" > "$state_file.old" && mv "$state_file.old" "$state_file"
+grep -vE '^(secondary_done|backend)' "$state_file" > "$state_file.old" && mv "$state_file.old" "$state_file"
 saved_status=${KA_T_STATUS[$uuid]}
 ka_state_init_arrays
 assert_true 'a checkpoint without secondary_done still loads' \
     ka_state_load_target_dir "$(target_dir "$uuid")"
 assert_eq 0 "${KA_T_SECONDARY_DONE[$uuid]}" 'a missing secondary_done defaults to not-yet-sent'
+assert_eq konsole "${KA_T_BACKEND[$uuid]}" 'a checkpoint without backend defaults to Konsole'
 assert_eq "$saved_status" "${KA_T_STATUS[$uuid]}" 'the rest of the checkpoint is unaffected'
 
 ka_state_mark_unavailable "$uuid" 'AI process exited'

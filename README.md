@@ -1,6 +1,6 @@
 # Keep Alive Manager
 
-Keep Alive Manager is a **Konsole-only, KDE/Wayland-friendly per-user keep-alive service and attachable terminal UI** for long-running terminal AI clients.
+Keep Alive Manager is a **KDE/Wayland-friendly per-user keep-alive service and attachable terminal UI** for long-running terminal AI clients in Konsole and Orca-managed terminals.
 
 It evolves the original single-session Bash keep-alive into one persistent manager that can safely control multiple Claude Code, Codex, Kimi, and other recognized AI CLI sessions at the same time. The daemon owns timers and target state. Running `keepalive` from any terminal opens a disposable TUI client; closing that TUI does **not** stop active keep-alives.
 
@@ -13,38 +13,35 @@ Version: **1.0.0** · [Changelog](CHANGELOG.md) · [MIT licensed](LICENSE)
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Process model, identity, state schemas, IPC, scheduler, recovery |
 | [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) | Every environment variable, with defaults and when to change them |
 | [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) | Symptom-first fixes, from `unknown` session names to CPU cost |
-| [`docs/TESTING.md`](docs/TESTING.md) | What the 328 assertions cover, and how to add one |
+| [`docs/TESTING.md`](docs/TESTING.md) | What the 389 assertions cover, and how to add one |
 | [`docs/MAINTENANCE.md`](docs/MAINTENANCE.md) | Safety invariants, module map, live checklist, release flow |
 | [`docs/VALIDATION.md`](docs/VALIDATION.md) | Evidence recorded for this release |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Conventions the automated checks enforce |
 
 ## Design goals
 
-- Keep the proven Konsole D-Bus `sendText` delivery mechanism; no focus stealing, `xdotool`, `ydotool`, or Wayland input injection.
+- Keep the proven Konsole D-Bus `sendText` delivery mechanism and use Orca's explicit terminal API; no focus stealing, `xdotool`, `ydotool`, or Wayland input injection.
 - One user-scoped service, never a root/system daemon.
-- Discover multiple Konsole AI sessions and identify each by Konsole `shellSessionId` UUID.
+- Discover both Konsole AI sessions and agent terminals launched inside Orca, with a strict identity contract for each backend.
 - Never automatically reattach an old keep-alive to a replacement terminal.
 - Preserve countdowns across pause, suspend-like scheduler gaps, and daemon restart in the same login session.
 - Keep unavailable targets visible until the user explicitly deletes them.
 - Make every keep-alive's event history independent and runtime-only; logs disappear at full logout/reboot.
 - Keep one persistent default profile. Saving configuration updates the selected keep-alive and the profile, but **never mutates other active keep-alives**.
 - Support Nerd Font UI icons while providing `--no-icons`, `--no-color`, and `--ascii` client modes.
-- Keep the implementation maintainable Bash: focused modules, comments describing every function's role, data-only state files, and dependency-free tests.
+- Keep the implementation maintainable Bash: focused modules, comments describing every function's role, data-only state files, and isolated mock-backed tests.
 
 ## Architecture
 
 ```text
-                         KDE user session
+                           user session
                                 │
-                          user D-Bus
-                                │
-              ┌─────────────────┼─────────────────┐
-              ▼                 ▼                 ▼
-        Konsole session   Konsole session   Konsole session
-          Claude Code          Codex              Kimi
-              ▲                 ▲                 ▲
-              └─────────────────┼─────────────────┘
-                                │ sendText / identity checks
+                 ┌──────────────┴──────────────┐
+                 ▼                             ▼
+        Konsole sessions              Orca agent terminals
+       qdbus + sendText              orca-ide JSON + send
+                 └──────────────┬──────────────┘
+                                │ normalized transport adapters
                        Keep Alive service
                      (systemd --user + Bash)
                                 │
@@ -71,9 +68,10 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full state and IPC mo
 Runtime requirements:
 
 - Linux with `/proc` mounted.
-- KDE Konsole as the **managed target terminal**.
 - Bash 5+.
-- a working `qdbus6`, `qdbus-qt6`, `qdbus`, or compatible qdbus binary.
+- at least one managed-terminal backend:
+  - **Konsole:** KDE Konsole plus a working `qdbus6`, `qdbus-qt6`, `qdbus`, or compatible qdbus binary;
+  - **Orca:** a running Orca installation exposing `orca-ide`, plus `jq`.
 - `systemd --user` for normal service/socket activation.
 - `flock` from util-linux.
 - GNU `timeout` from coreutils.
@@ -81,7 +79,15 @@ Runtime requirements:
 - `notify-send` is optional; keep-alives work without desktop notifications.
 - Nerd Font is optional; use `keepalive --no-icons` if glyphs are unavailable or misaligned.
 
-The TUI itself may be launched from another terminal emulator; **only Konsole sessions are discovered/controlled in v1**.
+The TUI itself may be launched from any terminal emulator. Backends are auto-detected; use the documented enable switches when a host should use only one.
+
+### Orca compatibility boundary
+
+Orca is evolving, so every Orca-specific command, JSON path, schema check, and error-code mapping lives in [`lib/orca.sh`](lib/orca.sh). The rest of the daemon sees a small normalized `terminal-v1` adapter contract through [`lib/transport.sh`](lib/transport.sh). A future Orca CLI change should normally require edits to that adapter and its mock fixture, not to timers, IPC, or scheduler code.
+
+Discovery accepts only connected, writable, non-orphaned terminals with a non-empty `agentIdentity`. It binds each target to the Orca runtime, terminal handle, PTY, process incarnation, worktree, execution host, tab, leaf, and agent identity. Unknown or incomplete JSON fails the backend pass closed and preserves its prior snapshot. An unfamiliar validation response is transient rather than evidence of identity loss, preventing schema drift from making a target sticky `UNAVAILABLE`.
+
+On Linux the executable is intentionally resolved as `orca-ide`, never bare `orca`, because `orca` commonly names the GNOME screen reader.
 
 ## Installation
 
@@ -213,7 +219,7 @@ chose it.
 Two limits are worth knowing when working remotely:
 
 - The daemon is `PartOf=graphical-session.target` and user lingering is intentionally not
-  enabled, so it stops when the graphical session ends. Konsole is gone by then anyway.
+  enabled, so it stops when the graphical session—and its managed terminals—ends.
 - If a daemon is killed outright, its control FIFO can outlive it. Clients open the FIFO
   read/write so this cannot hang them; a request simply times out after
   `KEEPALIVE_RESPONSE_TIMEOUT_MS`.
@@ -230,6 +236,9 @@ Two limits are worth knowing when working remotely:
 | `KEEPALIVE_RESPONSE_TIMEOUT_MS` | How long a client waits for a daemon response | `8000` |
 | `KEEPALIVE_CLEANUP_INTERVAL` | Seconds between stale request/response sweeps | `300` |
 | `KEEPALIVE_MAX_MESSAGES` / `KEEPALIVE_MAX_MESSAGE_LENGTH` | Rotation and message-size limits | `64` / `2000` |
+| `KEEPALIVE_KONSOLE_ENABLED` / `KEEPALIVE_ORCA_ENABLED` | Backend selection: `auto`, `1`, or `0` | `auto` / `auto` |
+| `KEEPALIVE_ORCA_TIMEOUT` | Deadline for one Orca CLI operation | `3` |
+| `KEEPALIVE_ORCA_SNAPSHOT_MAX_AGE` | Maximum Orca discovery-snapshot age for periodic health | `35` |
 
 Only a bare `Esc` means back/cancel. Arrow, function, keypad, and other escape
 sequences the client does not recognize are ignored rather than being treated as
@@ -336,7 +345,7 @@ Every Enter-only event is still logged, for example:
 13:14:06  MAIN  [ENTER]  SENT
 ```
 
-If Konsole transport fails, the event is logged/notified as failed and a manual
+If the selected terminal transport fails, the event is logged/notified as failed and a manual
 caller receives an error. The relevant timer is still reset because the scheduled
 event was consumed, and a failed main send does not advance message rotation.
 
@@ -380,15 +389,15 @@ recovering the stored remaining timers. Malformed, inconsistent, or symlinked
 records are moved to runtime `quarantine/` with a reason and any matching event
 log; they never enter active daemon state.
 
-A D-Bus validation timeout is transient: recovery/health validation is deferred
-without making the target sticky UNAVAILABLE. An actual identity mismatch still
+A backend validation timeout or unfamiliar provider schema is transient:
+recovery/health validation is deferred without making the target sticky UNAVAILABLE. An actual identity mismatch still
 follows the normal sticky-unavailable rule.
 
 No wall-clock catch-up is performed while the daemon was absent.
 
 ## Target identity and no automatic reattachment
 
-Each target is identified primarily by Konsole's `shellSessionId` UUID. The service additionally remembers:
+Each target has a backend-qualified identity. For Konsole, the primary identity is `shellSessionId`; the service additionally remembers:
 
 - D-Bus service/path as the current address;
 - terminal process PID;
@@ -396,16 +405,26 @@ Each target is identified primarily by Konsole's `shellSessionId` UUID. The serv
 - AI PID `/proc/PID/stat` start-time field to detect PID reuse;
 - foreground process ancestry.
 
+For Orca, the manager ID is namespaced by runtime and terminal incarnation. The binding also records:
+
+- runtime-scoped terminal handle;
+- PTY and incarnation IDs;
+- worktree ID;
+- execution-host ID;
+- tab and leaf IDs;
+- agent identity.
+
 Before every input injection, all identity checks must pass.
 
-Each qdbus subprocess has a hard deadline (two seconds by default). A validation
+Each qdbus subprocess has a hard deadline (two seconds by default), and each Orca CLI
+operation has its own deadline (three seconds by default). A validation
 timeout fails that send attempt but retains the target identity for a later health
 check; a timed-out delivery is reported and logged like any other transport
 failure.
 
 If the AI process exits or the exact session can no longer be validated, the keep-alive becomes sticky **UNAVAILABLE**. It does not disappear.
 
-If a new terminal later starts in the same `Avela` directory, it has a different UUID and appears independently as **AVAILABLE**:
+If a new terminal later starts in the same `Avela` directory, it has a different backend identity and appears independently as **AVAILABLE**:
 
 ```text
 Claude  Avela   UNAVAILABLE   old UUID
@@ -624,13 +643,14 @@ When enabled for a target, desktop notifications are attempted for:
 
 `notify-send` failure is deliberately non-fatal.
 
-Both qdbus and `notify-send` are executed synchronously under finite subprocess
+qdbus, `orca-ide`, and `notify-send` are executed synchronously under finite subprocess
 deadlines, so a hung desktop helper cannot block the single daemon loop forever.
 The operational overrides are:
 
 | Variable | Meaning | Default |
 |---|---|---:|
 | `KEEPALIVE_QDBUS_TIMEOUT` | Per-qdbus-call deadline in positive integer seconds | `2` |
+| `KEEPALIVE_ORCA_TIMEOUT` | Per-Orca-CLI-call deadline in positive integer seconds | `3` |
 | `KEEPALIVE_NOTIFY_TIMEOUT` | Per-notification deadline in positive integer seconds | `2` |
 | `KEEPALIVE_MONOTONIC_FILE` | Monotonic clock source; primarily for deterministic tests | `/proc/uptime` |
 
@@ -639,8 +659,8 @@ The operational overrides are:
 Important safeguards:
 
 1. **No root daemon.** Installer and service reject root operation.
-2. **No focus injection.** Only Konsole D-Bus `sendText` is used.
-3. **Strict pre-send validation.** UUID + terminal PID + AI PID/start-time + foreground ancestry.
+2. **No focus injection.** Delivery uses Konsole D-Bus or Orca's explicit terminal-send API.
+3. **Strict pre-send validation.** The complete persisted identity binding is checked live for the selected backend.
 4. **No automatic reattachment.** Replacement sessions remain separate.
 5. **Data-only configuration.** User messages are never `eval`'d or `source`d.
 6. **Private runtime state.** `umask 077`, `0700` directories, `0600` FIFO/files.
@@ -682,6 +702,8 @@ The suite currently covers:
 - multi-request FIFO handling;
 - real daemon/client process boundary with mocked qdbus, including create/send/send-failure/timeout/loss/new-UUID behavior;
 - mocked Konsole D-Bus discovery/identity validation and bounded timeout behavior;
+- mocked Orca CLI discovery, schema drift, exact identity validation, atomic delivery, checkpoint recovery, and backend-snapshot isolation;
+- a real Orca-only daemon/client/FIFO boundary against the mock, including create, send, transient outage, and sticky incarnation loss;
 - bounded optional notification-helper behavior;
 - no-icons/ASCII progress primitives, 7-bit frame glyphs, and artifact-free view-transition/resize clearing;
 - terminal key decoding, including unrecognized escape sequences that must not act as `Esc`;
@@ -705,6 +727,8 @@ keepalive-manager/
 │   ├── qdbus.sh              qdbus wrapper/discovery
 │   ├── classifier.sh         AI process-tree classifier
 │   ├── konsole.sh            Konsole discovery/validation/send
+│   ├── orca.sh               volatile Orca CLI/JSON adapter
+│   ├── transport.sh          backend-neutral validation/send dispatch
 │   ├── profile.sh            single persistent profile
 │   ├── state.sh              authoritative target/discovery state
 │   ├── scheduler.sh          countdown and delivery semantics
@@ -727,7 +751,7 @@ keepalive-manager/
 ├── tests/
 │   ├── run.sh
 │   ├── test_*.sh
-│   └── fixtures/             qdbus mock, pty driver, VT renderer
+│   └── fixtures/             qdbus/Orca mocks, pty driver, VT renderer
 └── docs/
     ├── ARCHITECTURE.md
     ├── MAINTENANCE.md
@@ -739,12 +763,13 @@ Every Bash function is expected to have an adjacent `# Role:` comment. A test en
 
 ## Known limitations / current validation boundary
 
-- v1 manages **Konsole only**.
+- Orca's CLI contract may change while the product evolves. The adapter fails closed and is intentionally isolated, but a new incompatible Orca release can temporarily make that backend unavailable until `lib/orca.sh` is updated.
 - qdbus calls are subprocess-based rather than a persistent native D-Bus connection; appropriate for a small number of interactive terminals, but not hundreds of targets.
+- Orca operations are also subprocess-based and require `jq`; the daemon does not link to private Orca internals.
 - Discovery is polling-based (default 3 seconds) rather than native D-Bus signal subscription.
 - AI classification is best-effort and extensible, not mathematically exhaustive.
 - Simple Bash string-length truncation cannot perfectly model every complex Unicode grapheme/cell-width case. `--no-icons`/`--ascii` provide compatibility paths.
-- The automated suite drives a mocked qdbus endpoint, so it runs anywhere without a KDE session. That mock is a stand-in, not a proof: it cannot catch a change that only misbehaves against a real bus, so live validation on a KDE/Konsole workstation remains the final integration gate before a release. Release 1.0.0 was validated that way - discovery, delivery, clean-restart recovery, ungraceful-kill recovery, and CPU cost were all measured against live Konsole sessions.
+- The automated suite drives mocked qdbus and Orca CLI endpoints. Those mocks are stand-ins, not proof against a real desktop runtime. Release 1.0.0's Konsole path was validated live; Orca discovery has been qualified read-only against the installed CLI, while live delivery should be checked in a disposable Orca agent before a release.
 
 ## Uninstall
 

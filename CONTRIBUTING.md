@@ -19,18 +19,19 @@ Every change must pass:
 ```
 
 It must end with `ALL VALIDATION CHECKS PASSED`. This runs Bash syntax checks, ShellCheck,
-version consistency, the full 328-assertion suite, and static systemd unit verification.
+version consistency, the full 389-assertion suite, and static systemd unit verification.
 CI gates on the same checks.
 
 ShellCheck must stay at zero findings. Before adding a code to `.shellcheckrc`, read the
 justifications already there - particularly SC2004, which is disabled because following it
 would corrupt associative-array lookups rather than because it is noisy.
 
-Anything touching D-Bus, Konsole, the TUI, or the scheduler also needs a pass through the
+Anything touching a terminal backend, the TUI, or the scheduler also needs a pass through the
 live integration checklist in
 [`docs/MAINTENANCE.md`](docs/MAINTENANCE.md#live-integration-test-checklist) on a real
-KDE/Konsole workstation. The suite's qdbus mock cannot stand in for that, and it is where
-the most serious defects in this project's history were actually caught.
+desktop. Use Konsole for D-Bus changes and a disposable Orca agent for Orca changes. The
+mocks cannot stand in for those contracts, and live validation is where several serious
+defects in this project's history were actually caught.
 
 ## Conventions the checks enforce
 
@@ -82,7 +83,8 @@ include. `keepalive doctor` output and the journal are usually enough to place a
 
 ## Scope
 
-Keep Alive Manager is Konsole-only by design. Support for other terminals would mean a
-different identity model - the whole safety story rests on Konsole's session UUID plus
-process ancestry - so it is a larger conversation than a pull request. Open an issue
-first.
+Keep Alive Manager supports Konsole and Orca through explicit backend adapters. A new
+terminal backend must provide an equally strong stable identity, live pre-send validation,
+bounded discovery/delivery, persistence validation, and mock-backed integration tests.
+Do not add a generic keystroke/focus-injection fallback. Open an issue before widening
+the backend surface.

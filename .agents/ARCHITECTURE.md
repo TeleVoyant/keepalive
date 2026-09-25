@@ -1,5 +1,59 @@
 # Architecture and Runtime Flows
 
+## 2026-09-25 Orca backend addendum
+
+The older sections below describe the original Konsole path and remain useful, but the
+current daemon is multi-backend. Provider-specific behavior is now deliberately layered:
+
+```text
+konsole.sh ─┐
+            ├─ transport.sh ─ scheduler / recovery / periodic health
+orca.sh ────┘
+```
+
+`lib/orca.sh` is the volatility boundary for Orca. It alone owns CLI discovery
+(`terminal list`), live identity lookup (`terminal show`), delivery (`terminal send`),
+JSON paths, schema validation, and Orca error codes. It publishes the normalized
+`terminal-v1` contract. A future Orca release should be adapted there and in
+`tests/fixtures/orca-mock`; generic scheduler logic must not parse provider JSON.
+
+An Orca target ID is `orca-<runtimeId>-<incarnationId>`. The full persisted binding is:
+
+```text
+backend=orca
+orca_handle
+orca_pty
+orca_incarnation
+orca_worktree
+orca_runtime
+orca_host
+orca_tab
+orca_leaf
+orca_agent
+```
+
+Every field is opaque and bounded rather than constrained to today's UUID/prefix format.
+Before every send, `terminal show` must reproduce the complete binding and report the
+terminal connected, writable, and non-orphaned. A runtime/incarnation/binding mismatch is
+definitive; timeout, unreachability, or an unfamiliar response schema is transient.
+Delivery is one atomic CLI request containing text plus Enter (or Enter only).
+
+Discovery snapshots are committed per backend. `ka_state_refresh_konsole_discovery` and
+`ka_state_refresh_orca_discovery` replace only their own rows after a `#COMPLETE` marker;
+the generic refresh collects stale backend names. This prevents an Orca 0.x schema change
+from erasing Konsole availability, and preserves prior Orca rows while the adapter is
+being updated. Pre-send validation is still live and never trusts that cache.
+
+Checkpoint compatibility is asymmetric by design: no `backend` field means `konsole`, so
+all 1.0.0 runtime checkpoints remain loadable. An explicit unknown backend or a malformed
+Orca binding is rejected/quarantined. `index.tsv` appends backend as column 15 so older
+column positions remain stable; the client defaults a missing column to Konsole.
+
+Backend enablement is `auto|1|0` through `KEEPALIVE_KONSOLE_ENABLED` and
+`KEEPALIVE_ORCA_ENABLED`. Orca requires `orca-ide` plus `jq`; bare `orca` is never probed
+on Linux because it commonly names the GNOME screen reader. At least one backend must be
+usable for service startup.
+
 ## Process and ownership model
 
 ```text

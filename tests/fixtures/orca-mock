@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+# Role: Escape one fixture value for literal inclusion in a JSON string.
+json_escape() {
+    local value=$1
+    value=${value//\\/\\\\}
+    value=${value//\"/\\\"}
+    value=${value//$'\n'/\\n}
+    value=${value//$'\r'/\\r}
+    value=${value//$'\t'/\\t}
+    printf '%s' "$value"
+}
+
+# Role: Load a mutable fixture value from a file when supplied, otherwise use its default.
+fixture_value() {
+    local default=$1 path=${2-}
+    REPLY=$default
+    [[ -n $path && -r $path ]] && { IFS= read -r REPLY <"$path" || true; }
+    return 0
+}
+
+if [[ -n ${FAKE_ORCA_HANG_FILE:-} && -e ${FAKE_ORCA_HANG_FILE:-} ]]; then
+    sleep "${FAKE_ORCA_HANG_SECONDS:-5}"
+fi
+
+fixture_value "${FAKE_ORCA_RUNTIME:-runtime-1111}" "${FAKE_ORCA_RUNTIME_FILE:-}"; runtime=$REPLY
+fixture_value "${FAKE_ORCA_HANDLE:-term_mock-agent}" "${FAKE_ORCA_HANDLE_FILE:-}"; handle=$REPLY
+fixture_value "${FAKE_ORCA_PTY:-repo::/work/Orca-Project@@pty-1}" "${FAKE_ORCA_PTY_FILE:-}"; pty=$REPLY
+fixture_value "${FAKE_ORCA_INCARNATION:-incarnation-2222}" "${FAKE_ORCA_INCARNATION_FILE:-}"; incarnation=$REPLY
+fixture_value "${FAKE_ORCA_WORKTREE:-repo::/work/Orca-Project}" "${FAKE_ORCA_WORKTREE_FILE:-}"; worktree=$REPLY
+fixture_value "${FAKE_ORCA_PATH:-/work/Orca-Project}" "${FAKE_ORCA_PATH_FILE:-}"; worktree_path=$REPLY
+fixture_value "${FAKE_ORCA_HOST:-local}" "${FAKE_ORCA_HOST_FILE:-}"; host=$REPLY
+fixture_value "${FAKE_ORCA_TAB:-tab-3333}" "${FAKE_ORCA_TAB_FILE:-}"; tab=$REPLY
+fixture_value "${FAKE_ORCA_LEAF:-leaf-4444}" "${FAKE_ORCA_LEAF_FILE:-}"; leaf=$REPLY
+fixture_value "${FAKE_ORCA_AGENT:-codex}" "${FAKE_ORCA_AGENT_FILE:-}"; agent=$REPLY
+fixture_value "${FAKE_ORCA_TITLE:-Codex - Orca Project}" "${FAKE_ORCA_TITLE_FILE:-}"; title=$REPLY
+
+if [[ ${1-} == --version ]]; then
+    printf '0.9.0-mock\n'
+    exit 0
+fi
+
+if [[ -n ${FAKE_ORCA_ERROR_FILE:-} && -e ${FAKE_ORCA_ERROR_FILE:-} ]]; then
+    printf '{"id":"mock","ok":false,"error":{"code":"runtime_unavailable","message":"mock offline"},"_meta":{"runtimeId":null}}\n'
+    exit 1
+fi
+
+case "${1-} ${2-}" in
+    'status --json')
+        printf '{"id":"mock-status","ok":true,"result":{"runtime":{"reachable":true,"runtimeId":"%s"}},"_meta":{"runtimeId":"%s"}}\n' \
+            "$(json_escape "$runtime")" "$(json_escape "$runtime")"
+        ;;
+    'terminal list')
+        if [[ -n ${FAKE_ORCA_BAD_SCHEMA_FILE:-} && -e ${FAKE_ORCA_BAD_SCHEMA_FILE:-} ]]; then
+            printf '{"id":"mock-list","ok":true,"result":{"terminals":"changed"}}\n'
+            exit 0
+        fi
+        truncated=false
+        [[ -n ${FAKE_ORCA_TRUNCATED_FILE:-} && -e ${FAKE_ORCA_TRUNCATED_FILE:-} ]] && truncated=true
+        connected=true
+        [[ -n ${FAKE_ORCA_DISCONNECTED_FILE:-} && -e ${FAKE_ORCA_DISCONNECTED_FILE:-} ]] && connected=false
+        printf '{"id":"mock-list","ok":true,"result":{"terminals":['
+        printf '{"handle":"%s","ptyId":"%s","incarnationId":"%s","orphaned":false,' \
+            "$(json_escape "$handle")" "$(json_escape "$pty")" "$(json_escape "$incarnation")"
+        if [[ -n ${FAKE_ORCA_MISSING_BINDING_FILE:-} && -e ${FAKE_ORCA_MISSING_BINDING_FILE:-} ]]; then
+            printf '"worktreeId":"%s","worktreePath":"%s","tabId":"%s",' \
+                "$(json_escape "$worktree")" "$(json_escape "$worktree_path")" "$(json_escape "$tab")"
+        else
+            printf '"worktreeId":"%s","worktreePath":"%s","tabId":"%s","leafId":"%s",' \
+                "$(json_escape "$worktree")" "$(json_escape "$worktree_path")" \
+                "$(json_escape "$tab")" "$(json_escape "$leaf")"
+        fi
+        printf '"title":"%s","connected":%s,"writable":true,"executionHostId":"%s","agentIdentity":"%s"},' \
+            "$(json_escape "$title")" "$connected" "$(json_escape "$host")" "$(json_escape "$agent")"
+        # A writable ordinary shell is deliberately present; discovery must filter it out.
+        printf '{"handle":"term_shell","ptyId":"shell-pty","incarnationId":"shell-inc","orphaned":false,'
+        printf '"worktreeId":"%s","worktreePath":"%s","tabId":"shell-tab","leafId":"shell-leaf",' \
+            "$(json_escape "$worktree")" "$(json_escape "$worktree_path")"
+        printf '"title":"Shell","connected":true,"writable":true,"executionHostId":"%s"}' \
+            "$(json_escape "$host")"
+        printf '],"totalCount":2,"truncated":%s},"_meta":{"runtimeId":"%s"}}\n' \
+            "$truncated" "$(json_escape "$runtime")"
+        ;;
+    'terminal show')
+        if [[ -n ${FAKE_ORCA_GONE_FILE:-} && -e ${FAKE_ORCA_GONE_FILE:-} ]]; then
+            printf '{"id":"mock-show","ok":false,"error":{"code":"terminal_gone","message":"gone"},"_meta":{"runtimeId":"%s"}}\n' \
+                "$(json_escape "$runtime")"
+            exit 1
+        fi
+        connected=true
+        [[ -n ${FAKE_ORCA_DISCONNECTED_FILE:-} && -e ${FAKE_ORCA_DISCONNECTED_FILE:-} ]] && connected=false
+        printf '{"id":"mock-show","ok":true,"result":{"terminal":{'
+        printf '"handle":"%s","ptyId":"%s","incarnationId":"%s","orphaned":false,' \
+            "$(json_escape "$handle")" "$(json_escape "$pty")" "$(json_escape "$incarnation")"
+        if [[ -n ${FAKE_ORCA_MISSING_BINDING_FILE:-} && -e ${FAKE_ORCA_MISSING_BINDING_FILE:-} ]]; then
+            printf '"worktreeId":"%s","worktreePath":"%s","tabId":"%s",' \
+                "$(json_escape "$worktree")" "$(json_escape "$worktree_path")" "$(json_escape "$tab")"
+        else
+            printf '"worktreeId":"%s","worktreePath":"%s","tabId":"%s","leafId":"%s",' \
+                "$(json_escape "$worktree")" "$(json_escape "$worktree_path")" \
+                "$(json_escape "$tab")" "$(json_escape "$leaf")"
+        fi
+        printf '"title":"%s","connected":%s,"writable":true,"executionHostId":"%s","agentIdentity":"%s"' \
+            "$(json_escape "$title")" "$connected" "$(json_escape "$host")" "$(json_escape "$agent")"
+        printf '}},"_meta":{"runtimeId":"%s"}}\n' "$(json_escape "$runtime")"
+        ;;
+    'terminal send')
+        send_handle='' text='' text_set=0 enter=0
+        shift 2
+        while (($#)); do
+            case $1 in
+                --terminal) send_handle=${2-}; shift 2 ;;
+                --text) text=${2-}; text_set=1; shift 2 ;;
+                --enter) enter=1; shift ;;
+                --json) shift ;;
+                *) shift ;;
+            esac
+        done
+        if [[ -n ${FAKE_ORCA_SEND_LOG:-} ]]; then
+            printf 'handle=%s\ttext_set=%s\tenter=%s\ttext=%s\n' \
+                "$send_handle" "$text_set" "$enter" "$text" >>"$FAKE_ORCA_SEND_LOG"
+        fi
+        if [[ -n ${FAKE_ORCA_SEND_FAIL_FILE:-} && -e ${FAKE_ORCA_SEND_FAIL_FILE:-} ]]; then
+            printf '{"id":"mock-send","ok":true,"result":{"send":{"handle":"%s","accepted":false,"refusedReason":"mock refusal"}},"_meta":{"runtimeId":"%s"}}\n' \
+                "$(json_escape "$send_handle")" "$(json_escape "$runtime")"
+            exit 1
+        fi
+        printf '{"id":"mock-send","ok":true,"result":{"send":{"handle":"%s","accepted":true,"bytesWritten":%d}},"_meta":{"runtimeId":"%s"}}\n' \
+            "$(json_escape "$send_handle")" "${#text}" "$(json_escape "$runtime")"
+        ;;
+    *)
+        printf '{"id":"mock","ok":false,"error":{"code":"invalid_argument","message":"unsupported mock call"}}\n'
+        exit 1
+        ;;
+esac

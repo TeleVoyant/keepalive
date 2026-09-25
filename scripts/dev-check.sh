@@ -46,7 +46,7 @@ check_version() {
         printf 'FAIL: keepalive does not declare KEEPALIVE_VERSION\n' >&2
         return 1
     fi
-    for file in README.md VALIDATION.md docs/VALIDATION.md .agent/README.md; do
+    for file in README.md VALIDATION.md docs/VALIDATION.md .agents/README.md; do
         found=$(grep -oE '[0-9]+\.[0-9]+\.[0-9]+' "$ROOT/$file" | head -1)
         if [[ $found != "$declared" ]]; then
             printf 'FAIL: %s declares %s, expected %s\n' "$file" "${found:-none}" "$declared" >&2

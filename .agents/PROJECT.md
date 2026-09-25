@@ -2,19 +2,19 @@
 
 ## Product intent
 
-Keep Alive Manager keeps interactive terminal AI sessions responsive without
-stealing focus or injecting desktop input. It sends text directly to a live
-Konsole session over the user's D-Bus connection.
+Keep Alive Manager keeps interactive terminal AI sessions responsive without stealing
+focus or injecting desktop input. It sends through a live Konsole D-Bus session or an
+explicit Orca terminal handle.
 
 The product is intentionally:
 
 - per-user, not root or machine-wide;
 - bound to a graphical login session, with no user lingering;
-- Konsole-targeted in v1, although the manager TUI can be launched elsewhere;
+- backed by explicit Konsole and Orca adapters, while the manager TUI can be launched elsewhere;
 - multi-target, with independent settings, timers, state, and logs;
 - attachable, so closing a client does not stop the daemon or its timers;
 - conservative about identity, never guessing that a new tab replaces an old one;
-- implemented in dependency-light Bash rather than a native D-Bus application.
+- implemented in dependency-light Bash rather than linking to terminal internals.
 
 ## User-visible behavior
 
@@ -79,8 +79,8 @@ reset the main timer; manual secondary sends reset only the secondary timer.
 
 ## Delivery rules
 
-- `MESSAGE_ENTER`: send the current main/secondary message, wait 0.15 seconds by
-  default, then send carriage return.
+- `MESSAGE_ENTER`: on Konsole, send the current message, wait 0.15 seconds by default,
+  then send carriage return; on Orca, use one atomic text-plus-Enter request.
 - `ENTER_ONLY`: send only carriage return.
 - Successful main `MESSAGE_ENTER` delivery advances the main message index modulo
   the count.
@@ -94,11 +94,11 @@ reset the main timer; manual secondary sends reset only the secondary timer.
 - Detail-view `E` pins `ENTER_ONLY` from then on.
 - A target is identity-validated immediately before every manual or automatic
   send.
-- D-Bus validation timeouts fail the event but remain transient; they never prove
+- Backend validation timeouts and unfamiliar Orca schemas fail the event but remain transient; they never prove
   identity loss or make the record sticky UNAVAILABLE.
 - A transport failure is returned to manual IPC callers after the consumed timer
   is reset; failed main delivery never advances rotation.
-- qdbus and notification subprocesses have finite per-call deadlines.
+- qdbus, Orca CLI, and notification subprocesses have finite per-call deadlines.
 - Notifications are optional and timeout/failure is non-fatal.
 
 ## Dependencies and platform assumptions
@@ -107,16 +107,15 @@ Runtime requirements:
 
 - Linux with readable `/proc` metadata;
 - Bash 5 or newer (`set -Eeuo pipefail` is used throughout entry scripts/tests);
-- KDE Konsole for managed targets;
-- a working `qdbus6`, `qdbus-qt6`, `qdbus`, Qt 5 fallback, or an executable named
-  by `KEEPALIVE_QDBUS`;
+- at least one backend: KDE Konsole with qdbus, or Orca with `orca-ide` plus `jq`;
 - `systemd --user` for supported installation/socket activation;
 - `flock`, GNU `timeout`, coreutils/findutils-style utilities, `sed`, `grep`, `sort`, `awk`,
   `readlink`, `tput`, and `stty`;
 - optional `notify-send` and optional Nerd Font glyph support.
 
-The test suite itself is plain Bash and has no Bats/Python dependency. ShellCheck
-is optional in the aggregate developer check.
+The test suite itself is plain Bash with no Bats dependency. Python and `jq` gate only
+their respective optional PTY and Orca tests. ShellCheck is optional in the aggregate
+developer check.
 
 ## Source map
 
@@ -129,6 +128,8 @@ is optional in the aggregate developer check.
 | `lib/qdbus.sh` | qdbus executable selection and deadline-bounded invocation. |
 | `lib/classifier.sh` | Built-in/user AI signatures and `/proc` ancestry inspection. |
 | `lib/konsole.sh` | Session discovery, exact identity checks, `sendText` delivery. |
+| `lib/orca.sh` | Isolated volatile Orca CLI/JSON contract, exact identity checks, atomic delivery. |
+| `lib/transport.sh` | Backend-neutral validation/delivery dispatch used by scheduler and recovery. |
 | `lib/profile.sh` | One persistent profile, defaults, validation, copying, updates. |
 | `lib/logging.sh` | Per-UUID, runtime-only event histories. |
 | `lib/notifications.sh` | Optional deadline-bounded `notify-send` wrappers. |
@@ -146,6 +147,7 @@ is optional in the aggregate developer check.
 | `scripts/package.sh` | ZIP release artifact plus SHA-256. |
 | `tests/*` | Dependency-free unit, mock integration, layout, and lint tests. |
 | `tests/fixtures/qdbus-mock` | Scriptable stand-in for the Konsole D-Bus surface. |
+| `tests/fixtures/orca-mock` | Scriptable stand-in for Orca terminal list/show/send JSON. |
 | `tests/fixtures/pty-drive.py` | Drives a command under a real pty with scripted keys and output waits. Optional. |
 | `tests/fixtures/vt-render.py` | Renders a capture into the screen a user would see, catching stale frame tails. Optional. |
 | `docs/*` | Architecture, configuration, troubleshooting, testing, maintenance, validation. |
@@ -210,6 +212,12 @@ persistent config directory.
 | `NO_COLOR` | Disable current client's colors when non-empty | unset |
 | `KEEPALIVE_QDBUS` | Explicit qdbus override; also pins the qdbus transport, which is how tests inject their mock | auto-detect |
 | `KEEPALIVE_DBUS_SEND` | Explicit dbus-send override | auto-detect |
+| `KEEPALIVE_KONSOLE_ENABLED` | Enable policy: `auto`, `1`, or `0` | `auto` |
+| `KEEPALIVE_ORCA_ENABLED` | Enable policy: `auto`, `1`, or `0` | `auto` |
+| `KEEPALIVE_ORCA_CLI` | Explicit Orca CLI path; auto-detection uses `orca-ide`, never bare `orca` | auto-detect |
+| `KEEPALIVE_JQ` | Explicit jq path for the Orca JSON adapter | auto-detect |
+| `KEEPALIVE_ORCA_TIMEOUT` | Per-Orca-operation deadline | `3` |
+| `KEEPALIVE_ORCA_SNAPSHOT_MAX_AGE` | Oldest Orca discovery snapshot health may reuse | `35` |
 | `KEEPALIVE_IDLE_DISCOVERY_INTERVAL` | Discovery cadence with nothing monitored and no client watching | `30` |
 | `KEEPALIVE_CLIENT_PRESENCE_TTL` | How long a client heartbeat keeps discovery fast | `20` |
 | `KEEPALIVE_STATUS_INTERVAL` | service.state write cadence (diagnostics only) | `15` |
@@ -235,7 +243,7 @@ persistent config directory.
 | `KEEPALIVE_SEND_GAP` | Delay between message and submit | `0.15` seconds |
 | `KEEPALIVE_SUSPEND_GAP` | Elapsed time above which countdowns are preserved | `2` seconds |
 | `KEEPALIVE_HEALTH_INTERVAL` | Target validation cadence | `2` seconds |
-| `KEEPALIVE_DISCOVERY_INTERVAL` | Konsole discovery cadence | `3` seconds |
+| `KEEPALIVE_DISCOVERY_INTERVAL` | Enabled-backend discovery cadence | `3` seconds |
 
 The presentation globals `KA_ICONS_ENABLED`, `KA_COLOR_ENABLED`, and
 `KA_ASCII_MODE` are client-local; they are not daemon state.
@@ -264,8 +272,8 @@ name/pattern without adding another order slot.
 ## Design decisions that should be treated as intentional
 
 1. No root service and no `loginctl enable-linger`.
-2. Konsole D-Bus `sendText`, not focus/Wayland input injection.
-3. UUID is identity; directory/name are display metadata only.
+2. Explicit Konsole D-Bus or Orca terminal APIs, never focus/Wayland input injection.
+3. Backend-qualified identity is authoritative; directory/name are display metadata only.
 4. Sticky `UNAVAILABLE`, with explicit delete and no automatic replacement bind.
 5. A single daemon is authoritative; TUI/CLI clients are disposable readers/requesters.
 6. Request payloads are files treated as data; none are sourced or evaluated.
@@ -274,7 +282,7 @@ name/pattern without adding another order slot.
 9. Long scheduling gaps preserve remaining time instead of catching up.
 10. Scheduling cadence uses monotonic uptime; backward readings preserve timers and reset anchors.
 11. Malformed runtime checkpoints are quarantined before in-memory registration.
-12. qdbus and notification helper calls have finite deadlines.
+12. qdbus, Orca CLI, and notification helper calls have finite deadlines.
 13. Secondary due checks run before main due checks.
 14. Enter-only events do not advance main rotation.
 15. Every Bash function has an adjacent `# Role:` maintenance comment.
@@ -300,7 +308,7 @@ name/pattern without adding another order slot.
 28. Event logs are bounded, and repeated gap events are collapsed per episode.
 29. Every drawn TUI line erases its own tail; screen output and data output never share
     a `printf` rewrite.
-30. One discovery pass is time-bounded, and only a complete pass replaces the snapshot.
+30. Discovery is bounded, and only a complete backend pass replaces that backend's snapshot.
 31. A message delivered without its submit is completed, never re-sent.
 32. The runtime base is verified before use when it is not an XDG runtime directory.
 33. The secondary prompt fires once per arming; only CONFIGURE re-arms it.
@@ -323,3 +331,7 @@ name/pattern without adding another order slot.
     write a checkpoint.
 44. Never write `local a=$1 b="$a..."`: bash expands every assignment word before creating
     any of them, so the second reads an outer `a` and fails under `set -u` without one.
+45. Orca commands, JSON fields, and error mappings stay in `lib/orca.sh`; provider churn
+    must not leak into scheduler/state-machine code.
+46. An Orca schema mismatch is transient and fail-closed. Never convert missing fields
+    into definitive identity loss, and never erase another backend's discovery snapshot.

@@ -1,5 +1,32 @@
 # Observed Risks, Gaps, and Open Questions
 
+## Mitigated on 2026-09-25: Orca's evolving CLI contract
+
+Orca is still evolving and its commands or JSON fields may change. Allowing those details
+into `state.sh` or `scheduler.sh` would make every provider update invasive; silently
+accepting a partial response could also erase discovery rows or falsely mark targets
+UNAVAILABLE.
+
+Mitigation now in place:
+
+1. `lib/orca.sh` is the sole CLI/schema/error-code adapter, exposing a normalized
+   `terminal-v1` contract through `lib/transport.sh`.
+2. List responses are schema-gated before any row is emitted. A missing binding field,
+   truncation, parse error, timeout, or command failure produces `#INCOMPLETE`.
+3. Discovery snapshots commit per backend, so an Orca failure retains prior Orca rows
+   without blocking a healthy Konsole commit.
+4. A structurally unfamiliar `terminal show` response is transient. Only a completed,
+   understood response proving a different binding is definitive identity loss.
+5. Opaque binding values are bounded but do not assume today's UUID or handle prefix,
+   reducing needless breakage from format-only changes.
+6. Mock tests cover missing schema fields, bad top-level schema, exact identity changes,
+   timeouts, checkpoint rebinding, atomic send, and cross-backend isolation.
+
+Remaining qualification boundary: mocked send receipts cannot prove behavior against a
+future live Orca release. Before release, use a disposable Orca agent for one harmless
+delivery and replacement/restart check. Never test delivery against an unrelated live
+user agent.
+
 These notes distinguish implemented behavior from documented intent. Priorities
 are suggested for future work, not claims that the product is unusable.
 
@@ -364,10 +391,10 @@ Not defects; recorded so the next agent does not have to rediscover them.
   is the documented duplicate-text window. Sending `message + carriage return` in a
   single `sendText` would close it. Unverified: some AI CLIs debounce input, which is
   presumably why the gap exists, so this belongs behind an option and needs live testing.
-- **Pluggable delivery.** `ka_konsole_deliver` is the only Konsole-specific write path.
-  A transport interface would allow tmux `send-keys`, kitty and WezTerm remote control,
-  and GNU Screen, removing the v1 Konsole-only limitation without touching the state
-  machine.
+- **Pluggable delivery — first implementation done on 2026-09-25.** `transport.sh` now
+  dispatches Konsole and Orca validation/delivery without forking the scheduler. Any
+  additional backend still needs a stable identity model; do not add generic focus or
+  keystroke injection merely because the dispatch seam exists.
 - **Signal-driven discovery.** Subscribing to `org.freedesktop.DBus.NameOwnerChanged`
   would let the daemon learn when Konsole services appear or vanish instead of polling
   every 3 s, which is the structural fix behind remedies 1-3 above.
@@ -967,11 +994,12 @@ them down:
 
 The repository already acknowledges:
 
-- Konsole-only v1 transport;
+- Konsole and Orca are the only current transports; Orca depends on an evolving CLI;
 - subprocess/polling qdbus rather than native persistent D-Bus/signals;
 - best-effort classifier coverage;
 - imperfect Unicode cell-width handling;
-- mocked rather than live KDE/Parrot validation.
+- mocked delivery rather than live Orca qualification; live Orca discovery alone was
+  checked read-only during implementation.
 
 ## Recommended next regression tests
 

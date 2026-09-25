@@ -19,8 +19,8 @@ Do not merge changes that weaken these rules:
 
 1. Never source/eval profile, request, message, or runtime target data.
 2. Never send text before `ka_scheduler_validate_before_send` succeeds.
-3. Never use directory basename as target identity; UUID is authoritative.
-4. Never automatically attach an UNAVAILABLE record to a new UUID.
+3. Never use directory basename as target identity; the backend-qualified ID is authoritative.
+4. Never automatically attach an UNAVAILABLE record to a new backend identity.
 5. Never let TUI clients directly mutate target state files.
 6. Never move active/log runtime data into persistent config directories.
 7. Never install the daemon as root/system service.
@@ -28,10 +28,10 @@ Do not merge changes that weaken these rules:
 9. Keep FIFO commands small; large data belongs in request directories.
 10. Preserve literal messages: shell metacharacters are content, not syntax.
 11. Require main-message rotations to be contiguous non-empty `001..N` files.
-12. Never report a failed Konsole transport as IPC success.
+12. Never report a failed terminal transport as IPC success.
 13. Use monotonic time for cadence; preserve countdowns across long or backward gaps.
-14. Keep qdbus and notification subprocesses bounded by explicit deadlines.
-15. Treat D-Bus validation timeouts as transient, never as proof of identity loss.
+14. Keep qdbus, Orca CLI, and notification subprocesses bounded by explicit deadlines.
+15. Treat backend timeouts and unfamiliar provider schemas as transient, never as proof of identity loss.
 16. Quarantine malformed recovery records before registering any in-memory target.
 17. Clear the visible alternate screen when TUI view identity or dimensions change.
 18. Size every frame from the live terminal width; never add a fixed-width frame literal.
@@ -39,15 +39,17 @@ Do not merge changes that weaken these rules:
 20. Strip control bytes from user/filesystem text before it reaches the screen.
 21. Keep `--no-icons`, `--no-color`, `NO_COLOR`, and `--ascii` complete interfaces, not degraded ones.
 22. Never let a failed user action escape a TUI loop; `set -e` turns that into a client exit.
-23. Only a completed D-Bus call returning a different value, or local `/proc` evidence,
-    may mark a target UNAVAILABLE. Unreachable and timed-out calls are transient.
+23. Only a completed backend call returning a different identity, or local `/proc`
+    evidence, may mark a target UNAVAILABLE. Unreachable, timed-out, and structurally
+    unfamiliar responses are transient.
 24. Return daemon-side refusal reasons to the client; never replace them with a generic string.
 25. Periodic health may use the discovery snapshot; pre-send validation may not.
 26. Keep event logs bounded and collapse repeated gap events.
 27. Never return a value through stdout from a function that also writes to the terminal.
 28. Every drawn TUI line must erase its own tail; never add escapes to a `printf` whose
     output is consumed as data.
-29. Bound one discovery pass and publish only a complete one.
+29. Bound discovery and publish only complete per-backend snapshots; one failed backend
+    must not erase another backend's rows.
 30. Complete a partially delivered message; never re-send it.
 31. Verify the runtime base before use when it is not an XDG runtime directory.
 32. The secondary prompt fires once per arming; only reconfiguration re-arms it.
@@ -65,6 +67,10 @@ Do not merge changes that weaken these rules:
     for processes the daemon does not own, silently reducing every session to
     `unknown`/`?` while all tests still pass. Restrict hardening to seccomp/prctl
     directives.
+41. Keep Orca commands, JSON paths, and error-code mappings inside `orca.sh`; the generic
+    state machine and scheduler consume only the normalized transport contract.
+42. Never invoke bare `orca` on Linux; resolve `orca-ide` explicitly so the GNOME screen
+    reader cannot be mistaken for the terminal CLI.
 
 ## Module responsibilities
 
@@ -79,6 +85,13 @@ Do not merge changes that weaken these rules:
 
 `konsole.sh`
 : Konsole transport and identity validation.
+
+`orca.sh`
+: Volatile Orca CLI/JSON adapter, normalized identity contract, and atomic delivery.
+
+`transport.sh`
+: Backend-neutral validation/delivery dispatch. Scheduler/recovery code depends on this,
+  not on a provider command surface.
 
 `state.sh`
 : Authoritative target/discovery state mutations and atomic snapshots.
@@ -199,6 +212,16 @@ On the real KDE workstation:
 35. Leave one active target with no client attached for a minute; discovery must back off to `KEEPALIVE_IDLE_DISCOVERY_INTERVAL`, and attaching a client must return it to the fast cadence.
 36. Restart the daemon cleanly with a known remaining time; the countdown must lose only the restart gap, not a whole checkpoint interval.
 37. `kill -9` the daemon; systemd must restart it, the countdown must resume at most `KEEPALIVE_CHECKPOINT_INTERVAL` stale, and `quarantine/` must stay empty.
+38. In Orca, launch a disposable agent and confirm it appears exactly once with backend
+    `orca`; an ordinary Orca shell terminal must not appear.
+39. Create an Orca keep-alive and manually send a harmless prompt; verify text plus Enter
+    arrives once and the event log records success.
+40. Restart Orca or replace the disposable terminal; the old record must become sticky
+    UNAVAILABLE and the replacement must appear separately.
+41. Temporarily make the Orca runtime unreachable; one send must fail with an Orca-specific
+    reason while the target remains ACTIVE until the transient strike budget is exhausted.
+42. Run Konsole and Orca together, then break one backend's discovery; rows from the other
+    backend must continue to refresh.
 
 ## Cutting a release
 
@@ -208,14 +231,13 @@ mechanical rather than a thing to remember.
 
 1. Update `KEEPALIVE_VERSION` in `keepalive`.
 2. Update the version line in `README.md`, `VALIDATION.md`, `docs/VALIDATION.md`, and
-   `.agent/README.md`.
+   `.agents/README.md`.
 3. Add the released section to `CHANGELOG.md` as `## [x.y.z] - YYYY-MM-DD`, and add the
    matching link reference at the bottom of the file. `dev-check.sh` requires this
    section to exist, because a tag is cut from it.
 4. Run `./scripts/dev-check.sh`; it must end with `ALL VALIDATION CHECKS PASSED`.
-5. Work through the live integration checklist above on a real KDE/Konsole workstation.
-   The suite's qdbus mock cannot stand in for this, and a release has never gone out
-   without it.
+5. Work through the live integration checklist above on a real KDE/Konsole workstation
+   and a disposable Orca agent. Neither mock can prove the live provider contract.
 6. Refresh `VALIDATION.md` and `docs/VALIDATION.md` with the observed assertion count
    and the live evidence.
 7. Commit, then tag: `git tag -a vX.Y.Z -m 'Keep Alive Manager X.Y.Z'` and

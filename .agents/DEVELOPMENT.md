@@ -1,5 +1,36 @@
 # Development and Operations Memory
 
+## Orca integration work on 2026-09-25
+
+The current unreleased work adds an Orca backend without forking the timer/state machine.
+All implementation was done in the primary worktree; Luna subagents were used only for
+contract/seam/test research, per the user's instruction.
+
+Key implementation points:
+
+- `lib/orca.sh` owns the volatile CLI and JSON contract; `lib/transport.sh` is the generic
+  dispatcher. Keep future Orca churn inside that boundary.
+- Discovery accepts only connected, writable, non-orphaned terminals with a non-empty
+  `agentIdentity`; normal Orca shell tabs are deliberately filtered out.
+- The stored binding includes runtime, handle, PTY, incarnation, worktree, host, tab,
+  leaf, and agent. It is checked live before every send.
+- Schema drift fails closed. An incomplete list retains the previous Orca snapshot, and
+  an unfamiliar show response is transient instead of making the target sticky.
+- Konsole and Orca discovery snapshots commit independently.
+- Older checkpoints without `backend` load as Konsole. Orca checkpoints whose ID and
+  runtime/incarnation do not agree are rejected.
+- Unit tests never inspect live Orca: shared setup exports `KEEPALIVE_ORCA_ENABLED=0`, and
+  explicit Orca tests point at `tests/fixtures/orca-mock`.
+- Read-only qualification against the installed `/home/niel/.local/bin/orca-ide` matched
+  the adapter fields. No prompt was sent to a live user agent during development.
+
+With `jq` and Python present, the suite is 389 assertions across 16 files. New coverage
+lives in `test_orca_mock.sh` (50 assertions) and `test_orca_service_integration.sh` (10).
+Run the latter whenever service startup, backend selection, or Orca IPC semantics change.
+
+The user intentionally renamed `.agent/` to `.agents/`. Do not recreate the singular
+directory; `scripts/dev-check.sh` now checks `.agents/README.md`.
+
 ## Repository state at review
 
 - Branch `master` tracked `origin/master` with no pre-existing changes.
@@ -8,7 +39,7 @@
 - `VALIDATION.md` and `docs/VALIDATION.md` were byte-identical.
 - `.agents/` and `.codex/` existed as empty read-only environment directories;
   there was no repository `AGENTS.md`.
-- `.agent/` was created in response to the request for durable project memory.
+- `.agents/` was created in response to the request for durable project memory.
 
 ## Coding conventions
 
@@ -104,7 +135,7 @@ On 2026-08-21 with Bash 5.2.37:
 - all 13 test files and all 131 assertions passed after the TUI transition fix;
 - entrypoint version/help/icon-test smoke checks passed;
 - ShellCheck was not installed;
-- the working tree was clean before `.agent/` was created.
+- the working tree was clean before `.agents/` was created.
 
 The test suite covered a real background Bash daemon, real FIFO/filesystem IPC,
 real `/proc` process loss/replacement, and a mocked qdbus executable. It validated
@@ -128,7 +159,7 @@ validation report records a passing systemd verification.
 
 This review ran **on the real KDE workstation with a live Plasma session, a live
 Konsole D-Bus bus, and an installed daemon that had been running for 24 hours**.
-Earlier `.agent/` notes were written without that access; do not carry forward the
+Earlier `.agents/` notes were written without that access; do not carry forward the
 old "no live bus available" caveat.
 
 - `./scripts/dev-check.sh` reported `ALL VALIDATION CHECKS PASSED`;
@@ -279,7 +310,7 @@ Update all of:
 7. `index.tsv` writer/reader columns if clients need it;
 8. target-to-request/profile mapping if configurable;
 9. state, recovery, and integration tests;
-10. `.agent/` schemas.
+10. `.agents/` schemas.
 
 Consider a checkpoint schema version before changing meanings or dropping fields;
 none exists today.
@@ -380,7 +411,7 @@ symlink, and units, reloads the user manager, and deliberately retains
 
 `./scripts/package.sh [OUT.zip]` deletes an existing output path, zips the project
 from its parent directory while excluding `.git`, ZIPs, Python caches, and
-`.DS_Store`, then prints `sha256sum`. The new `.agent/` directory is not excluded
+`.DS_Store`, then prints `sha256sum`. The new `.agents/` directory is not excluded
 and will be included unless the packaging policy is changed.
 
 ## Documentation relationships
@@ -398,7 +429,7 @@ and will be included unless the packaging policy is changed.
   matching `KEEPALIVE_VERSION`.
 - `CONTRIBUTING.md` states the conventions the automated checks enforce.
 - `LICENSE` is MIT.
-- `.agent/` adds implementation-level handoff details and separates observed risks
+- `.agents/` adds implementation-level handoff details and separates observed risks
   from advertised behavior.
 
 Version lives only in `KEEPALIVE_VERSION` in `keepalive`. Four documents repeat it and

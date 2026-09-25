@@ -22,6 +22,7 @@ ka_tui_load_index() {
     declare -ga KA_R_UUID=() KA_R_TYPE=() KA_R_NAME=() KA_R_DIR=() KA_R_STATUS=()
     declare -ga KA_R_MAIN_REMAIN=() KA_R_MAIN_INTERVAL=() KA_R_SEC_ENABLED=() KA_R_SEC_REMAIN=()
     declare -ga KA_R_SEC_INTERVAL=() KA_R_MODE=() KA_R_NOTIFY=() KA_R_LAST=() KA_R_REASON=()
+    declare -ga KA_R_BACKEND=()
     [[ -r $KA_INDEX_FILE ]] || return 0
 
     local sorted rest
@@ -35,6 +36,7 @@ ka_tui_load_index() {
         KA_R_SEC_ENABLED+=("${KA_TSV[7]:-0}") KA_R_SEC_REMAIN+=("${KA_TSV[8]:-0}")
         KA_R_SEC_INTERVAL+=("${KA_TSV[9]:-0}") KA_R_MODE+=("${KA_TSV[10]-}")
         KA_R_NOTIFY+=("${KA_TSV[11]:-0}") KA_R_LAST+=("${KA_TSV[12]-}") KA_R_REASON+=("${KA_TSV[13]-}")
+        KA_R_BACKEND+=("${KA_TSV[14]:-konsole}")
     done < <(ka_tui_sort_index_rows)
 }
 
@@ -58,7 +60,7 @@ ka_tui_sort_index_rows() {
 # costing roughly two dozen forks and file scans per detail frame.
 ka_tui_load_target_fields() {
     local uuid=$1 file line key value
-    KA_F_TYPE='' KA_F_NAME='' KA_F_DIR='' KA_F_STATUS='' KA_F_MODE='' KA_F_NOTIFY=''
+    KA_F_BACKEND='konsole' KA_F_TYPE='' KA_F_NAME='' KA_F_DIR='' KA_F_STATUS='' KA_F_MODE='' KA_F_NOTIFY=''
     KA_F_MAIN_REMAIN=0 KA_F_MAIN_INTERVAL=0 KA_F_MAIN_INDEX=0
     KA_F_SEC_ENABLED=0 KA_F_SEC_REMAIN=0 KA_F_SEC_INTERVAL=0 KA_F_SEC_DONE=0
     KA_F_LAST='' KA_F_REASON=''
@@ -74,6 +76,7 @@ ka_tui_load_target_fields() {
             value=''
         fi
         case $key in
+            backend) KA_F_BACKEND=$value ;;
             type) KA_F_TYPE=$value ;;
             name) KA_F_NAME=$value ;;
             directory) KA_F_DIR=$value ;;
@@ -267,7 +270,7 @@ ka_tui_confirm_delete() {
         ka_tui_box_top "$KA_I_DELETE" 'Delete Keep Alive'
         printf '%s Delete keep-alive for %s?\033[K\n' "$KA_G_V" "$(ka_tui_truncate "$name" "$((width - 24))")"
         printf '%s This removes only manager state and this target'\''s runtime event history.\n' "$KA_G_V"
-        printf '%s The AI process and Konsole tab are never terminated.\033[K\n' "$KA_G_V"
+        printf '%s The AI process and terminal session are never terminated.\033[K\n' "$KA_G_V"
         printf '%s\033[K\n%s y delete     n/Esc cancel\033[K\n' "$KA_G_V" "$KA_G_V"
         ka_tui_box_bottom
         ka_tui_frame_end
@@ -334,6 +337,7 @@ ka_tui_render_detail() {
 
     ka_tui_render_detail_header
     printf '%s  ' "$KA_G_V"; ka_icon_label "$KA_I_TERM" 'Target'; printf '          %s\n' "$(ka_tui_truncate "$KA_F_TYPE" "$value_w")"
+    printf '%s  ' "$KA_G_V"; ka_icon_label "$KA_I_SERVICE" 'Backend'; printf '         %s\n' "$(ka_tui_truncate "$KA_F_BACKEND" "$value_w")"
     # shellcheck disable=SC2153  # KA_I_DIR is the icon set from lib/icons.sh, not KA_F_DIR.
     printf '%s  ' "$KA_G_V"; ka_icon_label "$KA_I_DIR" 'Directory'; printf '       %s\n' "$(ka_tui_truncate "$KA_F_DIR" "$value_w")"
     printf '%s  ' "$KA_G_V"; ka_icon_label "$KA_I_SESSION" 'Session'; printf '         %s\n' "$(ka_tui_truncate "$uuid" "$value_w")"

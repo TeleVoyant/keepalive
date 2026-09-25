@@ -4,8 +4,8 @@ This directory is a durable, evidence-based handoff for future work on this
 repository.
 
 It records the repository understanding produced from a full source, test, documentation,
-service-unit, and history review, most recently refreshed for the 1.0.0 release on
-2026-08-23.
+service-unit, and history review, most recently refreshed for the Orca backend work on
+2026-09-25.
 
 It does **not** contain hidden model instructions, private chain-of-thought, secrets,
 or transient platform state. It contains the useful project context another
@@ -15,17 +15,18 @@ maintainer or coding agent needs in order to continue safely.
 
 - Repository: `TeleVoyant/keepalive`
 - Branch: `master`
-- Reviewed baseline commit: `96b5931` (`perf(daemon): cut CPU with monitored targets by roughly five times`)
+- Reviewed baseline commit: `a37b8ff` (the repository HEAD before Orca integration)
 - Release: **1.0.0**, the first public release. Licensed MIT.
 - Product version: `1.0.0`
-- Implementation: Bash 5+, Linux `/proc`, Konsole D-Bus, `systemd --user`
+- Implementation: Bash 5+, Linux `/proc`, Konsole D-Bus and Orca CLI adapters,
+  `systemd --user`
 - History at review time: nine commits - `1e67c2b` implementation, then eight hardening
   and performance passes ending at `96b5931`
-- State: released. Everything the earlier "current worktree fixes" list tracked has
-  shipped and is described in [CHANGELOG.md](../CHANGELOG.md). See [RISKS.md](RISKS.md)
-  for the evidence behind each, and read its dated "Resolved on" sections before assuming
-  a listed problem is still present.
-- Working tree: clean and aligned with `origin/master` at each tagged release
+- State: 1.0.0 is released; the current worktree adds unreleased Orca support. Orca's
+  volatile CLI/JSON contract is intentionally isolated in `lib/orca.sh`, with generic
+  dispatch in `lib/transport.sh` and a mock-backed daemon integration test.
+- Working tree: intentionally contains this integration plus the user-directed rename
+  from `.agent/` to `.agents/`; do not restore the deleted singular directory.
 
 ## Memory map
 
@@ -45,25 +46,25 @@ these notes deliberately do not duplicate it:
 - [`../docs/CONFIGURATION.md`](../docs/CONFIGURATION.md): every environment knob with its
   default and the reasoning for it.
 - [`../docs/TROUBLESHOOTING.md`](../docs/TROUBLESHOOTING.md): symptom-first diagnosis.
-- [`../docs/TESTING.md`](../docs/TESTING.md): what each of the 328 assertions covers and
+- [`../docs/TESTING.md`](../docs/TESTING.md): what each of the 389 assertions covers and
   the conventions for adding one.
 - [`../CONTRIBUTING.md`](../CONTRIBUTING.md): the conventions the automated checks
   enforce.
 
 ## Fast orientation
 
-Keep Alive Manager is a Konsole-only manager for long-running terminal AI clients.
-A single per-user daemon discovers supported AI processes, maintains independent
-countdowns, and injects a configured message plus carriage return (or carriage
-return alone) with Konsole's `org.kde.konsole.Session.sendText`. Any number of
-short-lived CLI/TUI clients communicate with that daemon through a private
-request-directory protocol signaled by a small FIFO line.
+Keep Alive Manager supports long-running terminal AI clients in Konsole and agents
+launched inside Orca. A single per-user daemon discovers both backends, maintains
+independent countdowns, and delivers through Konsole's D-Bus `sendText` or Orca's atomic
+terminal-send command. Any number of short-lived CLI/TUI clients communicate with that
+daemon through a private request-directory protocol signaled by a small FIFO line.
 
 The most important invariant is that the daemon is the only authoritative writer
-of monitored target state. A send is permitted only after the original Konsole
-session UUID, terminal PID, AI PID/start time, and current foreground ancestry all
-still match. Lost identities become sticky `UNAVAILABLE`; they are never rebound
-automatically to a replacement terminal.
+of monitored target state. A send is permitted only after the selected backend's entire
+persisted identity still matches live state. Lost identities become sticky
+`UNAVAILABLE`; they are never rebound automatically to a replacement terminal. An
+unfamiliar Orca schema is transient and fails closed rather than being mistaken for
+identity loss.
 
 ## Source-of-truth order
 
@@ -72,7 +73,7 @@ When memory and code differ, trust them in this order:
 1. Current executable code and systemd units.
 2. Current tests.
 3. The repository's `docs/` and `README.md` contracts.
-4. These `.agent/` notes.
+4. These `.agents/` notes.
 
 After meaningful changes, update this directory or delete stale claims. Always
 rerun `./scripts/dev-check.sh` (or at minimum `./tests/run.sh` plus Bash syntax

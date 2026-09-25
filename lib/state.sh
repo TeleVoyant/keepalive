@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
-# Authoritative daemon state for monitored targets and current Konsole discovery.
+# Authoritative daemon state for monitored targets and current terminal discovery.
 # Runtime state is data-only: no target/config file is ever sourced or eval'd.
 
 # Role: Initialize all in-memory target and discovery collections used by the daemon.
 ka_state_init_arrays() {
     declare -ga KA_T_UUIDS=()
-    declare -gA KA_T_TYPE=() KA_T_NAME=() KA_T_DIR=() KA_T_SERVICE=() KA_T_PATH=()
+    declare -gA KA_T_BACKEND=() KA_T_TYPE=() KA_T_NAME=() KA_T_DIR=() KA_T_SERVICE=() KA_T_PATH=()
     declare -gA KA_T_TERM_PID=() KA_T_AI_PID=() KA_T_AI_START=() KA_T_STATUS=()
+    declare -gA KA_T_ORCA_HANDLE=() KA_T_ORCA_PTY=() KA_T_ORCA_INCARNATION=()
+    declare -gA KA_T_ORCA_WORKTREE=() KA_T_ORCA_RUNTIME=() KA_T_ORCA_HOST=()
+    declare -gA KA_T_ORCA_TAB=() KA_T_ORCA_LEAF=() KA_T_ORCA_AGENT=()
     declare -gA KA_T_MODE=() KA_T_NOTIFY=() KA_T_MAIN_INTERVAL=() KA_T_MAIN_REMAIN=()
     declare -gA KA_T_MAIN_INDEX=() KA_T_SECONDARY_ENABLED=() KA_T_SECONDARY_INTERVAL=()
     declare -gA KA_T_SECONDARY_REMAIN=() KA_T_SECONDARY_MESSAGE=() KA_T_LAST_SEEN=()
@@ -25,8 +28,11 @@ ka_state_init_arrays() {
     declare -gA KA_T_DIRTY=()
 
     declare -ga KA_D_UUIDS=()
-    declare -gA KA_D_TYPE=() KA_D_NAME=() KA_D_DIR=() KA_D_SERVICE=() KA_D_PATH=()
+    declare -gA KA_D_BACKEND=() KA_D_TYPE=() KA_D_NAME=() KA_D_DIR=() KA_D_SERVICE=() KA_D_PATH=()
     declare -gA KA_D_TERM_PID=() KA_D_FG_PID=() KA_D_AI_PID=() KA_D_AI_START=() KA_D_CMD=()
+    declare -gA KA_D_ORCA_HANDLE=() KA_D_ORCA_PTY=() KA_D_ORCA_INCARNATION=()
+    declare -gA KA_D_ORCA_WORKTREE=() KA_D_ORCA_RUNTIME=() KA_D_ORCA_HOST=()
+    declare -gA KA_D_ORCA_TAB=() KA_D_ORCA_LEAF=() KA_D_ORCA_AGENT=()
 }
 
 # Role: Put the private runtime directory for one monitored target in REPLY.
@@ -100,14 +106,24 @@ ka_state_save_target() {
     file="$dir/state.tsv"
     KA_STATE_PAYLOAD=''
     ka_state_payload_row uuid                "$uuid"
+    ka_state_payload_row backend             "${KA_T_BACKEND[$uuid]:-konsole}"
     ka_state_payload_row type                "${KA_T_TYPE[$uuid]}"
     ka_state_payload_row name                "${KA_T_NAME[$uuid]}"
     ka_state_payload_row directory           "${KA_T_DIR[$uuid]}"
-    ka_state_payload_row service             "${KA_T_SERVICE[$uuid]}"
-    ka_state_payload_row path                "${KA_T_PATH[$uuid]}"
-    ka_state_payload_row term_pid            "${KA_T_TERM_PID[$uuid]}"
-    ka_state_payload_row ai_pid              "${KA_T_AI_PID[$uuid]}"
-    ka_state_payload_row ai_start            "${KA_T_AI_START[$uuid]}"
+    ka_state_payload_row service             "${KA_T_SERVICE[$uuid]-}"
+    ka_state_payload_row path                "${KA_T_PATH[$uuid]-}"
+    ka_state_payload_row term_pid            "${KA_T_TERM_PID[$uuid]-}"
+    ka_state_payload_row ai_pid              "${KA_T_AI_PID[$uuid]-}"
+    ka_state_payload_row ai_start            "${KA_T_AI_START[$uuid]-}"
+    ka_state_payload_row orca_handle         "${KA_T_ORCA_HANDLE[$uuid]-}"
+    ka_state_payload_row orca_pty             "${KA_T_ORCA_PTY[$uuid]-}"
+    ka_state_payload_row orca_incarnation     "${KA_T_ORCA_INCARNATION[$uuid]-}"
+    ka_state_payload_row orca_worktree        "${KA_T_ORCA_WORKTREE[$uuid]-}"
+    ka_state_payload_row orca_runtime         "${KA_T_ORCA_RUNTIME[$uuid]-}"
+    ka_state_payload_row orca_host            "${KA_T_ORCA_HOST[$uuid]-}"
+    ka_state_payload_row orca_tab             "${KA_T_ORCA_TAB[$uuid]-}"
+    ka_state_payload_row orca_leaf            "${KA_T_ORCA_LEAF[$uuid]-}"
+    ka_state_payload_row orca_agent           "${KA_T_ORCA_AGENT[$uuid]-}"
     ka_state_payload_row status              "${KA_T_STATUS[$uuid]}"
     ka_state_payload_row mode                "${KA_T_MODE[$uuid]}"
     ka_state_payload_row notifications       "${KA_T_NOTIFY[$uuid]}"
@@ -140,8 +156,10 @@ ka_state_load_target_dir() {
     local file="$dir/state.tsv"
     KA_STATE_LOAD_ERROR=''
     [[ -f $file && ! -L $file ]] || { ka_state_load_reject 'state.tsv is missing or not a regular file'; return 1; }
-    local key value extra uuid=''
+    local key value extra uuid='' backend='konsole'
     local type='' name='' directory='' service='' path='' term_pid='' ai_pid='' ai_start=''
+    local orca_handle='' orca_pty='' orca_incarnation='' orca_worktree='' orca_runtime=''
+    local orca_host='' orca_tab='' orca_leaf='' orca_agent=''
     local status='' mode='' notifications='' main_interval='' main_remaining='' main_index=''
     local secondary_enabled='' secondary_interval='' secondary_remaining='' last_seen='' reason=''
     local secondary_done=''
@@ -150,7 +168,7 @@ ka_state_load_target_dir() {
 
     while IFS=$'\t' read -r key value extra; do
         case $key in
-            uuid|type|name|directory|service|path|term_pid|ai_pid|ai_start|status|mode|notifications|main_interval|main_remaining|main_index|secondary_enabled|secondary_interval|secondary_remaining|secondary_done|last_seen|reason)
+            uuid|backend|type|name|directory|service|path|term_pid|ai_pid|ai_start|orca_handle|orca_pty|orca_incarnation|orca_worktree|orca_runtime|orca_host|orca_tab|orca_leaf|orca_agent|status|mode|notifications|main_interval|main_remaining|main_index|secondary_enabled|secondary_interval|secondary_remaining|secondary_done|last_seen|reason)
                 if [[ -n ${seen[$key]+x} ]]; then
                     parse_error="duplicate state field: $key"
                     continue
@@ -165,6 +183,7 @@ ka_state_load_target_dir() {
         esac
         case $key in
             uuid) uuid=$value ;;
+            backend) backend=$value ;;
             type) type=$value ;;
             name) name=$value ;;
             directory) directory=$value ;;
@@ -173,6 +192,15 @@ ka_state_load_target_dir() {
             term_pid) term_pid=$value ;;
             ai_pid) ai_pid=$value ;;
             ai_start) ai_start=$value ;;
+            orca_handle) orca_handle=$value ;;
+            orca_pty) orca_pty=$value ;;
+            orca_incarnation) orca_incarnation=$value ;;
+            orca_worktree) orca_worktree=$value ;;
+            orca_runtime) orca_runtime=$value ;;
+            orca_host) orca_host=$value ;;
+            orca_tab) orca_tab=$value ;;
+            orca_leaf) orca_leaf=$value ;;
+            orca_agent) orca_agent=$value ;;
             status) status=$value ;;
             mode) mode=$value ;;
             notifications) notifications=$value ;;
@@ -190,7 +218,7 @@ ka_state_load_target_dir() {
 
     [[ -z $parse_error ]] || { ka_state_load_reject "$parse_error"; return 1; }
     local required
-    for required in uuid type name directory service path term_pid ai_pid ai_start status mode notifications \
+    for required in uuid type name directory status mode notifications \
         main_interval main_remaining main_index secondary_enabled secondary_interval secondary_remaining last_seen reason; do
         [[ -n ${seen[$required]+x} ]] || { ka_state_load_reject "missing state field: $required"; return 1; }
     done
@@ -199,11 +227,40 @@ ka_state_load_target_dir() {
     ka_safe_id "$uuid"; safe_uuid=$REPLY
     [[ ${dir##*/} == "$safe_uuid" ]] || { ka_state_load_reject 'target directory does not match stored uuid'; return 1; }
     [[ -n $type && -n $name && -n $directory ]] || { ka_state_load_reject 'type, name, and directory are required'; return 1; }
-    [[ $service =~ ^org\.kde\.konsole(-[0-9]+)?$ ]] || { ka_state_load_reject 'invalid Konsole D-Bus service'; return 1; }
-    [[ $path =~ ^/Sessions/[0-9]+$ ]] || { ka_state_load_reject 'invalid Konsole session path'; return 1; }
-    ka_is_positive_int "$term_pid" || { ka_state_load_reject 'term_pid must be positive'; return 1; }
-    ka_is_positive_int "$ai_pid" || { ka_state_load_reject 'ai_pid must be positive'; return 1; }
-    ka_is_positive_int "$ai_start" || { ka_state_load_reject 'ai_start must be positive'; return 1; }
+    case $backend in
+        konsole)
+            for required in service path term_pid ai_pid ai_start; do
+                [[ -n ${seen[$required]+x} ]] || {
+                    ka_state_load_reject "missing Konsole state field: $required"
+                    return 1
+                }
+            done
+            [[ $service =~ ^org\.kde\.konsole(-[0-9]+)?$ ]] || { ka_state_load_reject 'invalid Konsole D-Bus service'; return 1; }
+            [[ $path =~ ^/Sessions/[0-9]+$ ]] || { ka_state_load_reject 'invalid Konsole session path'; return 1; }
+            ka_is_positive_int "$term_pid" || { ka_state_load_reject 'term_pid must be positive'; return 1; }
+            ka_is_positive_int "$ai_pid" || { ka_state_load_reject 'ai_pid must be positive'; return 1; }
+            ka_is_positive_int "$ai_start" || { ka_state_load_reject 'ai_start must be positive'; return 1; }
+            ;;
+        orca)
+            for required in orca_handle orca_pty orca_incarnation orca_worktree orca_runtime \
+                orca_host orca_tab orca_leaf orca_agent; do
+                [[ -n ${seen[$required]+x} ]] || {
+                    ka_state_load_reject "missing Orca state field: $required"
+                    return 1
+                }
+            done
+            if ! ka_orca_checkpoint_binding_valid "$uuid" "$orca_handle" "$orca_pty" \
+                "$orca_incarnation" "$orca_worktree" "$orca_runtime" "$orca_host" \
+                "$orca_tab" "$orca_leaf" "$orca_agent"; then
+                ka_state_load_reject "$KA_ORCA_BINDING_ERROR"
+                return 1
+            fi
+            ;;
+        *)
+            ka_state_load_reject "unsupported terminal backend: $backend"
+            return 1
+            ;;
+    esac
     [[ $status == ACTIVE || $status == PAUSED || $status == UNAVAILABLE ]] || { ka_state_load_reject 'invalid target status'; return 1; }
     [[ $mode == MESSAGE_ENTER || $mode == ENTER_ONLY ]] || { ka_state_load_reject 'invalid delivery mode'; return 1; }
     [[ $notifications == 0 || $notifications == 1 ]] || { ka_state_load_reject 'notifications must be 0 or 1'; return 1; }
@@ -239,6 +296,7 @@ ka_state_load_target_dir() {
     ((main_index < message_count)) || { ka_state_load_reject 'main_index exceeds message rotation'; return 1; }
 
     ka_state_register_uuid "$uuid"
+    KA_T_BACKEND[$uuid]=$backend
     KA_T_TYPE[$uuid]=$type
     KA_T_NAME[$uuid]=$name
     KA_T_DIR[$uuid]=$directory
@@ -247,6 +305,15 @@ ka_state_load_target_dir() {
     KA_T_TERM_PID[$uuid]=$term_pid
     KA_T_AI_PID[$uuid]=$ai_pid
     KA_T_AI_START[$uuid]=$ai_start
+    KA_T_ORCA_HANDLE[$uuid]=$orca_handle
+    KA_T_ORCA_PTY[$uuid]=$orca_pty
+    KA_T_ORCA_INCARNATION[$uuid]=$orca_incarnation
+    KA_T_ORCA_WORKTREE[$uuid]=$orca_worktree
+    KA_T_ORCA_RUNTIME[$uuid]=$orca_runtime
+    KA_T_ORCA_HOST[$uuid]=$orca_host
+    KA_T_ORCA_TAB[$uuid]=$orca_tab
+    KA_T_ORCA_LEAF[$uuid]=$orca_leaf
+    KA_T_ORCA_AGENT[$uuid]=$orca_agent
     KA_T_STATUS[$uuid]=$status
     KA_T_MODE[$uuid]=$mode
     KA_T_NOTIFY[$uuid]=$notifications
@@ -311,8 +378,27 @@ ka_state_load_all_targets() {
     ((had_dotglob == 1)) || shopt -u dotglob
 }
 
-# Role: Rebuild the discovery snapshot, committing only a complete pass.
-ka_state_refresh_discovery() {
+# Role: Remove one backend's rows while preserving the other backend snapshots.
+ka_state_clear_discovery_backend() {
+    local backend=$1 uuid
+    local -a keep=()
+    for uuid in "${KA_D_UUIDS[@]}"; do
+        if [[ ${KA_D_BACKEND[$uuid]:-konsole} != "$backend" ]]; then
+            keep+=("$uuid")
+            continue
+        fi
+        unset 'KA_D_BACKEND[$uuid]' 'KA_D_TYPE[$uuid]' 'KA_D_NAME[$uuid]' 'KA_D_DIR[$uuid]'
+        unset 'KA_D_SERVICE[$uuid]' 'KA_D_PATH[$uuid]' 'KA_D_TERM_PID[$uuid]' 'KA_D_FG_PID[$uuid]'
+        unset 'KA_D_AI_PID[$uuid]' 'KA_D_AI_START[$uuid]' 'KA_D_CMD[$uuid]'
+        unset 'KA_D_ORCA_HANDLE[$uuid]' 'KA_D_ORCA_PTY[$uuid]' 'KA_D_ORCA_INCARNATION[$uuid]'
+        unset 'KA_D_ORCA_WORKTREE[$uuid]' 'KA_D_ORCA_RUNTIME[$uuid]' 'KA_D_ORCA_HOST[$uuid]'
+        unset 'KA_D_ORCA_TAB[$uuid]' 'KA_D_ORCA_LEAF[$uuid]' 'KA_D_ORCA_AGENT[$uuid]'
+    done
+    KA_D_UUIDS=("${keep[@]}")
+}
+
+# Role: Replace only the Konsole discovery snapshot after one complete bounded pass.
+ka_state_refresh_konsole_discovery() {
     local -a n_uuids=()
     local -A n_type=() n_name=() n_dir=() n_service=() n_path=()
     local -A n_term=() n_fg=() n_ai=() n_start=() n_cmd=()
@@ -324,7 +410,7 @@ ka_state_refresh_discovery() {
             '#INCOMPLETE') complete=0; continue ;;
             '') continue ;;
         esac
-        n_uuids+=("$uuid")
+        [[ -n ${n_type[$uuid]+x} ]] || n_uuids+=("$uuid")
         n_type[$uuid]=$type; n_name[$uuid]=$name; n_dir[$uuid]=$directory
         n_service[$uuid]=$service; n_path[$uuid]=$path; n_term[$uuid]=$term_pid
         n_fg[$uuid]=$fgpid; n_ai[$uuid]=$ai_pid; n_start[$uuid]=$ai_start; n_cmd[$uuid]=$cmd
@@ -333,23 +419,88 @@ ka_state_refresh_discovery() {
     # A truncated pass would look like sessions disappearing, so keep the previous
     # snapshot and let the caller decide whether to warn.
     if ((complete != 1)); then
-        KA_DISCOVERY_STALE=1
         return 1
     fi
-    KA_DISCOVERY_STALE=0
-    ka_now_monotonic && KA_DISCOVERY_STAMP=$REPLY
-
-    KA_D_UUIDS=()
-    KA_D_TYPE=() KA_D_NAME=() KA_D_DIR=() KA_D_SERVICE=() KA_D_PATH=()
-    KA_D_TERM_PID=() KA_D_FG_PID=() KA_D_AI_PID=() KA_D_AI_START=() KA_D_CMD=()
+    ka_now_monotonic && {
+        KA_DISCOVERY_STAMP_KONSOLE=$REPLY
+        # Compatibility alias used by older tests and external diagnostics.
+        KA_DISCOVERY_STAMP=$REPLY
+    }
+    ka_state_clear_discovery_backend konsole
     for key in "${n_uuids[@]}"; do
         KA_D_UUIDS+=("$key")
+        KA_D_BACKEND[$key]=konsole
         KA_D_TYPE[$key]=${n_type[$key]}; KA_D_NAME[$key]=${n_name[$key]}; KA_D_DIR[$key]=${n_dir[$key]}
         KA_D_SERVICE[$key]=${n_service[$key]}; KA_D_PATH[$key]=${n_path[$key]}
         KA_D_TERM_PID[$key]=${n_term[$key]}; KA_D_FG_PID[$key]=${n_fg[$key]}
         KA_D_AI_PID[$key]=${n_ai[$key]}; KA_D_AI_START[$key]=${n_start[$key]}; KA_D_CMD[$key]=${n_cmd[$key]}
     done
     return 0
+}
+
+# Role: Replace only the Orca discovery snapshot after one complete normalized CLI response.
+ka_state_refresh_orca_discovery() {
+    local -a n_uuids=()
+    local -A n_agent=() n_name=() n_dir=() n_handle=() n_pty=() n_incarnation=()
+    local -A n_worktree=() n_runtime=() n_host=() n_tab=() n_leaf=()
+    local complete=0 uuid agent name directory handle pty incarnation worktree runtime host tab leaf key
+
+    while IFS=$'\t' read -r uuid agent name directory handle pty incarnation worktree runtime host tab leaf; do
+        case $uuid in
+            '#COMPLETE') complete=1; continue ;;
+            '#INCOMPLETE') complete=0; continue ;;
+            '') continue ;;
+        esac
+        [[ -n ${n_agent[$uuid]+x} ]] || n_uuids+=("$uuid")
+        n_agent[$uuid]=$agent; n_name[$uuid]=$name; n_dir[$uuid]=$directory
+        n_handle[$uuid]=$handle; n_pty[$uuid]=$pty; n_incarnation[$uuid]=$incarnation
+        n_worktree[$uuid]=$worktree; n_runtime[$uuid]=$runtime; n_host[$uuid]=$host
+        n_tab[$uuid]=$tab; n_leaf[$uuid]=$leaf
+    done < <(ka_orca_discover)
+
+    ((complete == 1)) || return 1
+    ka_now_monotonic && KA_DISCOVERY_STAMP_ORCA=$REPLY
+    ka_state_clear_discovery_backend orca
+    for key in "${n_uuids[@]}"; do
+        KA_D_UUIDS+=("$key")
+        KA_D_BACKEND[$key]=orca
+        ka_orca_agent_label "${n_agent[$key]}"
+        KA_D_TYPE[$key]=$REPLY
+        KA_D_NAME[$key]=${n_name[$key]}
+        KA_D_DIR[$key]=${n_dir[$key]}
+        KA_D_ORCA_HANDLE[$key]=${n_handle[$key]}
+        KA_D_ORCA_PTY[$key]=${n_pty[$key]}
+        KA_D_ORCA_INCARNATION[$key]=${n_incarnation[$key]}
+        KA_D_ORCA_WORKTREE[$key]=${n_worktree[$key]}
+        KA_D_ORCA_RUNTIME[$key]=${n_runtime[$key]}
+        KA_D_ORCA_HOST[$key]=${n_host[$key]}
+        KA_D_ORCA_TAB[$key]=${n_tab[$key]}
+        KA_D_ORCA_LEAF[$key]=${n_leaf[$key]}
+        KA_D_ORCA_AGENT[$key]=${n_agent[$key]}
+        KA_D_CMD[$key]=${n_name[$key]}
+    done
+    return 0
+}
+
+# Role: Refresh every enabled backend independently so one evolving provider cannot erase another.
+ka_state_refresh_discovery() {
+    local failed=0
+    local -a stale=()
+    if [[ ${KA_KONSOLE_ENABLED:-1} == 1 ]]; then
+        if ! ka_state_refresh_konsole_discovery; then
+            failed=1
+            stale+=(Konsole)
+        fi
+    fi
+    if [[ ${KA_ORCA_ENABLED:-0} == 1 ]]; then
+        if ! ka_state_refresh_orca_discovery; then
+            failed=1
+            stale+=(Orca)
+        fi
+    fi
+    KA_DISCOVERY_STALE=$failed
+    KA_DISCOVERY_STALE_BACKENDS=${stale[*]-}
+    ((failed == 0))
 }
 
 # Role: Copy a validated wizard request's message rotation into a target runtime directory.
@@ -389,7 +540,7 @@ ka_state_message_at() {
 ka_state_create_target() {
     local uuid=$1 request_dir=$2
     ka_state_has_target "$uuid" && { ka_error 'target already has a keep-alive'; return 1; }
-    [[ -n ${KA_D_TYPE[$uuid]+x} ]] || { ka_error 'selected Konsole session is no longer available'; return 1; }
+    [[ -n ${KA_D_TYPE[$uuid]+x} ]] || { ka_error 'selected terminal session is no longer available'; return 1; }
     ka_profile_validate_request "$request_dir" || return 1
 
     local target_dir main_interval secondary_interval
@@ -399,14 +550,24 @@ ka_state_create_target() {
     secondary_interval=$(ka_read_first_line "$request_dir/secondary_interval")
 
     ka_state_register_uuid "$uuid"
+    KA_T_BACKEND[$uuid]=${KA_D_BACKEND[$uuid]:-konsole}
     KA_T_TYPE[$uuid]=${KA_D_TYPE[$uuid]}
     KA_T_NAME[$uuid]=${KA_D_NAME[$uuid]}
     KA_T_DIR[$uuid]=${KA_D_DIR[$uuid]}
-    KA_T_SERVICE[$uuid]=${KA_D_SERVICE[$uuid]}
-    KA_T_PATH[$uuid]=${KA_D_PATH[$uuid]}
-    KA_T_TERM_PID[$uuid]=${KA_D_TERM_PID[$uuid]}
-    KA_T_AI_PID[$uuid]=${KA_D_AI_PID[$uuid]}
-    KA_T_AI_START[$uuid]=${KA_D_AI_START[$uuid]}
+    KA_T_SERVICE[$uuid]=${KA_D_SERVICE[$uuid]-}
+    KA_T_PATH[$uuid]=${KA_D_PATH[$uuid]-}
+    KA_T_TERM_PID[$uuid]=${KA_D_TERM_PID[$uuid]-}
+    KA_T_AI_PID[$uuid]=${KA_D_AI_PID[$uuid]-}
+    KA_T_AI_START[$uuid]=${KA_D_AI_START[$uuid]-}
+    KA_T_ORCA_HANDLE[$uuid]=${KA_D_ORCA_HANDLE[$uuid]-}
+    KA_T_ORCA_PTY[$uuid]=${KA_D_ORCA_PTY[$uuid]-}
+    KA_T_ORCA_INCARNATION[$uuid]=${KA_D_ORCA_INCARNATION[$uuid]-}
+    KA_T_ORCA_WORKTREE[$uuid]=${KA_D_ORCA_WORKTREE[$uuid]-}
+    KA_T_ORCA_RUNTIME[$uuid]=${KA_D_ORCA_RUNTIME[$uuid]-}
+    KA_T_ORCA_HOST[$uuid]=${KA_D_ORCA_HOST[$uuid]-}
+    KA_T_ORCA_TAB[$uuid]=${KA_D_ORCA_TAB[$uuid]-}
+    KA_T_ORCA_LEAF[$uuid]=${KA_D_ORCA_LEAF[$uuid]-}
+    KA_T_ORCA_AGENT[$uuid]=${KA_D_ORCA_AGENT[$uuid]-}
     KA_T_STATUS[$uuid]=ACTIVE
     KA_T_MODE[$uuid]=$(ka_read_first_line "$request_dir/delivery_mode")
     KA_T_NOTIFY[$uuid]=$(ka_read_first_line "$request_dir/notifications")
@@ -464,8 +625,11 @@ ka_state_delete_target() {
     rm -rf -- "$dir"
     ka_log_delete "$uuid"
     ka_state_unregister_uuid "$uuid"
-    unset 'KA_T_TYPE[$uuid]' 'KA_T_NAME[$uuid]' 'KA_T_DIR[$uuid]' 'KA_T_SERVICE[$uuid]'
+    unset 'KA_T_BACKEND[$uuid]' 'KA_T_TYPE[$uuid]' 'KA_T_NAME[$uuid]' 'KA_T_DIR[$uuid]' 'KA_T_SERVICE[$uuid]'
     unset 'KA_T_PATH[$uuid]' 'KA_T_TERM_PID[$uuid]' 'KA_T_AI_PID[$uuid]' 'KA_T_AI_START[$uuid]'
+    unset 'KA_T_ORCA_HANDLE[$uuid]' 'KA_T_ORCA_PTY[$uuid]' 'KA_T_ORCA_INCARNATION[$uuid]'
+    unset 'KA_T_ORCA_WORKTREE[$uuid]' 'KA_T_ORCA_RUNTIME[$uuid]' 'KA_T_ORCA_HOST[$uuid]'
+    unset 'KA_T_ORCA_TAB[$uuid]' 'KA_T_ORCA_LEAF[$uuid]' 'KA_T_ORCA_AGENT[$uuid]'
     unset 'KA_T_STATUS[$uuid]' 'KA_T_MODE[$uuid]' 'KA_T_NOTIFY[$uuid]' 'KA_T_MAIN_INTERVAL[$uuid]'
     unset 'KA_T_MAIN_REMAIN[$uuid]' 'KA_T_MAIN_INDEX[$uuid]' 'KA_T_SECONDARY_ENABLED[$uuid]'
     unset 'KA_T_SECONDARY_INTERVAL[$uuid]' 'KA_T_SECONDARY_REMAIN[$uuid]' 'KA_T_SECONDARY_MESSAGE[$uuid]'
@@ -545,31 +709,58 @@ ka_state_mark_unavailable() {
     ka_notify_target_lost "${KA_T_NOTIFY[$uuid]}" "${KA_T_NAME[$uuid]}" "$reason"
 }
 
-# Role: Validate one target against the current discovery snapshot instead of D-Bus.
-# Discovery already fetched shellSessionId, processId, and foregroundProcessId for every
-# session; periodic health re-fetched exactly the same three properties moments later.
-# Reusing the snapshot removes that duplication. Pre-send validation deliberately keeps
-# using the live path, because a send must never rely on a snapshot.
+# Role: Validate one target against its backend's current discovery snapshot.
+# Pre-send validation deliberately keeps using the live adapter path; a send must never
+# rely on a snapshot.
 ka_state_validate_from_discovery() {
-    local uuid=$1 start age max_age
+    local uuid=$1 start age max_age backend stamp
+    backend=${KA_T_BACKEND[$uuid]:-konsole}
     # Discovery can back off to tens of seconds when nobody is watching, and validating
-    # against a snapshot that old would delay noticing a Konsole-side change. Past this
-    # age the caller falls back to a live check, which is far cheaper than keeping
-    # discovery itself running fast.
-    ka_tunable KEEPALIVE_SNAPSHOT_MAX_AGE 10
-    max_age=$REPLY
+    # against a snapshot that old would delay noticing a target-side change. Orca listing
+    # is already authoritative for live handles and is reused through the idle discovery
+    # window; strict pre-send validation remains live in every case.
+    case $backend in
+        konsole)
+            ka_tunable KEEPALIVE_SNAPSHOT_MAX_AGE 10
+            max_age=$REPLY
+            stamp=${KA_DISCOVERY_STAMP_KONSOLE:-${KA_DISCOVERY_STAMP:-0}}
+            ;;
+        orca)
+            ka_tunable KEEPALIVE_ORCA_SNAPSHOT_MAX_AGE 35
+            max_age=$REPLY
+            stamp=${KA_DISCOVERY_STAMP_ORCA:-0}
+            ;;
+        *) return 22 ;;
+    esac
     ka_now_monotonic || return 1
-    age=$((REPLY - ${KA_DISCOVERY_STAMP:-0}))
+    age=$((REPLY - stamp))
     ((age <= max_age)) || return 1
+    [[ ${KA_D_BACKEND[$uuid]:-konsole} == "$backend" ]] || return 1
     # Return 1 only for "no usable snapshot", which is the caller's signal to fall back
     # to a live call. Every field must be present before the snapshot can be trusted.
-    [[ -n ${KA_D_TERM_PID[$uuid]+x} && -n ${KA_D_FG_PID[$uuid]+x} ]] || return 1
-    [[ ${KA_D_TERM_PID[$uuid]} == "${KA_T_TERM_PID[$uuid]}" ]] || return 11
-    [[ -d /proc/${KA_T_AI_PID[$uuid]} ]] || return 12
-    start=$(ka_proc_starttime "${KA_T_AI_PID[$uuid]}" 2>/dev/null || true)
-    [[ $start == "${KA_T_AI_START[$uuid]}" ]] || return 13
-    [[ ${KA_D_FG_PID[$uuid]} =~ ^[0-9]+$ ]] || return 14
-    ka_process_is_descendant_of "${KA_D_FG_PID[$uuid]}" "${KA_T_AI_PID[$uuid]}" || return 15
+    case $backend in
+        konsole)
+            [[ -n ${KA_D_TERM_PID[$uuid]+x} && -n ${KA_D_FG_PID[$uuid]+x} ]] || return 1
+            [[ ${KA_D_TERM_PID[$uuid]} == "${KA_T_TERM_PID[$uuid]}" ]] || return 11
+            [[ -d /proc/${KA_T_AI_PID[$uuid]} ]] || return 12
+            start=$(ka_proc_starttime "${KA_T_AI_PID[$uuid]}" 2>/dev/null || true)
+            [[ $start == "${KA_T_AI_START[$uuid]}" ]] || return 13
+            [[ ${KA_D_FG_PID[$uuid]} =~ ^[0-9]+$ ]] || return 14
+            ka_process_is_descendant_of "${KA_D_FG_PID[$uuid]}" "${KA_T_AI_PID[$uuid]}" || return 15
+            ;;
+        orca)
+            [[ -n ${KA_D_ORCA_HANDLE[$uuid]+x} && -n ${KA_D_ORCA_INCARNATION[$uuid]+x} ]] || return 1
+            [[ ${KA_D_ORCA_RUNTIME[$uuid]} == "${KA_T_ORCA_RUNTIME[$uuid]}" ]] || return 11
+            [[ ${KA_D_ORCA_HANDLE[$uuid]} == "${KA_T_ORCA_HANDLE[$uuid]}" ]] || return 10
+            [[ ${KA_D_ORCA_INCARNATION[$uuid]} == "${KA_T_ORCA_INCARNATION[$uuid]}" ]] || return 12
+            [[ ${KA_D_ORCA_PTY[$uuid]} == "${KA_T_ORCA_PTY[$uuid]}" ]] || return 13
+            [[ ${KA_D_ORCA_WORKTREE[$uuid]} == "${KA_T_ORCA_WORKTREE[$uuid]}" \
+                && ${KA_D_ORCA_HOST[$uuid]} == "${KA_T_ORCA_HOST[$uuid]}" ]] || return 14
+            [[ ${KA_D_ORCA_TAB[$uuid]} == "${KA_T_ORCA_TAB[$uuid]}" \
+                && ${KA_D_ORCA_LEAF[$uuid]} == "${KA_T_ORCA_LEAF[$uuid]}" ]] || return 16
+            [[ ${KA_D_ORCA_AGENT[$uuid]} == "${KA_T_ORCA_AGENT[$uuid]}" ]] || return 15
+            ;;
+    esac
     return 0
 }
 
@@ -580,11 +771,10 @@ ka_state_strike_limit() {
 }
 
 # Role: Validate every non-unavailable monitored target and update last-seen metadata.
-# Transient failures are debounced rather than ignored: a bus that never comes back
-# still ends in UNAVAILABLE, but a momentary outage or a Konsole restart does not
-# destroy every keep-alive on the first failed call.
+# Transient failures are debounced rather than ignored: a backend that never comes back
+# still ends in UNAVAILABLE, but a momentary outage does not destroy identity immediately.
 ka_state_validate_targets() {
-    local uuid rc reason limit strikes
+    local uuid rc reason limit strikes backend
     ((${#KA_T_UUIDS[@]} > 0)) || return 0
     limit=$(ka_state_strike_limit)
     for uuid in "${KA_T_UUIDS[@]}"; do
@@ -595,8 +785,7 @@ ka_state_validate_targets() {
             rc=0
         elif rc=$?; ((rc != 1)); then
             :
-        elif ka_konsole_validate_target "${KA_T_SERVICE[$uuid]}" "${KA_T_PATH[$uuid]}" "$uuid" \
-            "${KA_T_TERM_PID[$uuid]}" "${KA_T_AI_PID[$uuid]}" "${KA_T_AI_START[$uuid]}"; then
+        elif ka_transport_validate_target "$uuid"; then
             rc=0
         else
             rc=$?
@@ -605,8 +794,13 @@ ka_state_validate_targets() {
             KA_T_LAST_SEEN[$uuid]=$(ka_now_full)
             KA_T_STRIKES[$uuid]=0
         else
-            reason=$(ka_konsole_validation_reason "$rc")
-            if ka_konsole_validation_is_transient "$rc"; then
+            backend=${KA_T_BACKEND[$uuid]:-konsole}
+            reason=$(ka_transport_validation_reason "$backend" "$rc")
+            if ka_transport_validation_is_transient "$backend" "$rc"; then
+                if ! ka_transport_validation_consumes_strike "$backend" "$rc"; then
+                    KA_T_STRIKES[$uuid]=0
+                    continue
+                fi
                 strikes=$(( ${KA_T_STRIKES[$uuid]:-0} + 1 ))
                 KA_T_STRIKES[$uuid]=$strikes
                 ((strikes >= limit)) || continue
@@ -632,11 +826,12 @@ ka_state_publish_index() {
         ka_single_line "${KA_T_DIR[$uuid]}";        directory=$REPLY
         ka_single_line "${KA_T_LAST_SEEN[$uuid]-}"; last=$REPLY
         ka_single_line "${KA_T_REASON[$uuid]-}";    reason=$REPLY
-        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
             "$uuid" "$type" "$name" "$directory" "$status" "${KA_T_MAIN_REMAIN[$uuid]}" \
             "${KA_T_MAIN_INTERVAL[$uuid]}" "${KA_T_SECONDARY_ENABLED[$uuid]}" \
             "${KA_T_SECONDARY_REMAIN[$uuid]}" "${KA_T_SECONDARY_INTERVAL[$uuid]}" \
-            "${KA_T_MODE[$uuid]}" "${KA_T_NOTIFY[$uuid]}" "$last" "$reason" >>"$tmp"
+            "${KA_T_MODE[$uuid]}" "${KA_T_NOTIFY[$uuid]}" "$last" "$reason" \
+            "${KA_T_BACKEND[$uuid]:-konsole}" >>"$tmp"
     done
 
     for uuid in "${KA_D_UUIDS[@]}"; do
@@ -644,8 +839,8 @@ ka_state_publish_index() {
         ka_single_line "${KA_D_TYPE[$uuid]}"; type=$REPLY
         ka_single_line "${KA_D_NAME[$uuid]}"; name=$REPLY
         ka_single_line "${KA_D_DIR[$uuid]}";  directory=$REPLY
-        printf '%s\t%s\t%s\t%s\tAVAILABLE\t0\t0\t0\t0\t0\t\t0\t\t\n' \
-            "$uuid" "$type" "$name" "$directory" >>"$tmp"
+        printf '%s\t%s\t%s\t%s\tAVAILABLE\t0\t0\t0\t0\t0\t\t0\t\t\t%s\n' \
+            "$uuid" "$type" "$name" "$directory" "${KA_D_BACKEND[$uuid]:-konsole}" >>"$tmp"
     done
     mv -f -- "$tmp" "$KA_INDEX_FILE"
 }

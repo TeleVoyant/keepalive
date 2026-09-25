@@ -56,6 +56,9 @@ test_env_setup() {
     export XDG_CONFIG_HOME="$TEST_TMP/config"
     export XDG_RUNTIME_DIR="$TEST_TMP/runtime"
     export XDG_STATE_HOME="$TEST_TMP/state"
+    # Unit/integration tests opt into mocked Orca explicitly; never attach to a developer's
+    # live Orca runtime merely because orca-ide happens to be on PATH.
+    export KEEPALIVE_ORCA_ENABLED=0
     mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_RUNTIME_DIR" "$XDG_STATE_HOME"
 }
 
@@ -66,6 +69,8 @@ source_core() {
     source "$TEST_ROOT/lib/qdbus.sh"
     source "$TEST_ROOT/lib/classifier.sh"
     source "$TEST_ROOT/lib/konsole.sh"
+    source "$TEST_ROOT/lib/orca.sh"
+    source "$TEST_ROOT/lib/transport.sh"
     source "$TEST_ROOT/lib/profile.sh"
     source "$TEST_ROOT/lib/logging.sh"
     source "$TEST_ROOT/lib/notifications.sh"

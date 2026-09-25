@@ -1,11 +1,11 @@
 # Testing
 
-The suite is plain Bash. It needs no Bats, no test framework, and - apart from two
-optional fixtures - no Python. That constraint is deliberate: the tool ships as Bash to
-hosts that may have very little else installed, and a test suite that cannot run there is
-not much use.
+The suite is plain Bash. It needs no Bats or test framework. Python is optional for the
+pseudo-terminal fixtures, and `jq` is optional for the Orca adapter tests; those files
+skip cleanly when their optional dependency is absent. That constraint is deliberate:
+the tool ships as Bash to hosts that may have very little else installed.
 
-**328 assertions across 14 files.**
+**389 assertions across 16 files** when Python and `jq` are present.
 
 ## Running
 
@@ -40,6 +40,10 @@ Every `test_*.sh` runs against a temporary `HOME`, `XDG_CONFIG_HOME`, and
 real profile, your installed units, or a running daemon. Files that start a background
 daemon install an `EXIT` trap that kills it.
 
+The shared setup explicitly disables Orca. Orca tests opt back in with the repository's
+mock executable, so installing `orca-ide` on a developer workstation can never make a
+normal test enumerate or send to live agents.
+
 That trap matters more than it looks. An orphaned `keepalive --service` is adopted by
 systemd when its parent dies, keeps polling indefinitely, and silently inflates any CPU
 measurement taken afterwards. If you write a scratch script that starts a daemon, give it
@@ -52,11 +56,13 @@ a trap - the committed tests all have one.
 | `test_common.sh` | 36 | Duration helpers, scalar safety, shell-metacharacter literal handling, injectable monotonic reads, tunable validation and one-shot warnings. |
 | `test_classifier.sh` | 10 | Recognized wrapper signatures, negative matching, process ancestry, CRLF-tolerant pattern files, and refusal of a pattern that cannot compile. |
 | `test_profile.sh` | 12 | Default profile creation, updates, literal message storage, canonical contiguous message numbering. |
-| `test_state.sh` | 40 | Mutation-free rejection of malformed CREATE/CONFIGURE, the create/pause/resume/unavailable/delete lifecycle, transient health timeouts, independent log cleanup, and new-UUID no-reattach behavior. |
+| `test_state.sh` | 41 | Mutation-free rejection of malformed CREATE/CONFIGURE, the create/pause/resume/unavailable/delete lifecycle, legacy checkpoint compatibility, transient health timeouts, independent log cleanup, and new-UUID no-reattach behavior. |
 | `test_scheduler.sh` | 54 | Main rotation, Enter-only queue preservation, main and secondary transport failures, validation timeouts, timer independence, suspend-gap and backward-clock preservation, one-shot secondary, and owed-submit retry. |
 | `test_service_integration.sh` | 24 | A real background daemon, real FIFO, and real client processes against a mocked qdbus: create, send, send failure, send timeout, target loss, and replacement UUID, end to end. |
 | `test_ipc.sh` | 12 | Multiple concurrent request IDs through one FIFO, response routing, and timeout behavior. |
 | `test_konsole_mock.sh` | 16 | Mocked Konsole service/path/UUID/PID discovery, strict validation, qdbus timeout classification, and notification deadlines. |
+| `test_orca_mock.sh` | 50 | Orca CLI/schema normalization, exact multi-field identity, non-destructive schema drift, deadlines, atomic delivery, checkpoint validation, transport dispatch, and per-backend snapshot isolation. Skips without `jq`. |
+| `test_orca_service_integration.sh` | 10 | A real Orca-only daemon, FIFO, and public clients against the mock: discover, create, atomic send, transient outage, and sticky incarnation replacement. Skips without `jq`. |
 | `test_recovery.sh` | 11 | Same-login daemon restart countdown recovery, deferred transient identity validation, and dirty-flush persistence. |
 | `test_recovery_validation.sh` | 18 | Strict checkpoint schema and range validation, symlink rejection, quarantine diagnostics, and event-log preservation. |
 | `test_tui_primitives.sh` | 74 | ASCII and no-icon rendering, first-frame/view-transition/same-view/resize clearing, width-exact frames, safe truncation, control-byte stripping, non-collapsing TSV splitting, 7-bit glyph selection, segment-bar width accounting, and key decoding including unrecognized sequences and Escape pushback. |
@@ -121,12 +127,13 @@ Conventions worth knowing, each of which has cost time before:
 
 ## What these tests cannot prove
 
-The suite drives a mocked qdbus endpoint, so it runs anywhere. That mock is a stand-in,
-not a proof. It cannot exercise:
+The suite drives mocked qdbus and Orca CLI endpoints, so it runs without attaching to a
+real terminal. Those mocks are stand-ins, not proof. They cannot exercise:
 
 - the Plasma graphical-session lifecycle;
 - a live user D-Bus;
 - Konsole's actual `sendText` behavior;
+- a real Orca terminal-send receipt or a future Orca release's JSON contract;
 - real process trees for every installed AI CLI version;
 - a desktop notification server;
 - Nerd Font cell rendering;
@@ -134,8 +141,9 @@ not a proof. It cannot exercise:
 
 Work through the live integration checklist in
 [`MAINTENANCE.md`](MAINTENANCE.md#live-integration-test-checklist) on a real
-KDE/Konsole workstation before treating a release as qualified. Release 1.0.0 was
-validated that way; see [`VALIDATION.md`](VALIDATION.md).
+KDE/Konsole workstation and a disposable Orca agent before treating both backends as
+qualified. Release 1.0.0's Konsole path was validated that way; see
+[`VALIDATION.md`](VALIDATION.md).
 
 ## Continuous integration
 

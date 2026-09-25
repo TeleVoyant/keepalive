@@ -6,8 +6,8 @@ Start here:
 keepalive doctor
 ```
 
-It checks every dependency, names the runtime directory and how it was resolved, counts
-visible Konsole D-Bus services, and reports whether the control FIFO is ready. Most
+It checks core dependencies, reports each terminal backend, names the runtime directory
+and how it was resolved, and reports whether the control FIFO is ready. Most
 problems below are visible in its output.
 
 For daemon behavior over time:
@@ -81,9 +81,9 @@ KEEPALIVE_RESPONSE_TIMEOUT_MS=20000 keepalive list
 
 ## Remote access shows nothing, or cannot connect
 
-Keep Alive Manager manages Konsole sessions on the machine where Konsole is running. Over
-SSH you are attaching a client to that machine's daemon; you are not managing your local
-terminal.
+Keep Alive Manager manages terminal sessions on the machine where Konsole or Orca is
+running. Over SSH you are attaching a client to that machine's daemon; you are not
+managing your local terminal.
 
 Two things commonly go wrong.
 
@@ -110,6 +110,29 @@ keepalive list
 
 ---
 
+## Orca agents do not appear
+
+Run:
+
+```bash
+keepalive doctor
+/home/you/.local/bin/orca-ide status --json
+```
+
+The doctor must show an Orca CLI, `jq`, and a reachable runtime. On Linux, configure
+`KEEPALIVE_ORCA_CLI` with the path to `orca-ide` if auto-detection misses it; do not point
+it at bare `orca`, which is commonly the GNOME screen reader.
+
+Only terminals with a non-empty Orca `agentIdentity` are listed. Ordinary shell tabs are
+excluded intentionally. The terminal must also be connected, writable, and non-orphaned.
+
+If the journal says Orca discovery did not complete after an Orca update, the CLI's JSON
+contract probably changed. Existing Orca discovery rows are retained, but sends still
+require live validation. Update the isolated mapping in `lib/orca.sh` and its mock test;
+do not weaken schema checks or bypass identity validation.
+
+---
+
 ## Nothing is being delivered, but the target looks healthy
 
 **Check the target's event log first** - press `l` in target detail, or:
@@ -120,7 +143,7 @@ keepalive list --json
 
 The log records refusals with reasons rather than failing silently.
 
-**The message may be owed rather than sent.** With the default two-step delivery, a
+**The message may be owed rather than sent.** With Konsole's default two-step delivery, a
 failure between sending the text and sending the submit sequence is recorded as owed. The
 next attempt completes the pending line instead of repeating it, because a blind retry
 would append the message twice. This is correct behavior and resolves itself.
@@ -147,8 +170,10 @@ Environment=KEEPALIVE_ATOMIC_SUBMIT=1
 
 This is deliberate and is the core safety property of the tool.
 
-A send is permitted only when the Konsole session UUID, terminal PID, AI PID and start
-time, and current foreground ancestry **all** still match what was recorded. Once an
+A send is permitted only when the selected backend's complete identity binding still
+matches what was recorded. For Konsole that includes the session UUID, terminal PID, AI
+PID/start time, and foreground ancestry. For Orca it includes runtime, handle, PTY,
+terminal incarnation, worktree, execution host, pane, and agent identity. Once an
 identity is lost it becomes sticky: the target is never automatically rebound to a
 replacement terminal, because doing so could type into somebody else's shell.
 
@@ -256,5 +281,6 @@ ps -eo pid,etime,args | grep '[k]eepalive --service'
 ```
 
 plus your terminal emulator, `TERM`, and whether you were on a local desktop session or
-over SSH. Open issues at
+over SSH. For an Orca problem, also include `orca-ide --version` and the relevant journal
+error, but redact prompts or worktree paths you do not want to share. Open issues at
 [github.com/TeleVoyant/keepalive/issues](https://github.com/TeleVoyant/keepalive/issues).

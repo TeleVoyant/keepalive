@@ -27,19 +27,19 @@ ka_service_cleanup() {
 
 # Role: Validate restored runtime targets and record successful same-session daemon recovery.
 ka_service_recover_targets() {
-    local uuid old_status
+    local uuid old_status backend
     for uuid in "${KA_T_UUIDS[@]}"; do
         old_status=${KA_T_STATUS[$uuid]}
         [[ $old_status == UNAVAILABLE ]] && continue
-        if ka_konsole_validate_target "${KA_T_SERVICE[$uuid]}" "${KA_T_PATH[$uuid]}" "$uuid" \
-            "${KA_T_TERM_PID[$uuid]}" "${KA_T_AI_PID[$uuid]}" "${KA_T_AI_START[$uuid]}"; then
+        if ka_transport_validate_target "$uuid"; then
             KA_T_LAST_SEEN[$uuid]=$(ka_now_full)
             ka_state_save_target "$uuid"
             ka_log_event "$uuid" SERVICE "daemon recovered; countdown preserved" "$old_status"
         else
             local rc=$? reason
-            reason=$(ka_konsole_validation_reason "$rc")
-            if ka_konsole_validation_is_transient "$rc"; then
+            backend=${KA_T_BACKEND[$uuid]:-konsole}
+            reason=$(ka_transport_validation_reason "$backend" "$rc")
+            if ka_transport_validation_is_transient "$backend" "$rc"; then
                 ka_log_event "$uuid" SERVICE "daemon recovery validation deferred: $reason" "$old_status"
             else
                 ka_state_mark_unavailable "$uuid" "$reason"
@@ -70,6 +70,19 @@ ka_service_try() {
 # is a clean stop rather than an error to retry.
 ka_service_runtime_present() {
     [[ -d $KA_RUNTIME_DIR ]]
+}
+
+# Role: Normalize one backend enable switch to auto, 0, or 1.
+ka_service_backend_setting() {
+    local name=$1 value
+    value=${!name:-auto}
+    case $value in
+        auto|0|1) REPLY=$value ;;
+        *)
+            ka_warn "$name=$value is invalid; using auto"
+            REPLY=auto
+            ;;
+    esac
 }
 
 # Role: Choose the discovery cadence from whether any client is currently watching.
@@ -188,7 +201,7 @@ ka_service_loop() {
             elif ((stale_logged == 0)); then
                 # The pass hit its budget, so the previous snapshot is retained. Warn once
                 # per episode rather than on every cycle.
-                ka_warn 'Konsole discovery exceeded its per-pass budget; using the previous snapshot'
+                ka_warn "${KA_DISCOVERY_STALE_BACKENDS:-terminal} discovery did not complete; using the previous backend snapshot"
                 stale_logged=1
             fi
             last_discovery=$now
@@ -231,10 +244,30 @@ ka_service_main() {
     ka_ensure_config_dirs
     ka_profile_init_defaults
     ka_now_monotonic || { ka_error 'a valid monotonic clock source (/proc/uptime by default) is required'; return 1; }
-    command -v timeout >/dev/null 2>&1 || { ka_error 'GNU timeout is required for bounded D-Bus calls'; return 1; }
-    ka_qdbus_find || { ka_error 'no qdbus tool found (qdbus6/qdbus required)'; return 1; }
-    ka_dbus_send_find || ka_warn 'dbus-send not found; falling back to the slower qdbus transport'
-    ka_dbus_use_send && ka_info "read-only D-Bus transport: $KA_DBUS_SEND"
+    command -v timeout >/dev/null 2>&1 || { ka_error 'GNU timeout is required for bounded terminal-backend calls'; return 1; }
+
+    local konsole_setting orca_setting
+    ka_service_backend_setting KEEPALIVE_KONSOLE_ENABLED; konsole_setting=$REPLY
+    ka_service_backend_setting KEEPALIVE_ORCA_ENABLED; orca_setting=$REPLY
+    KA_KONSOLE_ENABLED=0
+    KA_ORCA_ENABLED=0
+    if [[ $konsole_setting != 0 ]] && ka_qdbus_find; then
+        KA_KONSOLE_ENABLED=1
+        ka_dbus_send_find || ka_warn 'dbus-send not found; falling back to the slower qdbus transport'
+        ka_dbus_use_send && ka_info "read-only D-Bus transport: $KA_DBUS_SEND"
+    elif [[ $konsole_setting == 1 ]]; then
+        ka_warn 'Konsole backend was requested but no qdbus executable was found'
+    fi
+    if [[ $orca_setting != 0 ]] && ka_orca_find; then
+        KA_ORCA_ENABLED=1
+        ka_info "Orca backend: $KA_ORCA_CLI (JSON: $KA_ORCA_JQ)"
+    elif [[ $orca_setting == 1 ]]; then
+        ka_warn 'Orca backend was requested but orca-ide and jq were not both available'
+    fi
+    if ((KA_KONSOLE_ENABLED == 0 && KA_ORCA_ENABLED == 0)); then
+        ka_error 'no terminal backend is usable (install qdbus for Konsole, or orca-ide plus jq for Orca)'
+        return 1
+    fi
     ka_classifier_init
     ka_state_init_arrays
     # Another instance already owns the runtime state, so there is nothing for this one to
@@ -256,7 +289,9 @@ ka_service_main() {
     # daemon lifetime visible for no reason.
     ka_ipc_cleanup_stale
     ka_state_load_all_targets
-    ka_state_refresh_discovery
+    if ! ka_state_refresh_discovery; then
+        ka_warn "${KA_DISCOVERY_STALE_BACKENDS:-terminal} discovery was unavailable at startup; retaining empty/previous snapshots"
+    fi
     ka_service_recover_targets
     ka_state_publish_index
     ka_service_write_status online

@@ -17,6 +17,8 @@ source "$KA_PROJECT_ROOT/lib/icons.sh"
 source "$KA_PROJECT_ROOT/lib/qdbus.sh"
 source "$KA_PROJECT_ROOT/lib/classifier.sh"
 source "$KA_PROJECT_ROOT/lib/konsole.sh"
+source "$KA_PROJECT_ROOT/lib/orca.sh"
+source "$KA_PROJECT_ROOT/lib/transport.sh"
 source "$KA_PROJECT_ROOT/lib/profile.sh"
 source "$KA_PROJECT_ROOT/lib/logging.sh"
 source "$KA_PROJECT_ROOT/lib/notifications.sh"
@@ -46,7 +48,7 @@ Usage:
   keepalive enter UUID                            Send one Enter, then resume MESSAGE+ENTER
   keepalive mode UUID [message-enter|enter-only]  Set or toggle delivery mode
   keepalive status                                Check user service availability
-  keepalive refresh                               Force immediate Konsole discovery
+  keepalive refresh                               Force immediate terminal discovery
   keepalive profile                               Show the single persistent default profile
   keepalive logs UUID                             Print one target's runtime event log
   keepalive doctor                                Diagnose dependencies/session integration
@@ -84,15 +86,16 @@ ka_cli_list() {
     ka_cli_ensure_service || return
     ka_ipc_call REFRESH '' >/dev/null 2>&1 || true
     ka_tui_load_index
-    printf '%-3s %-16s %-24s %-13s %-10s %-10s\n' '#' TYPE SESSION STATE MAIN NUDGE
+    printf '%-3s %-8s %-16s %-24s %-13s %-10s %-10s\n' '#' BACKEND TYPE SESSION STATE MAIN NUDGE
     local i main nudge
     for i in "${!KA_R_UUID[@]}"; do
         if [[ ${KA_R_STATUS[$i]} == ACTIVE || ${KA_R_STATUS[$i]} == PAUSED ]]; then
             main=$(ka_format_duration "${KA_R_MAIN_REMAIN[$i]}")
             [[ ${KA_R_SEC_ENABLED[$i]} == 1 ]] && nudge=$(ka_format_duration "${KA_R_SEC_REMAIN[$i]}") || nudge='—'
         else main='—'; nudge='—'; fi
-        printf '%-3d %-16s %-24s %-13s %-10s %-10s\n' "$((i + 1))" "${KA_R_TYPE[$i]}" \
-            "$(ka_tui_truncate "${KA_R_NAME[$i]}" 24)" "${KA_R_STATUS[$i]}" "$main" "$nudge"
+        printf '%-3d %-8s %-16s %-24s %-13s %-10s %-10s\n' "$((i + 1))" "${KA_R_BACKEND[$i]}" \
+            "${KA_R_TYPE[$i]}" "$(ka_tui_truncate "${KA_R_NAME[$i]}" 24)" \
+            "${KA_R_STATUS[$i]}" "$main" "$nudge"
     done
 }
 
@@ -103,8 +106,9 @@ ka_cli_list_json() {
     for i in "${!KA_R_UUID[@]}"; do
         ((first == 1)) || printf ',\n'
         first=0
-        printf '  {"uuid":"%s","type":"%s","name":"%s","directory":"%s","status":"%s",' \
-            "$(ka_json_escape "${KA_R_UUID[$i]}")" "$(ka_json_escape "${KA_R_TYPE[$i]}")" \
+        printf '  {"uuid":"%s","backend":"%s","type":"%s","name":"%s","directory":"%s","status":"%s",' \
+            "$(ka_json_escape "${KA_R_UUID[$i]}")" "$(ka_json_escape "${KA_R_BACKEND[$i]}")" \
+            "$(ka_json_escape "${KA_R_TYPE[$i]}")" \
             "$(ka_json_escape "${KA_R_NAME[$i]}")" "$(ka_json_escape "${KA_R_DIR[$i]}")" \
             "$(ka_json_escape "${KA_R_STATUS[$i]}")"
         printf '"main_remaining":%d,"main_interval":%d,' "${KA_R_MAIN_REMAIN[$i]:-0}" "${KA_R_MAIN_INTERVAL[$i]:-0}"
@@ -151,7 +155,7 @@ ka_cli_create() {
     if status=$(ka_cli_status_of "$uuid"); then
         [[ $status == AVAILABLE ]] || { ka_error "session already has a keep-alive (state: $status)"; return 1; }
     else
-        ka_error 'no such discovered Konsole session'
+        ka_error 'no such discovered terminal session'
         return 1
     fi
     id=$(ka_ipc_new_request CREATE "$uuid") || return 1
@@ -179,14 +183,13 @@ ka_cli_set_paused() {
     esac
 }
 
-# Role: Run deterministic diagnostics for Bash, systemd-user, qdbus, Konsole, and notifications.
+# Role: Run deterministic diagnostics for core dependencies and every terminal backend.
 ka_cli_doctor() {
-    local failures=0 services=0
+    local failures=0 services=0 backends=0 output konsole_setting orca_setting
     printf 'Keep Alive doctor %s\n\n' "$KEEPALIVE_VERSION"
     printf '%-30s %s\n' 'Bash >= 5' "$([[ ${BASH_VERSINFO[0]} -ge 5 ]] && printf OK || printf FAIL)"
     [[ ${BASH_VERSINFO[0]} -ge 5 ]] || ((failures += 1))
 
-    if ka_qdbus_find; then printf '%-30s OK (%s)\n' 'qdbus' "$KA_QDBUS"; else printf '%-30s FAIL\n' 'qdbus'; ((failures += 1)); fi
     if command -v flock >/dev/null 2>&1; then printf '%-30s OK\n' 'flock'; else printf '%-30s FAIL\n' 'flock'; ((failures += 1)); fi
     if command -v timeout >/dev/null 2>&1; then printf '%-30s OK\n' 'timeout'; else printf '%-30s FAIL\n' 'timeout'; ((failures += 1)); fi
     if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
@@ -199,8 +202,42 @@ ka_cli_doctor() {
         printf '%-30s %s\n' '' 'no session runtime directory found; a running daemon may be elsewhere'
     fi
 
-    if [[ -n ${KA_QDBUS:-} ]]; then services=$(ka_qdbus_konsole_services | grep -c . || true); fi
-    printf '%-30s %s\n' 'Konsole D-Bus services' "$services"
+    ka_service_backend_setting KEEPALIVE_KONSOLE_ENABLED; konsole_setting=$REPLY
+    ka_service_backend_setting KEEPALIVE_ORCA_ENABLED; orca_setting=$REPLY
+    if [[ $konsole_setting == 0 ]]; then
+        printf '%-30s DISABLED\n' 'Konsole backend'
+    elif ka_qdbus_find; then
+        ((backends += 1))
+        printf '%-30s OK (%s)\n' 'Konsole backend / qdbus' "$KA_QDBUS"
+        ka_dbus_send_find || true
+        services=$(ka_qdbus_konsole_services | grep -c . || true)
+        printf '%-30s %s\n' 'Konsole D-Bus services' "$services"
+    else
+        printf '%-30s unavailable (qdbus missing)\n' 'Konsole backend'
+    fi
+
+    if [[ $orca_setting == 0 ]]; then
+        printf '%-30s DISABLED\n' 'Orca backend'
+    elif ka_orca_find; then
+        ((backends += 1))
+        printf '%-30s OK (%s)\n' 'Orca backend / CLI' "$KA_ORCA_CLI"
+        printf '%-30s OK (%s)\n' 'Orca JSON parser' "$KA_ORCA_JQ"
+        if output=$(ka_orca_exec status --json 2>/dev/null) \
+            && "$KA_ORCA_JQ" -e '.ok == true and .result.runtime.reachable == true' \
+                >/dev/null 2>&1 <<<"$output"; then
+            printf '%-30s READY\n' 'Orca runtime'
+        else
+            printf '%-30s offline (agents appear when Orca runs)\n' 'Orca runtime'
+        fi
+    else
+        printf '%-30s unavailable (needs orca-ide + jq)\n' 'Orca backend'
+    fi
+    if ((backends == 0)); then
+        printf '%-30s FAIL\n' 'usable terminal backends'
+        ((failures += 1))
+    else
+        printf '%-30s %d\n' 'usable terminal backends' "$backends"
+    fi
     printf '%-30s %s\n' 'notify-send' "$([[ $(command -v notify-send 2>/dev/null || true) ]] && printf OK || printf 'optional/missing')"
     printf '%-30s %s\n' 'control FIFO' "$([[ -p $KA_CONTROL_FIFO ]] && printf READY || printf 'not active yet')"
     printf '\n'
