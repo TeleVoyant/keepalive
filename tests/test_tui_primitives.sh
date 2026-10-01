@@ -73,7 +73,8 @@ assert_eq 60 "$(ka_tui_field_width 20)" 'derived field width subtracts the reser
 KA_ASCII_MODE=1; ka_tui_glyphs_init
 glyphs="$KA_G_TL$KA_G_TR$KA_G_BL$KA_G_BR$KA_G_ML$KA_G_MR$KA_G_H$KA_G_V$KA_G_SEL$KA_G_CUR$KA_G_NONE$KA_G_ELL"
 assert_eq '' "${glyphs//[[:ascii:]]/}" 'ASCII mode uses only 7-bit frame glyphs'
-assert_eq '' "$(ka_tui_progress 500 1000 4 | tr -d '[:ascii:]')" 'ASCII mode progress bar is 7-bit'
+assert_eq '' "$(ka_tui_progress 500 1000 4 | LC_ALL=C tr -d '\000-\177')" \
+    'ASCII mode progress bar is 7-bit'
 assert_eq '' "$KA_G_PL_SEP" 'ASCII mode drops the Nerd Font powerline wedge'
 KA_ASCII_MODE=0; KA_ICONS_ENABLED=1; ka_tui_glyphs_init
 assert_eq $'' "$KA_G_PL_SEP" 'icon mode selects the powerline wedge glyph'

@@ -1,6 +1,30 @@
 #!/usr/bin/env bash
 # qdbus discovery and invocation wrapper.
 
+# Role: Percent-escape one D-Bus address value into REPLY.
+ka_dbus_escape_address_value() {
+    local value=$1 output='' byte hex i LC_ALL=C
+    for ((i = 0; i < ${#value}; i++)); do
+        byte=${value:i:1}
+        case $byte in
+            [[:alnum:]_./-]) output+=$byte ;;
+            *)
+                printf -v hex '%02X' "'$byte"
+                output+="%$hex"
+                ;;
+        esac
+    done
+    REPLY=$output
+}
+
+# Role: Use the standard systemd user-bus socket when the manager did not import its address.
+ka_dbus_prepare_session_address() {
+    [[ -n ${DBUS_SESSION_BUS_ADDRESS:-} ]] && return 0
+    [[ -n ${KA_RUNTIME_BASE:-} && -S $KA_RUNTIME_BASE/bus ]] || return 0
+    ka_dbus_escape_address_value "$KA_RUNTIME_BASE/bus"
+    export DBUS_SESSION_BUS_ADDRESS="unix:path=$REPLY"
+}
+
 # Role: Locate a usable qdbus executable, preferring Qt 6 variants on modern KDE.
 ka_qdbus_find() {
     local candidate
@@ -97,22 +121,29 @@ ka_dbus_send_scalar() {
 }
 
 # Role: List currently registered Konsole D-Bus service names for this user session.
+# Matched with builtin regexes, which is what the former tr/grep pipelines did at the cost
+# of two processes on every discovery pass, and with the same units: dbus-send prints the
+# names as space-separated array items, so each item is tested; qdbus prints one per line,
+# so each line is tested and must end in the name, exactly as the old anchored grep did.
 ka_qdbus_konsole_services() {
-    local output rc
+    local output rc item name_re='org\.kde\.konsole(-[0-9]+)?$'
+    local -a items=()
     if ka_dbus_use_send; then
         if output=$(ka_dbus_send_scalar org.freedesktop.DBus /org/freedesktop/DBus \
             org.freedesktop.DBus.ListNames 2>/dev/null); then :; else
             rc=$?
             return "$rc"
         fi
-        tr ' ' '\n' <<<"$output" | grep -oE 'org\.kde\.konsole(-[0-9]+)?$' || true
-        return 0
-    fi
-    if output=$(ka_qdbus_exec 2>/dev/null); then
+        output=${output// /$'\n'}
+    elif output=$(ka_qdbus_exec 2>/dev/null); then
         :
     else
         rc=$?
         return "$rc"
     fi
-    grep -oE 'org\.kde\.konsole(-[0-9]+)?$' <<<"$output" || true
+    mapfile -t items <<<"$output"
+    for item in "${items[@]}"; do
+        [[ $item =~ $name_re ]] && printf '%s\n' "${BASH_REMATCH[0]}"
+    done
+    return 0
 }

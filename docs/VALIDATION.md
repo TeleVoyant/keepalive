@@ -1,7 +1,7 @@
 # Validation Report
 
-Date: 2026-09-25
-Version: 1.0.0 + unreleased Orca integration
+Date: 2026-10-01
+Version: 1.1.0
 
 ## Automated result
 
@@ -11,13 +11,16 @@ The current worktree passed:
 Bash syntax:                 PASS
 Function-role comment lint:  PASS
 Version consistency:         PASS (keepalive + 4 documents + CHANGELOG)
-Test files:                  16 / 16 PASS
-Assertions:                  389 / 389 PASS
+Test files:                  27 / 27 PASS
+Assertions:                  1040 / 1040 PASS (1 ownership case skips when not run as root)
 systemd-analyze verify:      PASS
 Installer layout simulation: PASS (non-root + mocked systemctl)
+Installer lifecycle/rollback: PASS (stateful mocked systemctl + injected activation failure)
+Portable runtime/IPC errors: PASS (unsafe paths, D-Bus escaping, write/lock failures)
 Daemon/client integration:   PASS (real Bash processes/FIFO + mocked qdbus and Orca CLI)
 Live Orca read-only adapter: PASS (discovery + exact terminal-show identity validation)
-ShellCheck:                  SKIP locally (not installed; CI remains the blocking gate)
+ShellCheck:                  PASS (container; no findings beyond the pre-existing test-mock notes)
+Resource benchmark:          PASS (isolated before/after; see CHANGELOG "Performance")
 ```
 
 Run the same aggregate command with:
@@ -111,7 +114,45 @@ Run the same aggregate command with:
 - Health validation refuses a discovery snapshot older than its permitted age and falls back to a live check.
 - A countdown decrement marks a target dirty rather than rewriting its whole checkpoint every tick.
 - User installer places source, symlink, and systemd units correctly and enables the socket entrypoint.
+- Socket activation is installed under `sockets.target`; the service is static and bound
+  to the socket without any KDE or `graphical-session.target` dependency.
+- Upgrades stage the full source tree, work when launched from the installed copy, remove
+  obsolete graphical target links, restart an active daemon, and restore source, units,
+  command link, and prior systemd enable/active state after an injected activation failure.
+- Manager-scoped `XDG_CONFIG_HOME` placement rejects a mismatched shell before writes and
+  canonicalizes trailing-slash/symlink aliases so legacy cleanup cannot delete new units.
+- Relative, foreign-owned, and parent-symlink runtime paths are rejected; a safe
+  `/run/user/$UID` remains available to SSH/non-PAM clients, and derived D-Bus addresses
+  percent-escape reserved and UTF-8 bytes.
+- Scalar destination directories, FIFO writes, response writes, lock setup, and failed
+  CLI-create setup all return errors instead of being masked by later successful cleanup.
 - `keepalive.socket` and `keepalive.service` pass `systemd-analyze verify`.
+
+## Live workstation evidence for 1.1.0
+
+Measured on the development host (Parrot, systemd 257) on 2026-10-01 with the release
+installed through `./scripts/install.sh`, the daemon socket-activated by the real user
+manager, managing one live Orca keep-alive (Konsole service present, no Konsole target).
+
+| Check | Observed |
+|---|---|
+| Install over a running 1.0.0 daemon | `Reloaded 1 running keep-alive(s) on the updated daemon.`; countdown carried over |
+| Second in-place update (control-read fix) | Reloaded again; countdown 1422 s -> 1416 s across the restart |
+| Unit scheduling on the live process | nice 10, `SCHED_BATCH`, idle I/O class, `KillMode=mixed`; timer slack configured (not readable from `/proc` unprivileged) |
+| `keepalive doctor` | All critical checks pass; Konsole and Orca both usable; Orca runtime READY |
+| Control requests after the fix | `status` 40/40, `refresh` 30/30, slowest refresh 619 ms |
+
+Daemon cost on the same machine, 60 s cgroup samples, one ACTIVE Orca target, no client:
+
+| | 1.0.0 | 1.1.0 |
+|---|---:|---:|
+| CPU | 7.41% | **1.21%** |
+| Voluntary wakeups per minute | 586 | **95** |
+| RSS | 8.5 MiB | 9.4 MiB |
+
+Not exercised live for this release: a non-KDE systemd user session, and Konsole delivery
+(the live Konsole service had no monitored target). Those paths are covered by the mocked
+suite and the unchanged 1.0.0 live evidence below.
 
 ## Live workstation evidence for 1.0.0
 
@@ -154,7 +195,7 @@ real one, each polling at roughly 0.8%. Always confirm
 
 - `keepalive doctor` reports all critical checks passing, naming `/run/user/1000 (xdg)` as
   the runtime source and finding 3 Konsole D-Bus services.
-- Bash syntax clean across all 26 shell files.
+- Bash syntax clean across all 45 shell files.
 - No stale command-substitution call sites remain for any of the nine helpers converted to
   return through `REPLY`.
 - Both sites that read `REPLY` twice do so around a deliberate intervening re-set.
@@ -167,7 +208,8 @@ The following still require deliberate runtime qualification rather than being c
 
 1. live Konsole `sendText` injection into a real AI client (delivery is still mock-covered only);
 2. process-tree shapes of every installed AI CLI beyond Claude;
-3. systemd user socket activation under `graphical-session.target` from a cold login;
+3. systemd user socket activation under `sockets.target` from a cold non-KDE/headless
+   login, including migration of an older graphical-session link;
 4. KDE notification delivery;
 5. Nerd Font glyph cell widths in the user's configured Konsole font, including the powerline caps and wedges;
 6. real laptop suspend/resume lifecycle.

@@ -40,9 +40,20 @@ discarded.
 
 ## Why a user service
 
-Konsole targets live on the user's session D-Bus. A root service would create unnecessary identity/session/privilege problems. The units are intentionally installed under `~/.config/systemd/user` and associated with `graphical-session.target`.
+Konsole targets live on the user's session D-Bus, and Orca terminals belong to the same
+user. A root service would create unnecessary identity/session/privilege problems. The
+units are installed under the user manager's effective
+`${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user`.
 
-No `loginctl enable-linger` is needed or recommended.
+The socket is the only enabled unit and is wanted by the standard user
+`sockets.target`, so activation does not depend on KDE or any graphical session. The
+service is static, is `BindsTo`/`PartOf` the socket, and may be activated in desktop,
+SSH, or headless systemd user sessions. A service failure leaves the socket available for
+reactivation; stopping the socket deliberately stops the service before removing the
+FIFO.
+
+No `loginctl enable-linger` is needed for normal login-scoped use, and the installer
+never changes lingering policy.
 
 ## Activation and IPC
 
@@ -54,7 +65,7 @@ ListenFIFO=%t/keepalive/control.fifo
 
 A client operation is intentionally two-part:
 
-1. Create a private data-only request directory in `$XDG_RUNTIME_DIR/keepalive/requests/`.
+1. Create a private data-only request directory in `<selected-runtime>/keepalive/requests/`.
 2. Write the small line `REQUEST <id>` to `control.fifo`.
 
 The service validates/executes the request and writes a response directory.
@@ -193,6 +204,19 @@ snapshot older than `KEEPALIVE_SNAPSHOT_MAX_AGE` or an Orca snapshot older than
 targets that fallback is far cheaper than keeping discovery itself fast. Pre-send
 validation is always live and never consults the snapshot.
 
+That coupling also decides which backends an unattended pass refreshes at all. With no
+client watching, the only consumer of a snapshot is health, and health only uses one that
+is younger than its maximum age. A backend is therefore refreshed unattended only when it
+has a monitored target and its maximum snapshot age reaches the idle interval: by default
+Orca (35 s against 30 s), where the snapshot replaces a live CLI call per target, and not
+Konsole (10 s), whose idle pass used to scan the whole bus for a result nothing read. A
+client's `REFRESH`, and every CLI command, still runs a complete pass first.
+
+Repeated Orca failures - a closed Orca app, or a schema the adapter does not yet accept -
+back periodic Orca discovery off exponentially to at most a minute, because every attempt
+starts the Electron-based CLI. The previous snapshot is kept throughout, and any
+successful pass, including a client's `REFRESH`, ends the backoff.
+
 A pass is also bounded by `KEEPALIVE_DISCOVERY_BUDGET_MS`. Without it, a degraded bus
 blocks the daemon loop, which then overshoots the suspend gap and silently stops
 advancing every countdown. On expiry the pass returns what it has and reports itself
@@ -220,6 +244,46 @@ timer, health, discovery, publication, and cleanup anchors.
 Secondary events are checked before main when both become due on the same tick. The
 secondary prompt is one-shot: it fires once and then records `secondary_done` rather than
 repeating until reconfigured.
+
+### Loop pacing
+
+The daemon does not poll. Each iteration computes the earliest due periodic task - tick,
+health, discovery, index publication, status, flush, cleanup - and blocks in the control
+FIFO read until then, capped at five seconds. A client request still wakes the read at
+once, so IPC latency is unchanged. Anchors are whole monotonic seconds and the deadline
+is computed in milliseconds from the same `/proc/uptime` source.
+
+The one-second tick is planned only while some target is ACTIVE. The tick's elapsed time
+is also how a suspend is detected, so while it runs it must run every second; with no
+countdown running there is nothing to subtract, and the next tick after a planned long
+sleep starts counting afresh instead of reporting a gap. Index publication follows client
+presence: every second while a client watches, and every `KEEPALIVE_STATUS_INTERVAL`
+otherwise, because every request republishes the index before answering and CLI commands
+refresh first. An identical index is not rewritten at all; clients compare content, never
+mtime.
+
+An idle daemon with nothing monitored and no client attached therefore wakes once every
+five seconds instead of five times a second.
+
+### Stopping and updating
+
+TERM, INT, and HUP are recorded, not acted on mid-work. While the loop waits in the control
+read, the trap exits at once - Bash would otherwise resume the read for its whole timeout -
+and anywhere else the loop exits at the top of its next iteration. A delivery in flight
+therefore completes before the process ends: exiting between a message and its Enter left
+half-delivered text that the next daemon could not know about, because the pending-submit
+state is not a checkpoint field. The unit's `KillMode=mixed` signals only the daemon, so the
+helper carrying that delivery is not killed either. The EXIT trap then flushes every dirty
+countdown and writes `state stopped`.
+
+That is what lets an update keep running keep-alives: the installer restarts an active
+daemon after swapping the code, and the new instance recovers every target from its
+checkpoint as it would after any restart. The installer records each target's state
+beforehand, waits for the new daemon to report itself online - recovery publishes the
+index before that - and reports any target that did not come back. A running manager TUI
+holds a descriptor on the entrypoint it was loaded from; when the command it was started as
+resolves to a different file and a new daemon is online, it re-executes that command with
+its original options and restores the selected row.
 
 ### Checkpoint durability
 
@@ -254,7 +318,7 @@ but returns failure to manual IPC callers and never advances main rotation.
 
 ## Runtime recovery
 
-Target state is atomically checkpointed under `$XDG_RUNTIME_DIR`. On same-login
+Target state is atomically checkpointed under the selected runtime directory. On same-login
 restart, the daemon accepts a record only after validating all required fields,
 enums, booleans, numeric/range constraints, target-to-directory binding, the selected
 backend's normalized identity binding, required files, canonical message rotation, and
@@ -287,7 +351,17 @@ second per target. Converting them cut `ka_state_save_target` from 14.75 ms to 5
 
 The cost of the idiom is that `REPLY` is a single shared register: it must be read on the
 line immediately after the call. Where a function legitimately reads it twice, an
-intervening call deliberately re-sets it.
+intervening call deliberately re-sets it. Helpers that have both forms are named in pairs:
+`ka_proc_starttime` prints for tests and one-off callers, `ka_proc_starttime_set` sets
+`REPLY` for loops. The `/proc` classifier, the TUI frame, and the health pass use only the
+`_set` forms; the classifier still resolves `/proc/PID/exe` with `readlink`, but caches the
+result per PID and start time, re-validated against comm and cmdline.
+
+**Atomic writes start one process.** `ka_atomic_temp` creates the temporary file with a
+noclobber (O_EXCL) redirect under a 64-bit random name and relies on the `umask 077` that
+`ka_xdg_init` records, so the rename is the only external command per write; `mktemp` and
+`chmod` used to add two more. An unchanged secondary-message companion is reused rather
+than rewritten on every checkpoint.
 
 **Read-only D-Bus queries prefer `dbus-send` over `qdbus`.** `qdbus6` pays Qt
 initialization on every invocation, measured at 12.8 ms against `dbus-send`'s 2.4 ms.
@@ -305,9 +379,10 @@ Notification timeout/failure is always non-fatal.
 
 ## Persistent profile
 
-Only the one default profile survives reboot under `$XDG_CONFIG_HOME/keepalive/profile`.
+Only the one default profile survives reboot under
+`${XDG_CONFIG_HOME:-$HOME/.config}/keepalive/profile`.
 
-Configuration save transaction:
+Configuration semantics:
 
 ```text
 selected target ← new config
@@ -315,10 +390,20 @@ single profile  ← new config
 other targets   ← unchanged
 ```
 
+The persistent profile directory is staged completely and swapped as one directory. A sole
+rollback directory left by a crash between its two renames is recovered before defaults are
+created, and `mv -T` prevents a concurrent directory from turning the stage into a nested
+child. Target checkpoints atomically reference a versioned secondary-message payload, and a
+reported CONFIGURE failure compensates back to the exact prior target settings. Target main
+messages, the target checkpoint, and the profile remain separate commit points; a process
+crash between them is detectable/recoverable but not one cross-directory atomic transaction.
+
 ## Logs
 
 Each monitored UUID owns one runtime event file under `logs/<UUID>.log`.
 
 The daemon is the writer; TUI/CLI are readers.
 
-Deleting a target deletes its log. Full logout/reboot deletes all runtime logs with the user runtime directory.
+Deleting a target deletes its log. Full logout/reboot deletes runtime logs when the
+selected base is the normal session-managed user runtime; the hardened `/tmp` fallback
+does not claim that lifecycle.

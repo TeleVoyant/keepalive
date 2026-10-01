@@ -3,10 +3,16 @@
 # This one command acts as the TUI client, maintenance CLI, and hidden systemd daemon.
 set -Eeuo pipefail
 
-KEEPALIVE_VERSION='1.0.0'
+KEEPALIVE_VERSION='1.1.0'
 export KEEPALIVE_VERSION
 
 # Resolve symlinks so an installed ~/.local/bin/keepalive can find its lib/ directory.
+# The unresolved path is kept too: it is what an update retargets, so a running TUI
+# re-executes it to pick up a new installation.
+KA_INVOKED_AS=${BASH_SOURCE[0]}
+# Made absolute without resolving symlinks: a relative ./keepalive would otherwise keep
+# naming the old tree through the moved working directory after an update.
+[[ $KA_INVOKED_AS == /* ]] || KA_INVOKED_AS=$PWD/$KA_INVOKED_AS
 KA_ENTRYPOINT=$(readlink -f -- "${BASH_SOURCE[0]}")
 KA_PROJECT_ROOT=${KA_ENTRYPOINT%/*}
 
@@ -29,8 +35,6 @@ source "$KA_PROJECT_ROOT/lib/service.sh"
 source "$KA_PROJECT_ROOT/lib/tui/screen.sh"
 source "$KA_PROJECT_ROOT/lib/tui/wizard.sh"
 source "$KA_PROJECT_ROOT/lib/tui/tui.sh"
-
-ka_xdg_init
 
 # Role: Print command reference for operators and maintainers.
 ka_cli_help() {
@@ -146,7 +150,7 @@ ka_cli_request() {
 # The wizard was previously the only way to create one, which made the product
 # impossible to automate or to exercise end to end without driving a terminal UI.
 ka_cli_create() {
-    local uuid=$1 id req response
+    local uuid=$1 id req response rc=0
     [[ -n $uuid ]] || { ka_error 'usage: keepalive create UUID'; return 2; }
     ka_cli_ensure_service || return 1
     ka_ipc_call REFRESH '' >/dev/null 2>&1 || true
@@ -158,14 +162,16 @@ ka_cli_create() {
         ka_error 'no such discovered terminal session'
         return 1
     fi
-    id=$(ka_ipc_new_request CREATE "$uuid") || return 1
+    ka_ipc_new_request CREATE "$uuid" >/dev/null || return 1
+    id=$KA_IPC_REQUEST_ID
     req=$(ka_ipc_request_dir "$id")
-    mkdir -p "$req/config"
-    ka_profile_copy_to_request "$req/config"
+    mkdir -p "$req/config" \
+        || { rm -rf -- "$req"; ka_error 'could not create request configuration'; return 1; }
+    ka_profile_copy_to_request "$req/config" || { rm -rf -- "$req"; return 1; }
     ka_ipc_signal_request "$id" || { rm -rf -- "$req"; return 1; }
-    response=$(ka_ipc_wait_response "$id")
+    response=$(ka_ipc_wait_response "$id") || rc=$?
     printf '%s\n' "${response#*$'\t'}"
-    [[ $response == OK$'\t'* ]]
+    ((rc == 0)) && [[ $response == OK$'\t'* ]]
 }
 
 # Role: Move one target into an explicit paused or resumed state, idempotently.
@@ -198,9 +204,14 @@ ka_cli_doctor() {
         printf '%-30s WARN (user manager unavailable)\n' 'systemd --user'
     fi
     printf '%-30s %s (%s)\n' 'runtime directory' "$KA_RUNTIME_BASE" "${KA_RUNTIME_SOURCE:-unknown}"
+    if [[ -n ${KA_RUNTIME_REJECTED:-} ]]; then
+        printf '%-30s %s\n' '' "ignored unsafe XDG_RUNTIME_DIR: $KA_RUNTIME_REJECTED"
+    fi
     if [[ ${KA_RUNTIME_SOURCE:-} == fallback ]]; then
         printf '%-30s %s\n' '' 'no session runtime directory found; a running daemon may be elsewhere'
     fi
+
+    ka_dbus_prepare_session_address
 
     ka_service_backend_setting KEEPALIVE_KONSOLE_ENABLED; konsole_setting=$REPLY
     ka_service_backend_setting KEEPALIVE_ORCA_ENABLED; orca_setting=$REPLY
@@ -268,6 +279,8 @@ ka_cli_main() {
         return 1
     fi
 
+    local early_option='' option invalid_early_option='' early_count=0
+    KA_CLI_ARGS=("$@")
     case ${1-} in
         --service)
             shift
@@ -275,19 +288,34 @@ ka_cli_main() {
             ka_service_main
             return
             ;;
-        --version|-V)
-            printf 'keepalive %s\n' "$KEEPALIVE_VERSION"
-            return
-            ;;
-        --help|-h)
-            ka_cli_help
-            return
-            ;;
-        --icons-test)
-            ka_cli_icons_test
-            return
-            ;;
     esac
+
+    # Presentation flags may precede informational modes; those modes do not need HOME,
+    # runtime directories, or a reachable service.
+    for option in "$@"; do
+        case $option in
+            --version|-V|--help|-h|--icons-test)
+                early_option=$option
+                ((early_count += 1))
+                ;;
+            --no-icons|--no-color|--ascii) ;;
+            *) [[ -n $invalid_early_option ]] || invalid_early_option=$option ;;
+        esac
+    done
+    if ((early_count > 0)); then
+        if ((early_count != 1)) || [[ -n $invalid_early_option ]]; then
+            ka_error 'an informational option may only be combined with --no-icons, --no-color, or --ascii'
+            return 2
+        fi
+        case $early_option in
+            --version|-V) printf 'keepalive %s\n' "$KEEPALIVE_VERSION"; return ;;
+            --help|-h) ka_cli_help; return ;;
+            --icons-test) ka_cli_icons_test; return ;;
+        esac
+    fi
+
+    ka_xdg_init || return 1
+    ka_dbus_prepare_session_address
 
     KA_ICONS_ENABLED=1
     KA_COLOR_ENABLED=1
@@ -306,8 +334,8 @@ ka_cli_main() {
         shift
     done
     ka_cli_init_presentation
-    ka_ensure_runtime_dirs
-    ka_profile_init_defaults
+    ka_ensure_runtime_dirs || return 1
+    ka_profile_init_defaults || return 1
 
     case ${args[0]-} in
         '') ka_tui_main ;;

@@ -78,7 +78,14 @@ check_systemd_units() {
         printf 'skip: systemd-analyze is not installed\n'
         return 0
     fi
-    local expected="$HOME/.local/bin/keepalive" created=0
+    local expected="$HOME/.local/bin/keepalive" created=0 systemd_version
+    systemd_version=$(systemd-analyze --version | awk 'NR == 1 { print $2 }')
+    if [[ $systemd_version =~ ^[0-9]+$ ]] && ((systemd_version < 235)); then
+        printf 'FAIL: systemd-analyze %s is older than the supported systemd 235 floor\n' \
+            "$systemd_version" >&2
+        return 1
+    fi
+    printf 'ok  systemd-analyze %s (supported floor: 235)\n' "${systemd_version:-unknown}"
     mkdir -p "$HOME/.local/bin"
     if [[ ! -e $expected && ! -L $expected ]]; then
         ln -s "$ROOT/keepalive" "$expected"

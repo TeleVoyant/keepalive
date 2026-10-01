@@ -9,6 +9,19 @@
 # It needs python3 for pty.fork(). The rest of the suite stays dependency-free, so this
 # file skips cleanly when python3 is unavailable rather than failing the run.
 set -Eeuo pipefail
+
+# Run the entire PTY/service scenario as an ordinary user in root-owned CI containers.
+# Re-executing before test_env_setup lets the unprivileged process create and own every
+# fixture itself, matching the real service's deliberate root refusal.
+if ((EUID == 0)); then
+    if command -v runuser >/dev/null 2>&1 && id nobody >/dev/null 2>&1; then
+        exec runuser -u nobody -- env PATH="$PATH" bash "${BASH_SOURCE[0]}"
+    fi
+    printf '# skip: an unprivileged account runner is required for the PTY service test\n'
+    printf '# 0 assertions passed\n'
+    exit 0
+fi
+
 source "${BASH_SOURCE[0]%/*}/testlib.sh"
 test_env_setup
 

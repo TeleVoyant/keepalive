@@ -5,7 +5,8 @@ are reaching for.
 
 **Per-keep-alive settings** - messages, intervals, delivery mode, notifications - are
 owned by the daemon and edited through the TUI wizard or the CLI. They live in each
-target's runtime state and in the persistent profile at `~/.config/keepalive`. Nothing in
+target's runtime state and in the persistent profile at
+`${XDG_CONFIG_HOME:-$HOME/.config}/keepalive`. Nothing in
 this document changes them.
 
 **Environment variables** - everything below - tune the daemon's own behavior: how often
@@ -45,10 +46,10 @@ client shell.
 | Variable | Default | Meaning |
 |---|---:|---|
 | `KEEPALIVE_DISCOVERY_INTERVAL` | `3` | Seconds between full discovery passes **while a client is attached**. Discovery queries each enabled terminal backend; it is what populates the `AVAILABLE` rows a client displays. |
-| `KEEPALIVE_IDLE_DISCOVERY_INTERVAL` | `30` | Seconds between discovery passes when no client has been seen recently. Discovery exists to serve clients, so with nobody watching it backs off. This is the single largest lever on idle CPU. |
+| `KEEPALIVE_IDLE_DISCOVERY_INTERVAL` | `30` | Seconds between discovery passes when no client has been seen recently. Discovery exists to serve clients, so with nobody watching it backs off - and it then runs only for a backend that has a monitored target and whose snapshot maximum age (below) reaches this interval, since health is the only remaining reader. With the defaults that is Orca, not Konsole. |
 | `KEEPALIVE_CLIENT_PRESENCE_TTL` | `20` | Seconds a client is still considered attached after its last request. Governs the switch between the two cadences above. |
 | `KEEPALIVE_HEALTH_INTERVAL` | `2` | Seconds between health checks of **monitored** targets. Independent of discovery: a monitored target is validated on this cadence whether or not anyone is watching. |
-| `KEEPALIVE_STATUS_INTERVAL` | `15` | Seconds between published status index refreshes. |
+| `KEEPALIVE_STATUS_INTERVAL` | `15` | Seconds between `service.state` writes, and between periodic index publications while no client is attached (every request republishes the index anyway, and an attached client gets it every second). |
 | `KEEPALIVE_CHECKPOINT_INTERVAL` | `30` | Seconds between flushes of ticked-down countdowns to disk. A tick marks a target dirty rather than rewriting its checkpoint every second; transitions and deliveries still checkpoint immediately, and a clean shutdown always flushes. Raising this lowers I/O and widens the worst-case staleness after a `kill -9`. |
 | `KEEPALIVE_SUSPEND_GAP` | `2` | Seconds of unaccounted elapsed time above which the scheduler treats the gap as a suspend rather than as normal drift, and preserves countdowns instead of burning them down. |
 | `KEEPALIVE_CLEANUP_INTERVAL` | `300` | Seconds between sweeps of abandoned request directories and stale runtime files. |
@@ -71,7 +72,7 @@ client shell.
 | Variable | Default | Meaning |
 |---|---:|---|
 | `KEEPALIVE_SUBMIT_SEQ` | `\r` | The byte sequence used to submit a line. Change only if your AI CLI needs something other than a carriage return. |
-| `KEEPALIVE_SEND_GAP` | `0.15` | Seconds between sending the message text and sending the submit sequence. A decimal duration, not an integer. The gap exists because some AI CLIs debounce input and would otherwise submit before rendering the text. A malformed value warns and falls back. |
+| `KEEPALIVE_SEND_GAP` | `0.15` | Seconds between sending the message text and sending the submit sequence. A decimal duration, not an integer. The gap exists because some AI CLIs debounce input and would otherwise submit before rendering the text. A malformed value warns and falls back; a value of 10 seconds or more warns and is capped at 10, because a stop waits for the delivery in flight and must finish well inside systemd's stop timeout. |
 | `KEEPALIVE_ATOMIC_SUBMIT` | `0` | Set to `1` to send text and submit in a single `sendText` call. This removes the partial-delivery state entirely, but defeats the debounce protection above, so it is opt-in. |
 
 These three delivery knobs apply to Konsole. Orca exposes an atomic text-plus-Enter
@@ -94,7 +95,7 @@ next attempt completes the pending line instead of repeating it.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `KEEPALIVE_PER_USER_RUNTIME` | `/run/user/$UID` | The per-user runtime directory checked when `XDG_RUNTIME_DIR` is unset. See [Runtime directory resolution](#runtime-directory-resolution). |
+| `KEEPALIVE_PER_USER_RUNTIME` | `/run/user/$UID` | The per-user runtime directory checked when `XDG_RUNTIME_DIR` is unset or rejected as unsafe. See [Runtime directory resolution](#runtime-directory-resolution). |
 | `KEEPALIVE_QDBUS` | autodetected | Path to the `qdbus` binary. Mainly a test seam; the suite points it at a mock. **Setting this also disables the `dbus-send` fast path below**, so every call is routed through the one binary you named - which is what makes the mock authoritative in tests, and what makes this a poor thing to set in production. |
 | `KEEPALIVE_DBUS_SEND` | autodetected | Path to `dbus-send`, preferred over `qdbus` for hot-path calls because it starts in roughly 2.4 ms against `qdbus6`'s 12.8 ms of Qt initialization. |
 | `KEEPALIVE_ORCA_CLI` | autodetected | Explicit path to Orca's CLI. Auto-detection looks for `orca-ide` and common install paths; it deliberately never executes bare `orca` on Linux. |
@@ -108,15 +109,28 @@ next attempt completes the pending line instead of repeating it.
 The daemon and its clients must agree on one runtime directory or they cannot find each
 other. Resolution is deliberate and reported by `keepalive doctor` as a named source:
 
-1. **`xdg`** - `XDG_RUNTIME_DIR` is set and the directory exists. The normal desktop case.
-2. **`per-user`** - `KEEPALIVE_PER_USER_RUNTIME` (default `/run/user/$UID`) exists, is not
-   a symlink, and is owned by you. This covers SSH sessions where `pam_systemd` did not
-   export `XDG_RUNTIME_DIR` but the directory is present.
+1. **`xdg`** - `XDG_RUNTIME_DIR` is absolute, owned, private (not group/world writable),
+   and has no symlinked path component.
+   This is the normal desktop and systemd user-session case. Unsafe inherited values are
+   ignored.
+2. **`per-user`** - `KEEPALIVE_PER_USER_RUNTIME` (default `/run/user/$UID`) exists, is
+   owned by you, private, and has no symlinked path component. This covers SSH sessions where
+   `pam_systemd` did not export `XDG_RUNTIME_DIR` but the directory is present.
 3. **`fallback`** - `/tmp/keepalive-$UID`. Used only when neither of the above applies.
    Because `/tmp` is shared, this path alone is ownership-checked and permission-hardened
    before use.
 
-All runtime state is created under `umask 077`.
+All runtime state is created under `umask 077`. If `DBUS_SESSION_BUS_ADDRESS` is absent
+but the selected runtime contains the standard `bus` socket, the daemon derives a
+percent-escaped `unix:path=<selected-runtime>/bus` address; an explicit address is never
+overwritten. A manually supplied, otherwise safe `XDG_RUNTIME_DIR` must still name the
+same runtime as systemd's `%t`, or clients and the socket unit will address different FIFOs.
+
+The installer likewise uses the systemd user manager's effective `HOME`,
+`XDG_CONFIG_HOME`, and runtime directory. The shell's effective values must match; merely
+unsetting a shell variable does not make a manager-only custom value safe. Installation
+stops before replacing files on a mismatch. Set custom XDG paths in the
+login/user-manager environment, not only in the one shell that runs the installer.
 
 ## Presentation
 

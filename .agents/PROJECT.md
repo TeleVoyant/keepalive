@@ -9,7 +9,7 @@ explicit Orca terminal handle.
 The product is intentionally:
 
 - per-user, not root or machine-wide;
-- bound to a graphical login session, with no user lingering;
+- bound to the per-user systemd manager lifecycle, with no lingering enabled automatically;
 - backed by explicit Konsole and Orca adapters, while the manager TUI can be launched elsewhere;
 - multi-target, with independent settings, timers, state, and logs;
 - attachable, so closing a client does not stop the daemon or its timers;
@@ -108,7 +108,8 @@ Runtime requirements:
 - Linux with readable `/proc` metadata;
 - Bash 5 or newer (`set -Eeuo pipefail` is used throughout entry scripts/tests);
 - at least one backend: KDE Konsole with qdbus, or Orca with `orca-ide` plus `jq`;
-- `systemd --user` for supported installation/socket activation;
+- a systemd user manager (systemd 235+) for installation and socket activation, without
+  a KDE or graphical-session dependency;
 - `flock`, GNU `timeout`, coreutils/findutils-style utilities, `sed`, `grep`, `sort`, `awk`,
   `readlink`, `tput`, and `stty`;
 - optional `notify-send` and optional Nerd Font glyph support.
@@ -155,9 +156,10 @@ developer check.
 | `CONTRIBUTING.md` | Conventions the automated checks enforce. |
 | `LICENSE` | MIT. |
 
-All runtime modules are sourced eagerly even for most CLI roles. `ka_xdg_init` is
-called at entrypoint load time. Non-early commands then initialize presentation,
-runtime directories, and profile defaults before dispatch.
+All runtime modules are sourced eagerly. Direct informational modes (`--version`,
+`--help`, and `--icons-test`) return without requiring HOME or runtime state. Service and
+normal client commands initialize XDG paths only after those early modes are resolved,
+then initialize runtime directories and profile defaults before dispatch.
 
 ## Persistent and runtime layout
 
@@ -179,7 +181,7 @@ ${XDG_CONFIG_HOME:-$HOME/.config}/keepalive/
 Session-scoped state:
 
 ```text
-${XDG_RUNTIME_DIR:-/tmp/keepalive-$UID}/keepalive/
+<selected-runtime>/keepalive/
 ├── control.fifo
 ├── manager.lock
 ├── index.tsv
@@ -187,7 +189,8 @@ ${XDG_RUNTIME_DIR:-/tmp/keepalive-$UID}/keepalive/
 ├── discovery/                  currently unused as on-disk cache
 ├── targets/<safe UUID>/
 │   ├── state.tsv
-│   ├── secondary_message
+│   ├── secondary_message.<pid>.<random>  version named by state.tsv
+│   ├── secondary_message                legacy checkpoints only
 │   └── messages/001, 002, ...
 ├── quarantine/<safe basename>.<unique suffix>/
 │   ├── record
@@ -201,14 +204,16 @@ ${XDG_RUNTIME_DIR:-/tmp/keepalive-$UID}/keepalive/
 
 `KA_STATE_HOME` is resolved from `XDG_STATE_HOME` but is not otherwise used.
 Target bindings and logs deliberately live in the runtime directory, not the
-persistent config directory.
+persistent config directory. The selected runtime is a safe, private
+`$XDG_RUNTIME_DIR`, then a safe, private `/run/user/$UID`, then the hardened
+`/tmp/keepalive-$UID` fallback.
 
 ## Supported environment knobs
 
 | Variable | Meaning | Default |
 |---|---|---|
 | `XDG_CONFIG_HOME` | Persistent config base | `$HOME/.config` |
-| `XDG_RUNTIME_DIR` | Login-scoped runtime base | `/tmp/keepalive-$UID` fallback |
+| `XDG_RUNTIME_DIR` | Preferred login-scoped runtime base when absolute, owned, private, and free of symlinked components | `/run/user/$UID`, then `/tmp/keepalive-$UID` fallback |
 | `NO_COLOR` | Disable current client's colors when non-empty | unset |
 | `KEEPALIVE_QDBUS` | Explicit qdbus override; also pins the qdbus transport, which is how tests inject their mock | auto-detect |
 | `KEEPALIVE_DBUS_SEND` | Explicit dbus-send override | auto-detect |
@@ -310,7 +315,8 @@ name/pattern without adding another order slot.
     a `printf` rewrite.
 30. Discovery is bounded, and only a complete backend pass replaces that backend's snapshot.
 31. A message delivered without its submit is completed, never re-sent.
-32. The runtime base is verified before use when it is not an XDG runtime directory.
+32. Every session-managed runtime candidate must be absolute, owned, and non-symlinked;
+    the predictable `/tmp` fallback receives additional creation/hardening checks.
 33. The secondary prompt fires once per arming; only CONFIGURE re-arms it.
 34. `e` is a one-shot action, not a mode toggle; `E` is the persistent mode change.
 35. Resolve the runtime base by precedence and record the source; never assume
@@ -335,3 +341,11 @@ name/pattern without adding another order slot.
     must not leak into scheduler/state-machine code.
 46. An Orca schema mismatch is transient and fail-closed. Never convert missing fields
     into definitive identity loss, and never erase another backend's discovery snapshot.
+47. The daemon never polls: it sleeps in the FIFO read until the next due task (5 s cap),
+    ticks every second only while a target is ACTIVE, and republishes the index every
+    second only while a client is attached.
+48. Health cadence does not depend on client presence; only discovery and index
+    publication back off when nobody is watching.
+49. A stop finishes the delivery in flight before exiting (`KillMode=mixed`, deferred
+    TERM); an update restarts the daemon this way and verifies every target reloads.
+50. `clients.seen` is data (bare epoch digits), never screen output.

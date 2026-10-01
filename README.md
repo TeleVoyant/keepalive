@@ -1,10 +1,10 @@
 # Keep Alive Manager
 
-Keep Alive Manager is a **KDE/Wayland-friendly per-user keep-alive service and attachable terminal UI** for long-running terminal AI clients in Konsole and Orca-managed terminals.
+Keep Alive Manager is a **distribution- and desktop-neutral Linux per-user keep-alive service and attachable terminal UI** for long-running terminal AI clients in Konsole and Orca-managed terminals.
 
 It evolves the original single-session Bash keep-alive into one persistent manager that can safely control multiple Claude Code, Codex, Kimi, and other recognized AI CLI sessions at the same time. The daemon owns timers and target state. Running `keepalive` from any terminal opens a disposable TUI client; closing that TUI does **not** stop active keep-alives.
 
-Version: **1.0.0** · [Changelog](CHANGELOG.md) · [MIT licensed](LICENSE)
+Version: **1.1.0** · [Changelog](CHANGELOG.md) · [MIT licensed](LICENSE)
 
 ## Documentation
 
@@ -13,7 +13,7 @@ Version: **1.0.0** · [Changelog](CHANGELOG.md) · [MIT licensed](LICENSE)
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Process model, identity, state schemas, IPC, scheduler, recovery |
 | [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) | Every environment variable, with defaults and when to change them |
 | [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) | Symptom-first fixes, from `unknown` session names to CPU cost |
-| [`docs/TESTING.md`](docs/TESTING.md) | What the 389 assertions cover, and how to add one |
+| [`docs/TESTING.md`](docs/TESTING.md) | What the 1040 assertions cover, and how to add one |
 | [`docs/MAINTENANCE.md`](docs/MAINTENANCE.md) | Safety invariants, module map, live checklist, release flow |
 | [`docs/VALIDATION.md`](docs/VALIDATION.md) | Evidence recorded for this release |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Conventions the automated checks enforce |
@@ -26,7 +26,8 @@ Version: **1.0.0** · [Changelog](CHANGELOG.md) · [MIT licensed](LICENSE)
 - Never automatically reattach an old keep-alive to a replacement terminal.
 - Preserve countdowns across pause, suspend-like scheduler gaps, and daemon restart in the same login session.
 - Keep unavailable targets visible until the user explicitly deletes them.
-- Make every keep-alive's event history independent and runtime-only; logs disappear at full logout/reboot.
+- Make every keep-alive's event history independent and runtime-only; logs follow the
+  selected runtime directory (normally removed at full logout/reboot).
 - Keep one persistent default profile. Saving configuration updates the selected keep-alive and the profile, but **never mutates other active keep-alives**.
 - Support Nerd Font UI icons while providing `--no-icons`, `--no-color`, and `--ascii` client modes.
 - Keep the implementation maintainable Bash: focused modules, comments describing every function's role, data-only state files, and isolated mock-backed tests.
@@ -59,7 +60,9 @@ Version: **1.0.0** · [Changelog](CHANGELOG.md) · [MIT licensed](LICENSE)
            `keepalive` TUI             second TUI client
 ```
 
-The FIFO carries only short request IDs. Long messages and configuration values are written into private request directories under `$XDG_RUNTIME_DIR`; the service validates them as **data**, never shell code.
+The FIFO carries only short request IDs. Long messages and configuration values are
+written into private request directories under the runtime base selected below; the
+service validates them as **data**, never shell code.
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full state and IPC model.
 
@@ -72,7 +75,8 @@ Runtime requirements:
 - at least one managed-terminal backend:
   - **Konsole:** KDE Konsole plus a working `qdbus6`, `qdbus-qt6`, `qdbus`, or compatible qdbus binary;
   - **Orca:** a running Orca installation exposing `orca-ide`, plus `jq`.
-- `systemd --user` for normal service/socket activation.
+- a systemd user manager (systemd 235 or newer) for normal service/socket activation;
+  no particular desktop environment is required.
 - `flock` from util-linux.
 - GNU `timeout` from coreutils.
 - normal core utilities (`grep`, `sed`, `sort`, `tail`, `find`, `readlink`, `cp`, `mv`).
@@ -104,7 +108,7 @@ The installer creates:
 ```text
 ~/.local/share/keepalive-manager/   installed source/tests/docs
 ~/.local/bin/keepalive              symlink to installed entrypoint
-~/.config/systemd/user/
+${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/
   keepalive.socket
   keepalive.service
 ```
@@ -116,7 +120,20 @@ systemctl --user daemon-reload
 systemctl --user enable --now keepalive.socket
 ```
 
-`keepalive.socket` is bound to the graphical user session. **Do not enable user lingering** for this project; there is nothing useful to manage after the graphical/Konsole session has ended.
+`keepalive.socket` is enabled under the standard per-user `sockets.target`. It therefore
+works in KDE, GNOME, other desktop sessions, and headless/SSH logins that provide a
+systemd user manager. The service itself is static and starts only through the socket (or
+an explicit manual start); stopping the socket also stops the daemon and removes its
+FIFO.
+
+The installer first verifies that the user manager is reachable, uses that manager's
+effective `XDG_CONFIG_HOME`, and removes obsolete `graphical-session.target` links left
+by older releases. The invoking shell and user manager must resolve the same effective
+`HOME`, `XDG_CONFIG_HOME`, and runtime directory so clients and systemd cannot silently
+split across trees. The installed tree records its canonical unit root so a later custom-XDG
+move can clean the previous root safely. It does not enable lingering. A normal user manager stops at final logout;
+enable lingering yourself only if the managed Orca/backend processes are also intended
+to remain usable without a login session.
 
 Verify installation:
 
@@ -206,8 +223,8 @@ failure, both on the CLI and in the TUI.
 
 The client finds the daemon through the runtime directory, resolved in this order:
 
-1. `$XDG_RUNTIME_DIR`
-2. `/run/user/$UID` when it is a directory you own
+1. `$XDG_RUNTIME_DIR` when it is absolute, owned, private, and contains no symlinked components
+2. `/run/user/$UID` when it is an owned, private directory with no symlinked components
 3. `/tmp/keepalive-$UID`
 
 An interactive SSH login normally gets `XDG_RUNTIME_DIR` from `pam_systemd`. Step 2 covers
@@ -218,8 +235,10 @@ chose it.
 
 Two limits are worth knowing when working remotely:
 
-- The daemon is `PartOf=graphical-session.target` and user lingering is intentionally not
-  enabled, so it stops when the graphical session—and its managed terminals—ends.
+- The socket follows the systemd user manager, not a graphical-session target. Without
+  lingering, the manager and its runtime directory normally stop at final logout. With
+  lingering, ensure the selected terminal backend is itself usable outside a login
+  session.
 - If a daemon is killed outright, its control FIFO can outlive it. Clients open the FIFO
   read/write so this cannot hang them; a request simply times out after
   `KEEPALIVE_RESPONSE_TIMEOUT_MS`.
@@ -229,7 +248,7 @@ Two limits are worth knowing when working remotely:
 | Variable | Meaning | Default |
 |---|---|---|
 | `KEEPALIVE_ATOMIC_SUBMIT` | Send message and Enter in one `sendText`, removing the partial-delivery window. Opt-in because some AI CLIs debounce input. | `0` |
-| `KEEPALIVE_IDLE_DISCOVERY_INTERVAL` | Discovery cadence when nothing is monitored and no client is watching | `30` |
+| `KEEPALIVE_IDLE_DISCOVERY_INTERVAL` | Discovery cadence when no client is watching, for backends whose snapshot health reuses (Orca by default) | `30` |
 | `KEEPALIVE_DISCOVERY_BUDGET_MS` | Wall-clock budget for one discovery pass | `1000` |
 | `KEEPALIVE_VALIDATION_STRIKES` | Consecutive unreachable checks before a target is given up on | `5` |
 | `KEEPALIVE_LOG_MAX_LINES` | Retained event-log lines per target | `2000` |
@@ -382,7 +401,7 @@ The preservation event is recorded in each applicable target's event log.
 
 ### Daemon crash/restart
 
-The daemon checkpoints target countdowns under `$XDG_RUNTIME_DIR`. If systemd
+The daemon checkpoints target countdowns under the selected runtime directory. If systemd
 restarts it in the same login session, the service first validates the complete
 checkpoint structure and then validates the original live identity before
 recovering the stored remaining timers. Malformed, inconsistent, or symlinked
@@ -394,6 +413,31 @@ recovery/health validation is deferred without making the target sticky UNAVAILA
 follows the normal sticky-unavailable rule.
 
 No wall-clock catch-up is performed while the daemon was absent.
+
+### Updating while keep-alives are running
+
+Re-running `./scripts/install.sh` over an existing installation keeps every running
+keep-alive. The installer records each monitored target and its state, swaps in the new
+code, and restarts an active daemon. The stop is graceful: the daemon finishes any
+delivery already in flight, so a message is never cut off between its text and its
+Enter, then flushes every countdown and exits. The new daemon reloads each target from
+those checkpoints, revalidating its live identity first. The installer then waits for
+the new daemon and reports the result:
+
+```text
+Restarting the running daemon to load the updated code.
+Reloaded 2 running keep-alive(s) on the updated daemon.
+```
+
+A target that did not come back is listed by name with a pointer to `quarantine/` and
+`keepalive doctor`. A daemon that was started by hand rather than by systemd cannot be
+restarted by the installer; it is reported with the `kill` command that stops it
+gracefully so the socket can start the updated one.
+
+An open manager TUI notices the update on its own: once the installed command resolves
+to new code and the daemon has restarted onto it, the TUI restarts itself in place and
+returns to the row that was selected. It never does this mid-wizard, and a TUI started
+from a checkout that the update did not touch keeps running as it is.
 
 ## Target identity and no automatic reattachment
 
@@ -473,7 +517,7 @@ Built-in signatures currently attempt to recognize:
 No finite built-in registry can guarantee detection of every current/future/wrapped AI client. Extend it without code changes using:
 
 ```text
-~/.config/keepalive/classifiers.tsv
+${XDG_CONFIG_HOME:-$HOME/.config}/keepalive/classifiers.tsv
 ```
 
 Format:
@@ -572,14 +616,16 @@ systemctl --user stop keepalive.service
 
 The next request to the FIFO can activate it again through `keepalive.socket`.
 
-Do **not** install a root unit in `/etc/systemd/system`, and do not enable lingering for this service.
+Do **not** install a root unit in `/etc/systemd/system`. Lingering is optional and is
+never changed by the installer; use it only when the managed terminal agents are also
+designed to survive logout.
 
 ## Runtime/config layout
 
 Persistent, survives reboot:
 
 ```text
-${XDG_CONFIG_HOME:-~/.config}/keepalive/
+${XDG_CONFIG_HOME:-$HOME/.config}/keepalive/
 ├── profile/
 │   ├── main_interval
 │   ├── secondary_enabled
@@ -591,17 +637,17 @@ ${XDG_CONFIG_HOME:-~/.config}/keepalive/
 └── classifiers.tsv        optional extension file
 ```
 
-Runtime-only, removed with the user runtime directory on full logout/reboot:
+Runtime-only, under the directory printed by `keepalive doctor`:
 
 ```text
-$XDG_RUNTIME_DIR/keepalive/
+<selected-runtime>/keepalive/
 ├── control.fifo
 ├── manager.lock
 ├── index.tsv
 ├── service.state
 ├── targets/<UUID>/
 │   ├── state.tsv
-│   ├── secondary_message
+│   ├── secondary_message.<pid>.<nonce>  referenced by state.tsv
 │   └── messages/
 ├── quarantine/<record>.<suffix>/
 │   ├── record
@@ -631,7 +677,9 @@ Each keep-alive has a separate runtime event log. Events include:
 - target loss/unavailability;
 - send failures.
 
-Deleting a keep-alive deletes its runtime event history. Full logout/reboot removes all runtime history automatically.
+Deleting a keep-alive deletes its runtime event history. Full logout/reboot removes it
+automatically when the selected runtime is the normal session-managed directory; the
+explicit `/tmp` fallback has a different lifecycle and is permission-hardened instead.
 
 ## Notifications
 
@@ -769,7 +817,7 @@ Every Bash function is expected to have an adjacent `# Role:` comment. A test en
 - Discovery is polling-based (default 3 seconds) rather than native D-Bus signal subscription.
 - AI classification is best-effort and extensible, not mathematically exhaustive.
 - Simple Bash string-length truncation cannot perfectly model every complex Unicode grapheme/cell-width case. `--no-icons`/`--ascii` provide compatibility paths.
-- The automated suite drives mocked qdbus and Orca CLI endpoints. Those mocks are stand-ins, not proof against a real desktop runtime. Release 1.0.0's Konsole path was validated live; Orca discovery has been qualified read-only against the installed CLI, while live delivery should be checked in a disposable Orca agent before a release.
+- The automated suite drives mocked qdbus and Orca CLI endpoints. Those mocks are stand-ins, not proof against real backend and systemd-user-manager runtimes. Release 1.0.0's Konsole path was validated live. For 1.1.0 the installed daemon ran on the development host managing a live Orca keep-alive, including reloading it across two in-place updates; Orca discovery is qualified read-only against the installed CLI, and live delivery should still be checked in a disposable Orca agent.
 
 ## Uninstall
 
@@ -777,7 +825,12 @@ Every Bash function is expected to have an adjacent `# Role:` comment. A test en
 ./scripts/uninstall.sh
 ```
 
-The uninstaller removes the units, installed source tree, and command symlink. It intentionally leaves the persistent profile at `~/.config/keepalive` so preferences are not destroyed accidentally.
+The uninstaller removes the units, installed source tree, and command symlink. It
+intentionally leaves the persistent profile at
+`${XDG_CONFIG_HOME:-$HOME/.config}/keepalive` so preferences are not destroyed
+accidentally. By default it aborts before file removal unless the user manager confirms
+both units are inactive. `--force` is available only for recovery after you have manually
+confirmed that no old daemon is running.
 
 ## Changelog
 

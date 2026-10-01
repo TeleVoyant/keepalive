@@ -251,10 +251,16 @@ ka_tui_render_too_small() {
 # Role: Derive a safe content width by reserving frame/label cells, never returning a
 # zero or negative budget that would make truncation print the untruncated string.
 ka_tui_field_width() {
+    ka_tui_field_width_set "$@"
+    printf '%d' "$REPLY"
+}
+
+# Role: Put the usable field width after reserved columns, never below a minimum, in REPLY.
+ka_tui_field_width_set() {
     local reserved=${1:-0} minimum=${2:-8} width
     width=$((${KA_TUI_COLS:-80} - reserved))
     ((width < minimum)) && width=$minimum
-    printf '%d' "$width"
+    REPLY=$width
 }
 
 # Role: Read one logical key, decoding arrow/Page/Home/End sequences byte by byte.
@@ -348,9 +354,15 @@ ka_tui_status_colors() {
 # Role: Report how many terminal cells ka_tui_status occupies so callers can pad columns.
 # The icon adds a glyph plus a space that the bare status word does not account for.
 ka_tui_status_width() {
-    local status=$1 width=${#1}
+    ka_tui_status_width_set "$1"
+    printf '%d' "$REPLY"
+}
+
+# Role: Put the rendered cell width of a status badge, icon included, in REPLY.
+ka_tui_status_width_set() {
+    local width=${#1}
     [[ -n ${KA_I_ACTIVE:-} ]] && width=$((width + 2))
-    printf '%d' "$width"
+    REPLY=$width
 }
 
 # Role: Choose timer urgency styling from the percentage of configured time remaining.
@@ -417,19 +429,27 @@ ka_tui_sanitize() {
 # Width is counted in characters, not terminal cells; wide CJK/emoji still under-count.
 # See docs/MAINTENANCE.md for that documented limitation.
 ka_tui_truncate() {
+    ka_tui_truncate_set "$@"
+    printf '%s' "$REPLY"
+}
+
+# Role: Put display text sanitized and cut to a cell budget, with an ellipsis, in REPLY.
+# The manager frame truncates several fields per row once a second; the printing form
+# above costs a fork per call when captured, so the frame uses this one.
+ka_tui_truncate_set() {
     local text=${1-} width=$2 ellipsis=${KA_G_ELL:-…}
     text=${text//$'\t'/ }
     text=${text//$'\n'/ }
     text=${text//$'\r'/ }
     text=${text//[[:cntrl:]]/}
     if ((width <= 0)); then
-        return 0
+        REPLY=''
     elif ((${#text} <= width)); then
-        printf '%s' "$text"
+        REPLY=$text
     elif ((width <= ${#ellipsis})); then
-        printf '%.*s' "$width" "$text"
+        REPLY=${text:0:width}
     else
-        printf '%.*s%s' "$((width - ${#ellipsis}))" "$text" "$ellipsis"
+        REPLY=${text:0:width - ${#ellipsis}}$ellipsis
     fi
 }
 
@@ -487,10 +507,12 @@ ka_tui_toast() {
 # Role: Print and expire the current transient action-result message.
 ka_tui_render_toast() {
     local now
-    now=$(ka_now_epoch)
+    printf -v now '%(%s)T' -1
     # A backward wall-clock correction must expire the toast rather than pin it forever.
     if [[ -n ${KA_TUI_TOAST:-} ]] && ((${KA_TUI_TOAST_UNTIL:-0} >= now && KA_TUI_TOAST_UNTIL - now <= 2)); then
-        printf '\033[K\n  %s%s%s\033[K\n' "$KA_CYAN" "$(ka_tui_truncate "$KA_TUI_TOAST" "$(ka_tui_field_width 4)")" "$KA_RESET"
+        ka_tui_field_width_set 4
+        ka_tui_truncate_set "$KA_TUI_TOAST" "$REPLY"
+        printf '\033[K\n  %s%s%s\033[K\n' "$KA_CYAN" "$REPLY" "$KA_RESET"
     else
         KA_TUI_TOAST=''
     fi

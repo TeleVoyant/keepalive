@@ -87,10 +87,10 @@ managing your local terminal.
 
 Two things commonly go wrong.
 
-**`XDG_RUNTIME_DIR` is not exported.** Many SSH sessions do not run `pam_systemd`, so the
-variable is missing and the client would otherwise look in the wrong place. Resolution
-falls back to `/run/user/$UID` when it exists and is owned by you - confirm which source
-was used:
+**`XDG_RUNTIME_DIR` is missing or unsafe.** Many SSH sessions do not run `pam_systemd`,
+so the variable is missing; inherited `sudo`/`su` environments can also contain a
+relative, foreign-owned, group/world-writable, or symlinked value. Resolution rejects unsafe values and falls
+back to `/run/user/$UID` when it is safe. Confirm which source was used:
 
 ```bash
 keepalive doctor | grep 'runtime directory'
@@ -199,13 +199,37 @@ There should be exactly one. Orphans are usually left by ad-hoc scripts that sta
 and systemd adopts them.
 
 **Then check the cadence.** Idle cost is dominated by discovery, which is bounded by
-`KEEPALIVE_DISCOVERY_BUDGET_MS` per pass and backs off to
-`KEEPALIVE_IDLE_DISCOVERY_INTERVAL` when no client is attached. If it is not backing off,
-something is holding client presence open - `KEEPALIVE_CLIENT_PRESENCE_TTL` decides how
-long after the last request a client still counts as attached.
+`KEEPALIVE_DISCOVERY_BUDGET_MS` per pass and, when no client is attached, backs off to
+`KEEPALIVE_IDLE_DISCOVERY_INTERVAL` - and only for a backend whose monitored targets reuse
+its snapshot. If it is not backing off, something is holding client presence open:
+`clients.seen` in the runtime directory holds the last stamp from an attached TUI, and
+`KEEPALIVE_CLIENT_PRESENCE_TTL` decides how long after it a client still counts as
+attached. With nothing monitored and no client, the daemon should wake only about once
+every five seconds.
 
 See [Tuning for lower CPU](CONFIGURATION.md#tuning-for-lower-cpu) for a drop-in that
 trades list freshness for idle cost.
+
+---
+
+## A keep-alive did not come back after an update
+
+The installer prints which ones. Each was either quarantined - look in
+`$XDG_RUNTIME_DIR/keepalive/quarantine/` for the record and its `quarantine_reason` - or
+found its terminal gone and is listed as `UNAVAILABLE`, which the installer reports as a
+state change rather than a loss. Downgrading to a release older than versioned
+secondary-message files is a known exception: such a release cannot read current
+checkpoints and quarantines them, so update forward instead.
+
+If the installer warned that a daemon was **not started by systemd**, it is still running
+the previous code; stop it with the `kill` command it printed (it saves every countdown on
+the way out) and any `keepalive` command then starts the updated daemon. The installer
+only names a process that is yours and holds the runtime's `manager.lock` open, so the pid
+it prints is the daemon, never a process that merely reused a stale pid.
+
+If it warned that the restarted daemon **has not reported online**, recovery is still
+revalidating targets - each one is checked live before the daemon reports itself online -
+or the unit failed; `systemctl --user status keepalive.service` tells which.
 
 ---
 
@@ -260,12 +284,15 @@ If it disagrees with `git describe`, re-run `./scripts/install.sh`.
 Corrupt runtime state is moved aside rather than loaded, so one bad file cannot take down
 the daemon:
 
-```bash
-ls "${XDG_RUNTIME_DIR:-/run/user/$UID}/keepalive/quarantine/"
-```
+Run `keepalive doctor`, take the exact `runtime directory` it prints, and inspect
+`<that-directory>/keepalive/quarantine/`. Do not interpolate an unverified
+`XDG_RUNTIME_DIR`; the resolver may have rejected it or selected the hardened `/tmp`
+fallback.
 
 Each entry records why it was rejected. The affected target must be recreated. Runtime
-state is intentionally not persistent across logout, so this is never a permanent loss.
+state is intentionally non-durable. A normal session-managed runtime disappears at final
+logout; the hardened `/tmp` fallback can physically remain until reboot or cleanup, but it
+must not be treated as persistent state.
 
 ---
 

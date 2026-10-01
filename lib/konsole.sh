@@ -2,16 +2,23 @@
 # Konsole D-Bus discovery, identity validation, and input delivery.
 
 # Role: List /Sessions/N object paths exported by one Konsole D-Bus service.
+# Matching is done with builtin regexes: this runs for every Konsole service on every
+# discovery pass, and the grep pipelines it replaced cost two or three processes each.
 ka_konsole_session_paths() {
-    local service=$1 xml name
+    local service=$1 xml output line node_re='<node name="([0-9]+)"' path_re='(/Sessions/[0-9]+)$'
     if ka_dbus_use_send; then
         xml=$(ka_dbus_send_scalar "$service" /Sessions org.freedesktop.DBus.Introspectable.Introspect 2>/dev/null) || return 0
-        while IFS= read -r name; do
-            [[ -n $name ]] && printf '/Sessions/%s\n' "$name"
-        done < <(grep -oE '<node name="[0-9]+"' <<<"$xml" | grep -oE '[0-9]+' || true)
+        while [[ $xml =~ $node_re ]]; do
+            printf '/Sessions/%s\n' "${BASH_REMATCH[1]}"
+            xml=${xml#*"${BASH_REMATCH[0]}"}
+        done
         return 0
     fi
-    ka_qdbus_call "$service" | grep -oE '/Sessions/[0-9]+$' || true
+    output=$(ka_qdbus_call "$service") || true
+    while IFS= read -r line; do
+        [[ $line =~ $path_re ]] && printf '%s\n' "${BASH_REMATCH[1]}"
+    done <<<"$output"
+    return 0
 }
 
 # Role: Fetch one scalar method from a Konsole session object.
@@ -24,13 +31,19 @@ ka_konsole_get() {
     ka_qdbus_call "$service" "$path" "org.kde.konsole.Session.$method"
 }
 
+# Role: Put a human-readable command string for one process in REPLY.
+ka_konsole_process_label_set() {
+    local pid=$1 label=''
+    ka_proc_cmdline_set "$pid" && label=$REPLY
+    [[ -n $label ]] || { ka_proc_comm_set "$pid" && label=$REPLY; }
+    [[ -n $label ]] || label='(unknown)'
+    ka_strip_controls_set "$label"
+}
+
 # Role: Return a human-readable command string for one process.
 ka_konsole_process_label() {
-    local pid=$1 label
-    label=$(ka_proc_cmdline "$pid" 2>/dev/null || true)
-    [[ -n $label ]] || label=$(ka_proc_comm "$pid" 2>/dev/null || true)
-    [[ -n $label ]] || label='(unknown)'
-    ka_strip_controls "$label"
+    ka_konsole_process_label_set "$1"
+    printf '%s' "$REPLY"
 }
 
 # Role: Resolve a project display name from the AI process working-directory basename.
@@ -51,12 +64,16 @@ ka_konsole_session_name() {
     printf '%s\t%s\n' "$safe_name" "$safe_cwd"
 }
 
-# Role: Discover recognized AI CLI sessions across all live Konsole services.
-# Output columns: UUID, AI type, display name, cwd, service, path, terminal PID,
-# foreground PID, AI PID, AI PID starttime, foreground command.
-ka_konsole_discover() {
-    local service path uuid term_pid fgpid class ai_type ai_pid ai_start name_info name cwd cmd
-    local budget deadline
+# Role: Discover recognized AI CLI sessions across all live Konsole services into KA_DISCOVERY_ROWS.
+# Each element is one TSV row - UUID, AI type, display name, cwd, service, path, terminal
+# PID, foreground PID, AI PID, AI PID starttime, foreground command - and the last is the
+# #COMPLETE or #INCOMPLETE marker. This runs in the caller's shell rather than behind a
+# process substitution, so the classifier's per-process executable cache survives from
+# one discovery pass to the next; in a child shell every pass started it empty.
+ka_konsole_discover_rows() {
+    local service path uuid term_pid fgpid class ai_type ai_pid ai_start name_info name cwd cmd row
+    local budget deadline s_uuid s_type s_service s_path s_cmd
+    KA_DISCOVERY_ROWS=()
     ka_tunable KEEPALIVE_DISCOVERY_BUDGET_MS 1000
     budget=$REPLY
     ka_now_ms
@@ -70,7 +87,7 @@ ka_konsole_discover() {
             # gap and silently stops advancing every countdown.
             ka_now_ms
             if ((REPLY > deadline)); then
-                printf '#INCOMPLETE\n'
+                KA_DISCOVERY_ROWS+=('#INCOMPLETE')
                 return 0
             fi
             uuid=$(ka_konsole_get "$service" "$path" shellSessionId 2>/dev/null || true)
@@ -78,27 +95,35 @@ ka_konsole_discover() {
             fgpid=$(ka_konsole_get "$service" "$path" foregroundProcessId 2>/dev/null || true)
             [[ -n $uuid && $term_pid =~ ^[0-9]+$ && $fgpid =~ ^[0-9]+$ ]] || continue
 
-            class=$(ka_classifier_from_process_tree "$fgpid" 2>/dev/null || true)
-            [[ -n $class ]] || continue
-            IFS=$'\t' read -r ai_type ai_pid <<<"$class"
-            ai_start=$(ka_proc_starttime "$ai_pid" 2>/dev/null || true)
-            [[ -n $ai_start ]] || continue
+            ka_classifier_from_process_tree_set "$fgpid" 2>/dev/null || continue
+            class=$REPLY
+            ai_type=${class%%$'\t'*}
+            ai_pid=${class#*$'\t'}
+            ka_proc_starttime_set "$ai_pid" || continue
+            ai_start=$REPLY
 
             name_info=$(ka_konsole_session_name "$ai_pid" "$fgpid")
             IFS=$'\t' read -r name cwd <<<"$name_info"
-            cmd=$(ka_konsole_process_label "$fgpid")
-            local s_uuid s_type s_service s_path s_cmd
+            ka_konsole_process_label_set "$fgpid"
+            cmd=$REPLY
             ka_single_line "$uuid";     s_uuid=$REPLY
             ka_single_line "$ai_type";  s_type=$REPLY
             ka_single_line "$service";  s_service=$REPLY
             ka_single_line "$path";     s_path=$REPLY
             ka_single_line "$cmd";      s_cmd=$REPLY
-            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            printf -v row '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
                 "$s_uuid" "$s_type" "$name" "$cwd" "$s_service" "$s_path" \
                 "$term_pid" "$fgpid" "$ai_pid" "$ai_start" "$s_cmd"
+            KA_DISCOVERY_ROWS+=("$row")
         done < <(ka_konsole_session_paths "$service")
     done < <(ka_qdbus_konsole_services)
-    printf '#COMPLETE\n'
+    KA_DISCOVERY_ROWS+=('#COMPLETE')
+}
+
+# Role: Print one Konsole discovery pass, one TSV row per line, ending with its marker.
+ka_konsole_discover() {
+    ka_konsole_discover_rows
+    printf '%s\n' "${KA_DISCOVERY_ROWS[@]}"
 }
 
 # Role: Verify that a target still refers to the exact original Konsole/AI process tree.
@@ -122,7 +147,8 @@ ka_konsole_validate_target() {
     [[ $term_pid == "$expected_term_pid" ]] || return 11
 
     [[ -d /proc/$expected_ai_pid ]] || return 12
-    start=$(ka_proc_starttime "$expected_ai_pid" 2>/dev/null || true)
+    start=''
+    ka_proc_starttime_set "$expected_ai_pid" && start=$REPLY
     [[ $start == "$expected_ai_start" ]] || return 13
 
     if fgpid=$(ka_konsole_get "$service" "$path" foregroundProcessId 2>/dev/null); then :; else
@@ -183,6 +209,12 @@ ka_konsole_deliver() {
     if [[ ! $send_gap =~ ^[0-9]+([.][0-9]+)?$ ]]; then
         ka_warn "KEEPALIVE_SEND_GAP=$send_gap is not a duration in seconds; using 0.15"
         send_gap=0.15
+    elif [[ $send_gap =~ ^0*([0-9]+) ]] && ((10#${BASH_REMATCH[1]} >= 10)); then
+        # A stop waits for the delivery in flight, and this gap sits inside it. Bounded
+        # well below systemd's stop timeout so a graceful stop can never be cut short
+        # into a SIGKILL between the text and its Enter.
+        ka_warn "KEEPALIVE_SEND_GAP=$send_gap is too long; using the 10 second maximum"
+        send_gap=10
     fi
 
     case $mode in

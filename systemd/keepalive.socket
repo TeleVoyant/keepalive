@@ -1,7 +1,5 @@
 [Unit]
 Description=Keep Alive Manager control FIFO
-PartOf=graphical-session.target
-After=graphical-session.target
 
 [Socket]
 # ListenFIFO gives the Bash daemon a local, user-private activation endpoint.
@@ -13,4 +11,4 @@ RemoveOnStop=yes
 Service=keepalive.service
 
 [Install]
-WantedBy=graphical-session.target
+WantedBy=sockets.target

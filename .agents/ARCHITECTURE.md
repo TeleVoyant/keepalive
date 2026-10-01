@@ -1,5 +1,77 @@
 # Architecture and Runtime Flows
 
+## 2026-10-01 performance and update-reload invariants
+
+These supersede the older cadence notes below wherever they disagree.
+
+- **Loop pacing.** `ka_service_loop` blocks in the FIFO read until the earliest due task
+  (deadline computed from `ka_now_monotonic_ms`, +5 ms, clamped to 1..5000 ms). The
+  one-second tick is planned only while some target is ACTIVE, and `ticking` is captured
+  before the wait: with no ACTIVE target the next wake resets `last_tick` instead of
+  ticking, so a planned long sleep is never mistaken for a suspend gap. Do not make the
+  tick slower than 1 s while ACTIVE - its elapsed time is the suspend detector.
+- **Presence-driven cadence.** `ka_service_discovery_interval` (every wake) sets
+  `KA_CLIENT_PRESENT`, `KA_DISCOVERY_INTERVAL`, and `KA_PUBLISH_INTERVAL` (1 s attended,
+  `KEEPALIVE_STATUS_INTERVAL` unattended). `clients.seen` must hold bare epoch digits; the
+  parser accepts at most 12 leading digits (1.0.0 TUIs appended `\033[K`, which used to
+  disable presence entirely). The TUI stamps presence *before* its first PING.
+- **Unattended discovery** runs only for enabled backends with a non-UNAVAILABLE target
+  whose snapshot max age >= the idle interval (`ka_service_scan_targets` ->
+  `KA_SVC_IDLE_DISCOVERY`); by default Orca yes (35 >= 30), Konsole no (10 < 30). Health
+  cadence is unchanged and deliberately not presence-dependent (docs forbid slowing it).
+- **Orca backoff**: periodic Orca discovery skips while `KA_ORCA_DISCOVERY_FAILURE` is set
+  and `now < KA_ORCA_RETRY_AT` (2,4,..,60 s); any success, a client REFRESH included,
+  resets it. REFRESH itself never honours the backoff.
+- **Graceful stop.** TERM/INT/HUP call `ka_service_request_stop`: exit at once while
+  `KA_SERVICE_WAITING=1` (idle in the read - Bash otherwise resumes `read -t` for its whole
+  timeout), else record `KA_SERVICE_STOP` and exit at the top of the next iteration. The
+  unit uses `KillMode=mixed`; `KEEPALIVE_SEND_GAP` is capped at 10 s so a stop always fits
+  the stop timeout. Never restore `trap 'exit 143' TERM`.
+- **Atomic writes** hold the O_EXCL descriptor (`KA_ATOMIC_TMP`/`KA_ATOMIC_FD`), write
+  through it, and `ka_atomic_close` re-checks `[[ $tmp -ef /dev/fd/$fd ]]` before the
+  rename. Existing temp names (FIFOs included) are skipped before opening. Use `/dev/fd`,
+  not `/proc/$$/fd`: `$$` is the parent PID inside a subshell.
+- **Index publication** skips the write when the published file is an owned, readable
+  regular file whose bytes equal the payload (no in-memory cache - a tampered file is
+  always repaired). Clients compare content, never mtime.
+- **Konsole discovery** is `ka_konsole_discover_rows` filling `KA_DISCOVERY_ROWS` in the
+  caller's shell; `ka_konsole_discover` is only a printing wrapper. Running it behind a
+  process substitution would discard the classifier's exe cache every pass.
+- **Exe cache** (`KA_PROC_EXE_FP`/`KA_PROC_EXE_PATH`, key `pid:starttime`) needs the
+  comm/cmdline fingerprint *and* `[[ /proc/PID/exe -ef cached_path ]]` to hit; bound 1024.
+- **REPLY pairs.** Hot helpers have `_set` forms; printing wrappers remain for tests and
+  one-off callers. `ka_process_is_descendant_of` and the `ka_proc_*_set` helpers clobber
+  REPLY; no caller holds REPLY across them today.
+- **Update reload.** `scripts/install.sh` records `uuid<TAB>status` per owned checkpoint
+  (`UNREADABLE` when it cannot read one), restarts an active daemon, waits up to 60 s for
+  a *different* pid that is owned and holds `manager.lock` open (never trust the pid in
+  `service.state` alone), then compares against `index.tsv`. All post-swap reporting is
+  best-effort and must never fail an installation whose new tree is live. A TUI holds an
+  fd on its entrypoint (`ka_tui_watch_install`); when `KA_INVOKED_AS` (made absolute) no
+  longer `-ef` that fd and a new daemon pid is online, it preflights `--version`, restores
+  the terminal, and re-execs with `KA_CLI_ARGS`, restoring the row via
+  `KEEPALIVE_TUI_SELECT`.
+
+## 2026-10-01 storage and lifecycle invariants
+
+- Every runtime target, request, response, messages directory, state file, and message
+  payload is checked as an owned, real path before use. CREATE uses one-level exclusive
+  directory creation and never follows a pre-planted target symlink.
+- Atomic scalar writers use same-directory `mktemp` files. Target checkpoints first commit
+  a versioned `secondary_message.<pid>.<random>` companion, then atomically publish its name
+  in `state.tsv`; client configuration seeding reads that file and does not depend on
+  daemon-only associative arrays.
+- Message-directory commits retain an unrecoverable rollback tree. Service startup recovers
+  `messages.trash.*` before loading/quarantining targets and only then sweeps stale stages.
+- `manager.lock` is created with noclobber semantics, reopened without truncation, and
+  verified through `/proc/$$/fd` before `flock`.
+- Index publication is part of IPC success: a completed command cannot return `OK` when its
+  client-visible index failed to commit.
+- Install refuses an unrecognized pre-existing application tree. Uninstall snapshots all
+  current and legacy enablement links before `disable --now`, restores their exact literal
+  targets if shutdown probes abort, always attempts `daemon-reload` after cleanup, and
+  returns nonzero for cleanup or reload failure.
+
 ## 2026-09-25 Orca backend addendum
 
 The older sections below describe the original Konsole path and remain useful, but the
@@ -77,8 +149,8 @@ single Bash daemon (`keepalive --service`)
 Konsole user-session D-Bus objects
 ```
 
-The daemon is single-threaded. It interleaves one FIFO read (up to 0.20 seconds),
-monotonic timer work, target validation, discovery, index publication, and stale
+The daemon is single-threaded. It interleaves one FIFO read (blocking until the next
+due task, at most 5 seconds; a request wakes it at once), monotonic timer work, target validation, discovery, index publication, and stale
 IPC cleanup. `flock -n` on `manager.lock` prevents two daemon instances from
 owning the same runtime state.
 
@@ -145,16 +217,17 @@ the `discovery/` runtime directory is created but currently not populated.
 `KA_RUNTIME_SOURCE`:
 
 ```text
-xdg       $XDG_RUNTIME_DIR when set and present
-per-user  /run/user/$UID when it is a directory this user owns
+xdg       $XDG_RUNTIME_DIR when absolute, owned, present, and free of symlinked components
+per-user  /run/user/$UID when owned, present, and free of symlinked components
 fallback  /tmp/keepalive-$UID, hardened by ka_runtime_secure
 ```
 
 The middle step exists because contexts that never run `pam_systemd` - `su`, `sudo -u`,
 cron, non-interactive remote exec - inherit no `XDG_RUNTIME_DIR`. Without it a client there
 addresses `/tmp` while the daemon listens under `/run/user/$UID`, and simply reports the
-service as unavailable. Only the guessable `/tmp` base is checked for a symlink and for
-ownership; the other two are already session-managed.
+service as unavailable. Both session-managed candidates are checked for an absolute,
+owned directories whose complete paths contain no symlink; the guessable `/tmp` base is additionally
+created/hardened when necessary.
 
 ## Control FIFO signalling
 
@@ -246,10 +319,11 @@ explicit set rather than a toggle so each key reaches a known state.
 ## Adaptive discovery cadence
 
 Discovery exists to populate `AVAILABLE` rows for clients. `ka_service_discovery_interval`
-sets `KA_DISCOVERY_INTERVAL` once a second, fork-free: the fast interval whenever any
-target is monitored or `clients.seen` was touched within `KEEPALIVE_CLIENT_PRESENCE_TTL`,
-and `KEEPALIVE_IDLE_DISCOVERY_INTERVAL` otherwise. The TUI refreshes `clients.seen` once
-a second through a builtin redirect.
+sets `KA_DISCOVERY_INTERVAL` on every loop wake, fork-free: the fast interval when
+`clients.seen` holds a stamp within `KEEPALIVE_CLIENT_PRESENCE_TTL`, and
+`KEEPALIVE_IDLE_DISCOVERY_INTERVAL` otherwise - and unattended passes cover only the
+backends listed in the 2026-10-01 section above. The TUI refreshes `clients.seen` once a
+second through a builtin redirect.
 
 ## Target identity contract
 
@@ -356,16 +430,17 @@ last_seen
 reason
 ```
 
-The secondary prompt is a separate literal `secondary_message` file. Main
-messages are literal numbered files under `messages/`, and `main_index` is
-zero-based.
+The secondary prompt is a literal versioned companion named by the
+`secondary_message_file` row. Legacy checkpoints without that row still use
+`secondary_message`. Main messages are literal numbered files under `messages/`, and
+`main_index` is zero-based.
 
 Load-time validation is fail-closed before array registration. It requires every
 known field exactly once; rejects extra columns in known rows; validates non-empty
 identity/display fields, service/path shape, positive PID/start-time/interval
 values, exact enums/booleans, remaining-time bounds, and `main_index`; binds the
 stored UUID to the target-directory basename; and requires non-symlink state,
-secondary, message-directory, and canonical contiguous message files. Unknown
+versioned secondary-message payload, message-directory, and canonical contiguous message files. Unknown
 field names remain ignorable for forward compatibility.
 
 Any rejected top-level target entry is moved into a uniquely created
@@ -373,15 +448,17 @@ Any rejected top-level target entry is moved into a uniquely created
 The wrapper also receives `quarantine_reason`, `quarantined_at`, and the matching
 event log when one exists. The loader never follows target/message symlinks.
 
-`state.tsv`, scalar profile fields, `secondary_message`, service state, and the
-merged index use same-directory temporary-file rename. Message-directory and
-multi-file profile replacement are separate operations; see `RISKS.md` for the
-resulting crash windows.
+`state.tsv`, scalar profile fields, service state, and the merged index use same-directory
+temporary-file rename. `state.tsv` commits the name of a completely written versioned
+secondary-message payload. Message-directory, target checkpoint, and multi-file profile
+replacement remain separate operations; see `RISKS.md` for the resulting crash windows
+and compensating CONFIGURE rollback.
 
 ## Merged client index
 
-`index.tsv` is regenerated atomically at least once a second and after every
-request. It first contains every monitored target, then every currently discovered
+`index.tsv` is regenerated atomically after every request, every second while a client
+is attached, and every `KEEPALIVE_STATUS_INTERVAL` otherwise; an identical payload is not
+rewritten. It first contains every monitored target, then every currently discovered
 UUID that has no monitored record.
 
 Its 14 positional columns are:
@@ -567,18 +644,21 @@ in `RISKS.md`.
 - `ListenFIFO=%t/keepalive/control.fifo`;
 - FIFO 0600 and directory 0700;
 - `RemoveOnStop=yes`;
-- associated with `graphical-session.target`;
+- installed under the standard user `sockets.target`, independent of the desktop;
 - explicitly activates `keepalive.service`.
 
 `keepalive.service`:
 
 - `ExecStart=%h/.local/bin/keepalive --service`;
+- static (not enabled directly), with `BindsTo=`, `PartOf=`, and `After=` on
+  `keepalive.socket` so stopping the endpoint stops the daemon while a daemon crash leaves
+  activation available;
 - `Restart=on-failure`, two-second delay;
 - `UMask=0077`;
-- namespace-free hardening only: `NoNewPrivileges=yes`, `RestrictSUIDSGID=yes`,
-  `RestrictRealtime=yes`, `RestrictNamespaces=yes`, `LockPersonality=yes`,
+- namespace-free hardening only: `NoNewPrivileges=yes`, `RestrictRealtime=yes`,
+  `RestrictNamespaces=yes`, `LockPersonality=yes`,
   `SystemCallArchitectures=native`, `RestrictAddressFamilies=AF_UNIX`;
-- user/graphical-session scoped.
+- user-manager scoped, without a KDE or graphical-session dependency.
 
 Installation enables only the socket. Stopping the daemon leaves on-demand socket
 activation available; stopping/disabling the socket ends that entrypoint.

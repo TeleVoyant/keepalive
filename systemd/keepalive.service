@@ -1,8 +1,12 @@
 [Unit]
 Description=Keep Alive Manager per-user daemon
 Documentation=file:%h/.local/share/keepalive-manager/README.md
-PartOf=graphical-session.target
-After=graphical-session.target keepalive.socket
+# Keep the daemon and its FIFO endpoint in one lifecycle. The socket remains the
+# activation entrypoint: a daemon failure must not tear it down, while stopping
+# the socket must stop the daemon before RemoveOnStop unlinks the FIFO.
+BindsTo=keepalive.socket
+PartOf=keepalive.socket
+After=keepalive.socket
 
 [Service]
 Type=simple
@@ -13,6 +17,24 @@ RestartSec=2s
 # it. Without this, systemd logs every deliberate stop as "Failed with result exit-code".
 SuccessExitStatus=129 130 143
 UMask=0077
+
+# A keep-alive tolerates seconds of latency, so the daemon yields to interactive work.
+# Every directive here is process-level (setpriority, sched_setscheduler, ioprio_set,
+# prctl): none needs root or cgroup controller delegation, all predate the systemd 235
+# floor, and helpers the daemon starts (dbus-send, qdbus, orca-ide, jq) inherit them.
+# SCHED_BATCH rather than SCHED_IDLE: idle could starve a due send indefinitely under a
+# saturated CPU, while batch only gives up wakeup preemption. The 50 ms timer slack lets
+# the kernel coalesce the daemon's second-granularity wakeups with other timers.
+Nice=10
+CPUSchedulingPolicy=batch
+IOSchedulingClass=idle
+TimerSlackNSec=50ms
+
+# Stop (and therefore every update's restart) signals only the daemon. It finishes any
+# delivery in flight - including the helper process sending it - flushes countdowns, and
+# exits between loop iterations; the rest of the cgroup is killed after it exits, or with
+# the final SIGKILL if it ever overstays the stop timeout.
+KillMode=mixed
 
 # Hardening here is deliberately limited to directives that do NOT place the
 # daemon in a private mount namespace.
@@ -29,7 +51,6 @@ UMask=0077
 # ProtectKernelTunables, ProtectKernelModules, or ProtectKernelLogs here. Each one
 # reintroduces that bug. The options below are seccomp/prctl based and safe.
 NoNewPrivileges=yes
-RestrictSUIDSGID=yes
 RestrictRealtime=yes
 RestrictNamespaces=yes
 LockPersonality=yes
@@ -37,6 +58,3 @@ SystemCallArchitectures=native
 RestrictAddressFamilies=AF_UNIX
 
 # This service is intentionally user-scoped. Do not install it in /etc/systemd/system.
-
-[Install]
-WantedBy=graphical-session.target

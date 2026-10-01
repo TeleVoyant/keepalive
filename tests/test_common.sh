@@ -16,6 +16,21 @@ literal='$HOME `touch /tmp/NOPE` $(id); "quoted"'
 ka_write_scalar "$TEST_TMP/literal" "$literal"
 assert_eq "$literal" "$(ka_read_first_line "$TEST_TMP/literal")" 'literal shell metacharacters remain data'
 
+# Predictable temporary names let a pre-planted symlink redirect the write before the
+# final rename. The mktemp-based writer must leave that external file untouched.
+atomic_destination="$TEST_TMP/atomic-symlink-probe"
+atomic_external="$TEST_TMP/atomic-external"
+ka_write_scalar "$atomic_external" 'outside remains intact'
+predicted_random=$(RANDOM=1907; printf '%s' "$RANDOM")
+ln -s -- "$atomic_external" "$TEST_TMP/.atomic-symlink-probe.tmp.$$.$predicted_random"
+RANDOM=1907
+assert_true 'atomic scalar write ignores a planted legacy temporary symlink' \
+    ka_atomic_write_value "$atomic_destination" 'inside value'
+assert_eq 'outside remains intact' "$(ka_read_first_line "$atomic_external")" \
+    'atomic scalar write never follows the planted temporary symlink'
+assert_eq 'inside value' "$(cat -- "$atomic_destination")" \
+    'atomic scalar write still commits its destination'
+
 printf '%s' 'no-newline-value' >"$TEST_TMP/no-newline"
 assert_eq 'no-newline-value' "$(ka_read_first_line "$TEST_TMP/no-newline")" 'scalar reader preserves final line without newline'
 [[ ! -e /tmp/NOPE ]] || rm -f /tmp/NOPE

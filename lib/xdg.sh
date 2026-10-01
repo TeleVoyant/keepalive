@@ -1,6 +1,21 @@
 #!/usr/bin/env bash
 # XDG path resolution and directory lifecycle helpers.
 
+# Role: Accept only an absolute, owned, non-symlink runtime directory.
+ka_runtime_candidate_is_safe() {
+    local path=${1:-} normalized canonical mode
+    REPLY=''
+    [[ $path == /* ]] || return 1
+    normalized=$path
+    while [[ $normalized != / && $normalized == */ ]]; do normalized=${normalized%/}; done
+    canonical=$(readlink -f -- "$normalized") || return 1
+    [[ $canonical == "$normalized" && -d $canonical && ! -L $canonical && -O $canonical ]] || return 1
+    mode=$(stat -Lc '%a' -- "$canonical") || return 1
+    [[ $mode =~ ^[0-7]{3,4}$ ]] || return 1
+    (((8#$mode & 077) == 0)) || return 1
+    REPLY=$canonical
+}
+
 # Role: Choose the runtime base directory and record how it was chosen.
 #
 # Precedence, most trustworthy first:
@@ -14,16 +29,18 @@
 #
 # KA_RUNTIME_SOURCE is what lets doctor explain which one is in use.
 ka_xdg_resolve_runtime_base() {
-    if [[ -n ${XDG_RUNTIME_DIR:-} && -d ${XDG_RUNTIME_DIR:-} ]]; then
-        KA_RUNTIME_BASE=$XDG_RUNTIME_DIR
+    KA_RUNTIME_REJECTED=''
+    if [[ -n ${XDG_RUNTIME_DIR:-} ]] && ka_runtime_candidate_is_safe "$XDG_RUNTIME_DIR"; then
+        KA_RUNTIME_BASE=$REPLY
         KA_RUNTIME_SOURCE=xdg
         return 0
     fi
+    [[ -z ${XDG_RUNTIME_DIR:-} ]] || KA_RUNTIME_REJECTED=$XDG_RUNTIME_DIR
     # Overridable so tests can exercise the precedence without depending on whether the
     # host happens to have a user-manager runtime directory.
     local per_user=${KEEPALIVE_PER_USER_RUNTIME:-"/run/user/$UID"}
-    if [[ -d $per_user && ! -L $per_user && -O $per_user ]]; then
-        KA_RUNTIME_BASE=$per_user
+    if ka_runtime_candidate_is_safe "$per_user"; then
+        KA_RUNTIME_BASE=$REPLY
         KA_RUNTIME_SOURCE=per-user
         return 0
     fi
@@ -33,9 +50,17 @@ ka_xdg_resolve_runtime_base() {
 
 # Role: Resolve all Keep Alive XDG paths without creating them.
 ka_xdg_init() {
-    # Set once here so atomic writes need no per-file chmod fork.
+    # Set once here so atomic writes need no per-file chmod fork. KA_PRIVATE_UMASK
+    # records that promise for ka_atomic_temp; nothing else in the tool changes umask.
     umask 077
-    KA_CONFIG_HOME=${XDG_CONFIG_HOME:-"$HOME/.config"}
+    KA_PRIVATE_UMASK=1
+    if [[ -n ${XDG_CONFIG_HOME:-} ]]; then
+        [[ $XDG_CONFIG_HOME == /* ]] || { ka_error 'XDG_CONFIG_HOME must be an absolute path'; return 1; }
+        KA_CONFIG_HOME=$XDG_CONFIG_HOME
+    else
+        [[ ${HOME:-} == /* ]] || { ka_error 'HOME must be an absolute path when XDG_CONFIG_HOME is unset'; return 1; }
+        KA_CONFIG_HOME="$HOME/.config"
+    fi
     ka_xdg_resolve_runtime_base
 
     KA_CONFIG_DIR="$KA_CONFIG_HOME/keepalive"
@@ -52,26 +77,53 @@ ka_xdg_init() {
     KA_CLIENT_PRESENCE_FILE="$KA_RUNTIME_DIR/clients.seen"
 }
 
+# Role: Create or validate one owned private directory without following a child symlink.
+ka_runtime_prepare_dir() {
+    local path=$1 canonical
+    if [[ -L $path || (-e $path && ! -d $path) ]]; then
+        ka_error "refusing unsafe runtime directory: $path"
+        return 1
+    fi
+    if [[ ! -e $path ]]; then
+        mkdir -- "$path" || { ka_error "could not create runtime directory: $path"; return 1; }
+    fi
+    [[ -d $path && ! -L $path && -O $path ]] \
+        || { ka_error "runtime directory is not an owned real directory: $path"; return 1; }
+    canonical=$(readlink -f -- "$path") \
+        || { ka_error "could not canonicalize runtime directory: $path"; return 1; }
+    [[ $canonical == "$path" ]] \
+        || { ka_error "refusing runtime directory through a symlink: $path"; return 1; }
+    chmod 700 "$path" 2>/dev/null \
+        || { ka_error "could not secure runtime directory: $path"; return 1; }
+}
+
 # Role: Create private runtime directories used only for the current login session.
 ka_ensure_runtime_dirs() {
+    local path
     umask 077
     ka_runtime_secure || return 1
-    mkdir -p "$KA_RUNTIME_DIR" "$KA_TARGETS_DIR" "$KA_QUARANTINE_DIR" \
-        "$KA_REQUESTS_DIR" "$KA_RESPONSES_DIR" "$KA_LOGS_DIR"
-    chmod 700 "$KA_RUNTIME_DIR" "$KA_TARGETS_DIR" "$KA_QUARANTINE_DIR" \
-        "$KA_REQUESTS_DIR" "$KA_RESPONSES_DIR" "$KA_LOGS_DIR" 2>/dev/null || true
+    # Build one level at a time. A single mkdir -p would follow a pre-created
+    # keepalive/targets (or sibling) symlink below an otherwise trusted runtime base.
+    ka_runtime_prepare_dir "$KA_RUNTIME_DIR" || return 1
+    for path in "$KA_TARGETS_DIR" "$KA_QUARANTINE_DIR" "$KA_REQUESTS_DIR" \
+        "$KA_RESPONSES_DIR" "$KA_LOGS_DIR"; do
+        ka_runtime_prepare_dir "$path" || return 1
+    done
 }
 
 # Role: Create the persistent configuration directory containing the single profile.
 ka_ensure_config_dirs() {
     umask 077
-    mkdir -p "$KA_PROFILE_DIR/messages"
-    chmod 700 "$KA_CONFIG_DIR" "$KA_PROFILE_DIR" "$KA_PROFILE_DIR/messages" 2>/dev/null || true
+    ka_recover_staged_dir "$KA_PROFILE_DIR" || return 1
+    mkdir -p "$KA_PROFILE_DIR/messages" \
+        || { ka_error "could not create configuration directories under $KA_CONFIG_DIR"; return 1; }
+    chmod 700 "$KA_CONFIG_DIR" "$KA_PROFILE_DIR" "$KA_PROFILE_DIR/messages" 2>/dev/null \
+        || { ka_error "could not secure configuration directories under $KA_CONFIG_DIR"; return 1; }
 }
 
 # Role: Report whether the preferred user runtime directory is available.
 ka_runtime_is_xdg() {
-    [[ -n ${XDG_RUNTIME_DIR:-} && -d ${XDG_RUNTIME_DIR:-} ]]
+    [[ -n ${XDG_RUNTIME_DIR:-} ]] && ka_runtime_candidate_is_safe "$XDG_RUNTIME_DIR"
 }
 
 # Role: Refuse to use an unsafe runtime base, and harden the predictable /tmp fallback.
@@ -94,7 +146,8 @@ ka_runtime_secure() {
     else
         mkdir -p "$base" || { ka_error "could not create runtime base: $base"; return 1; }
     fi
-    chmod 700 "$base" 2>/dev/null || true
+    chmod 700 "$base" 2>/dev/null \
+        || { ka_error "could not secure runtime base: $base"; return 1; }
     ka_warn "no session runtime directory found; using $base, which does not share the login session lifecycle"
     return 0
 }

@@ -47,10 +47,16 @@ ka_icons_init() {
 
 # Role: Prefix text with an icon only when icon mode is enabled.
 ka_icon_label() {
+    ka_icon_label_set "$@"
+    printf '%s' "$REPLY"
+}
+
+# Role: Put an optional icon followed by text in REPLY, or the text alone without one.
+ka_icon_label_set() {
     local icon=${1-} text=${2-}
     if [[ -n $icon ]]; then
-        printf '%s %s' "$icon" "$text"
+        REPLY="$icon $text"
     else
-        printf '%s' "$text"
+        REPLY=$text
     fi
 }

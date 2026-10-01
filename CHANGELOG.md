@@ -5,7 +5,11 @@ All notable changes to Keep Alive Manager are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.1.0] - 2026-10-01
+
+Orca support, desktop-neutral systemd activation, a hardening pass, a resource pass that
+takes the idle daemon from about 2% of a core to under 0.1% (and a live single-target
+Orca setup from 7.4% to 1.2%), and updates that keep running keep-alives.
 
 ### Added
 
@@ -15,11 +19,34 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   worktree, execution host, tab, leaf, and agent identity, revalidated before every send.
 - Backend-neutral transport dispatch plus independent per-backend discovery snapshots,
   so a schema or availability failure in Orca cannot erase healthy Konsole rows.
-- Orca mock/unit coverage and a real daemon/FIFO/client integration test. The complete
-  suite now exercises 389 assertions across 16 files when optional dependencies exist.
+- Orca mock/unit coverage and a real daemon/FIFO/client integration test.
+- Cross-distribution portability, transactional-install, runtime-path, D-Bus-address,
+  IPC failure, and unit-lifecycle coverage. The complete suite now exercises 1040
+  assertions across 27 files when optional dependencies exist.
+- Updates keep running keep-alives. The installer records every monitored target before
+  swapping the code, restarts an active daemon gracefully, waits for the new one, and
+  reports each target that reloaded, changed state, or did not come back; it warns about
+  a daemon that was not started by systemd. An open manager TUI restarts itself on the
+  updated installation once the daemon has, returning to the selected row.
 
 ### Changed
 
+- User socket activation now uses `sockets.target` instead of
+  `graphical-session.target`, so KDE, GNOME, other desktops, SSH, and headless systemd
+  user sessions share one lifecycle. The static service is bound one-way to its socket.
+- Installation now preflights the user manager, requires shell/manager HOME and XDG
+  agreement, canonicalizes complete unit roots, remembers prior custom roots, rejects
+  source/config overlap, migrates stale graphical-session links, stages source and unit
+  replacements transactionally, reports incomplete rollback, and preserves active-daemon
+  restart behavior.
+- Uninstall now requires a confirmed unit stop before deleting executable files; an
+  explicit `--force` recovery path remains available when the user manager is unavailable.
+- Runtime-directory selection rejects relative, foreign-owned, group/world-writable, or symlinked
+  `XDG_RUNTIME_DIR` values and can derive the standard systemd user-bus address when the
+  login environment omitted it.
+- The unit targets systemd 235 and later. `RestrictSUIDSGID` (added in systemd 242) was
+  removed; `NoNewPrivileges` remains, so the unprivileged daemon cannot gain privileges
+  through set-user-ID or set-group-ID executables on older supported managers.
 - Terminal-specific Orca commands, JSON fields, and error mappings are isolated in one
   version-tolerant adapter. Unknown schemas fail closed and are treated as transient
   during live validation, making future Orca CLI changes localized and safe.
@@ -32,6 +59,66 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Definitive pre-send identity failures now return their exact backend reason to manual
   CLI/TUI callers instead of the generic `main send failed` fallback.
+- Scalar writes can no longer report success by moving their temporary file inside a
+  directory at the destination path. FIFO writes, response writes, lock setup, profile
+  replacement, and failed CLI-create cleanup now propagate errors without silencing the
+  daemon shell's stderr.
+- Target checkpoints atomically reference versioned secondary-message payloads;
+  CONFIGURE compensates to the exact prior target on a reported profile/state failure,
+  mode/timer mutations report persistence errors, and interrupted profile swaps recover
+  their rollback directory before defaults can be recreated.
+- Informational CLI flags no longer hide preceding unknown arguments, request-creation
+  diagnostics survive without a subshell, and the ASCII progress-bar assertion now tests
+  real bytes instead of relying on an unsupported `tr` character class.
+- An attached TUI is now actually seen as a client. Its presence stamp carried a
+  terminal erase sequence that the daemon rejected, so discovery never left the
+  unattended cadence while someone was watching; the daemon also accepts old stamps.
+- A stop no longer cuts a delivery in half. TERM during a send used to land between the
+  message and its Enter (or after the timer event was consumed); the daemon now finishes
+  the delivery and exits between loop iterations, and `KillMode=mixed` keeps its helper
+  alive. `KEEPALIVE_SEND_GAP` is now actually capped (10 s) so a stop always completes.
+- A control request arriving just as the daemon's FIFO read timed out was dropped: Bash
+  reports the timeout but keeps the bytes it already consumed, and the remainder was then
+  rejected as a malformed line. The client waited out its full timeout (the "TUI takes
+  8 seconds to open" symptom). Latent since 1.0.0; the daemon now completes the line.
+- DELETE reports failure instead of `OK` when the target directory cannot be removed.
+- Truncated display names no longer split a multibyte character.
+- A discovery snapshot taken before a monotonic rollback is no longer trusted as fresh.
+- Crash debris is collected at startup: orphaned versioned secondary-message files,
+  interrupted atomic-write temporaries, and log-trim sidecars.
+
+### Performance
+
+Measured before/after in isolated systemd user scopes with the mocks (two alternating
+62-second repetitions per state; full method in `.agents/DEVELOPMENT.md`):
+
+| State | CPU before | CPU after | Context switches/min |
+|---|---:|---:|---:|
+| Idle, nothing monitored | 2.09% | 0.08% | 557 → 24 |
+| Client attached | 5.42% | 2.54% | 568 → 265 |
+| Two active Konsole targets | 4.92% | 3.47% | 1134 → 424 |
+| Two active Orca targets | 2.50% | 0.63% | 799 → 111 |
+| Two active Konsole targets + client | 8.26% | 4.94% | 941 → 532 |
+
+Idle TUI CPU fell from 7.5% to 2.8%, `keepalive list` from 519 to 388 ms, and
+`keepalive pause` from 1006 to 683 ms. Daemon RSS rose 4-8% (about 0.5 MiB). The changes:
+
+- The daemon sleeps until its next due task instead of polling the control FIFO five
+  times a second; the one-second tick runs only while a countdown is active, and the
+  index is republished every second only while a client is attached.
+- Unattended, discovery runs only for a backend whose snapshot health actually reuses
+  (Orca by default); periodic Orca discovery backs off exponentially, to a minute, while
+  the Orca CLI keeps failing.
+- An identical index is not rewritten. Atomic writes start one process (the rename)
+  instead of four.
+- The `/proc` classifier, Konsole discovery, health checks, and the TUI frame no longer
+  fork per field; the executable lookup is cached per process image, discovery parsing
+  uses builtin regexes, and the TUI sorts only when row order can change.
+- Each Orca list and show response is validated and projected by one `jq` run instead
+  of two, still failing closed on any unexpected document.
+- The CLI waits for responses without starting a `sleep` process per poll.
+- The service unit runs the daemon at `Nice=10` with batch CPU scheduling, idle I/O
+  priority, and 50 ms timer slack; none of these needs cgroup delegation.
 
 ## [1.0.0] - 2026-08-23
 
@@ -115,4 +202,5 @@ consolidated here.
 - Runtime state is created under `umask 077`, and the non-XDG fallback directory is
   ownership-checked and hardened before use.
 
+[1.1.0]: https://github.com/TeleVoyant/keepalive/releases/tag/v1.1.0
 [1.0.0]: https://github.com/TeleVoyant/keepalive/releases/tag/v1.0.0

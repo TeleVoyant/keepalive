@@ -19,7 +19,7 @@ Every change must pass:
 ```
 
 It must end with `ALL VALIDATION CHECKS PASSED`. This runs Bash syntax checks, ShellCheck,
-version consistency, the full 389-assertion suite, and static systemd unit verification.
+version consistency, the full 484-assertion/20-file suite, and static systemd unit verification.
 CI gates on the same checks.
 
 ShellCheck must stay at zero findings. Before adding a code to `.shellcheckrc`, read the
@@ -28,8 +28,9 @@ would corrupt associative-array lookups rather than because it is noisy.
 
 Anything touching a terminal backend, the TUI, or the scheduler also needs a pass through the
 live integration checklist in
-[`docs/MAINTENANCE.md`](docs/MAINTENANCE.md#live-integration-test-checklist) on a real
-desktop. Use Konsole for D-Bus changes and a disposable Orca agent for Orca changes. The
+[`docs/MAINTENANCE.md`](docs/MAINTENANCE.md#live-integration-test-checklist) against a real
+systemd user session. Use a KDE/Konsole session for Konsole D-Bus changes and a disposable
+Orca agent for Orca changes; systemd lifecycle work also needs a non-KDE or headless pass. The
 mocks cannot stand in for those contracts, and live validation is where several serious
 defects in this project's history were actually caught.
 

@@ -57,6 +57,20 @@ read_rc=0; ka_ipc_service_read 0.10 2>/dev/null || read_rc=$?
 assert_eq 0 "$read_rc" 'an available line is reported as success'
 assert_eq 'REQUEST xyz' "$KA_IPC_LINE" 'the line is delivered to the caller'
 
+# A timeout can expire after the first bytes of a line were consumed; Bash keeps them in
+# the variable but reports the timeout. Simulate it deterministically: one byte now, the
+# rest after the timeout. The line must be completed, not dropped and left as garbage.
+# Timer slack once made this land on about one request in twenty on a real system.
+printf 'R' >&"$KA_CONTROL_FD"
+( sleep 0.30; printf 'EQUEST split\n' >"$pacing_fifo" ) &
+writer_pid=$!
+read_rc=0; ka_ipc_service_read 0.10 2>/dev/null || read_rc=$?
+wait "$writer_pid" 2>/dev/null || true
+assert_eq 0 "$read_rc" 'a line split across a read timeout is completed rather than dropped'
+assert_eq 'REQUEST split' "$KA_IPC_LINE" 'the completed line carries every byte of the request'
+read_rc=0; ka_ipc_service_read 0.10 2>/dev/null || read_rc=$?
+assert_eq 1 "$read_rc" 'no garbage remainder is left for the next read'
+
 # Two ways the read can return immediately, both of which would remove the loop's pacing:
 # a descriptor that cannot be read at all, and one already at end of file.
 exec {KA_CONTROL_FD}>&-

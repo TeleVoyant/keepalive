@@ -5,7 +5,8 @@ pseudo-terminal fixtures, and `jq` is optional for the Orca adapter tests; those
 skip cleanly when their optional dependency is absent. That constraint is deliberate:
 the tool ships as Bash to hosts that may have very little else installed.
 
-**389 assertions across 16 files** when Python and `jq` are present.
+**1040 assertions across 27 files** when Python and `jq` are present (one ownership case
+skips unless the suite runs as root).
 
 ## Running
 
@@ -53,13 +54,13 @@ a trap - the committed tests all have one.
 
 | File | Assertions | Covers |
 |---|---:|---|
-| `test_common.sh` | 36 | Duration helpers, scalar safety, shell-metacharacter literal handling, injectable monotonic reads, tunable validation and one-shot warnings. |
+| `test_common.sh` | 39 | Duration helpers, collision-safe atomic writes, shell-metacharacter literal handling, injectable monotonic reads, tunable validation and one-shot warnings. |
 | `test_classifier.sh` | 10 | Recognized wrapper signatures, negative matching, process ancestry, CRLF-tolerant pattern files, and refusal of a pattern that cannot compile. |
 | `test_profile.sh` | 12 | Default profile creation, updates, literal message storage, canonical contiguous message numbering. |
 | `test_state.sh` | 41 | Mutation-free rejection of malformed CREATE/CONFIGURE, the create/pause/resume/unavailable/delete lifecycle, legacy checkpoint compatibility, transient health timeouts, independent log cleanup, and new-UUID no-reattach behavior. |
 | `test_scheduler.sh` | 54 | Main rotation, Enter-only queue preservation, main and secondary transport failures, validation timeouts, timer independence, suspend-gap and backward-clock preservation, one-shot secondary, and owed-submit retry. |
 | `test_service_integration.sh` | 24 | A real background daemon, real FIFO, and real client processes against a mocked qdbus: create, send, send failure, send timeout, target loss, and replacement UUID, end to end. |
-| `test_ipc.sh` | 12 | Multiple concurrent request IDs through one FIFO, response routing, and timeout behavior. |
+| `test_ipc.sh` | 15 | Multiple concurrent request IDs through one FIFO, response routing, timeout behavior, and a request line split across a read timeout being completed rather than dropped. |
 | `test_konsole_mock.sh` | 16 | Mocked Konsole service/path/UUID/PID discovery, strict validation, qdbus timeout classification, and notification deadlines. |
 | `test_orca_mock.sh` | 50 | Orca CLI/schema normalization, exact multi-field identity, non-destructive schema drift, deadlines, atomic delivery, checkpoint validation, transport dispatch, and per-backend snapshot isolation. Skips without `jq`. |
 | `test_orca_service_integration.sh` | 10 | A real Orca-only daemon, FIFO, and public clients against the mock: discover, create, atomic send, transient outage, and sticky incarnation replacement. Skips without `jq`. |
@@ -67,7 +68,18 @@ a trap - the committed tests all have one.
 | `test_recovery_validation.sh` | 18 | Strict checkpoint schema and range validation, symlink rejection, quarantine diagnostics, and event-log preservation. |
 | `test_tui_primitives.sh` | 74 | ASCII and no-icon rendering, first-frame/view-transition/same-view/resize clearing, width-exact frames, safe truncation, control-byte stripping, non-collapsing TSV splitting, 7-bit glyph selection, segment-bar width accounting, and key decoding including unrecognized sequences and Escape pushback. |
 | `test_tui_pty.sh` | 14 | The real client driven through a pseudo-terminal. Skips cleanly without `python3`. |
-| `test_install_layout.sh` | 5 | Non-root install and uninstall layout against a mocked `systemctl`. |
+| `test_failure_propagation.sh` | 27 | Runtime/request/response/index/lock failure propagation, lock-symlink refusal, descriptor error handling, CLI request cleanup, and timeout output. |
+| `test_install_layout.sh` | 7 | Non-root install and uninstall layout against a mocked `systemctl`. |
+| `test_install_lifecycle.sh` | 25 | Manager-scoped XDG paths, graphical-link migration, installed-tree updates, active-daemon restart, transactional rollback, and profile retention. |
+| `test_install_safety.sh` | 81 | Fail-closed manager probes, path-overlap refusal, unrecognized-tree preservation, exact link rollback, reserved-path checks, and daemon-reload error propagation. |
+| `test_portability.sh` | 39 | Unsafe runtime rejection, `/run/user` fallback, absolute config rules, D-Bus address escaping, and HOME-free informational modes. |
+| `test_runtime_hardening.sh` | 63 | Runtime-component symlink refusal, ownership/mode repair, permission failure propagation, and atomic destination safety. |
+| `test_state_hardening.sh` | 46 | Versioned secondary payloads, client-side configuration seeding, dirty flush errors, target symlink refusal, interrupted-message recovery, and index commit safety. |
+| `test_systemd_units.sh` | 16 | Desktop-neutral socket target, static service dependencies, the systemd 235 directive floor, low-priority scheduling (`Nice`, batch CPU, idle I/O, timer slack, never `SCHED_IDLE`), `KillMode=mixed`, and the absence of cgroup caps and mount-namespace directives. |
+| `test_loop_pacing.sh` | 60 | Millisecond monotonic parsing and bounds, presence-stamp parsing (bare, legacy escape-suffixed, overflow), attended/unattended cadence and per-backend discovery selection, Orca discovery backoff and its reset, a real idle daemon's wakeup budget with prompt IPC, no false gap events for paused-only targets, and graceful stop both idle and mid-delivery. |
+| `test_atomic_io.sh` | 108 | Descriptor-held atomic writes (content, 0600 modes, no debris, subshells, caller noclobber), planted-FIFO and close-time symlink-swap safety, content-compared index publication and tamper repair, startup companion pruning and temp sweeping under validated roots, delete failure, and fork-free `ka_sleep`. |
+| `test_fork_free_helpers.sh` | 95 | `/proc` `_set` helpers against their printing forms, the executable cache (no repeat `readlink`, exec invalidation, bound), discovery running in the caller's shell, dbus-send/qdbus service and session-path parsing, Orca single-`jq` fail-closed handling, multibyte-safe truncation, and the TUI sort cache. |
+| `test_update_reload.sh` | 83 | The installer's target manifest, lock-descriptor daemon identity, bounded new-daemon wait, and reload report; a real daemon restarted with ACTIVE and PAUSED targets recovering countdowns, rotation, and SERVICE events; installer warnings; the send-gap cap; absolute invocation; and TUI update detection, preflight failure, and row restoration. |
 | `test_function_comments.sh` | 2 | Every function carries a `# Role:` comment, and no function uses a self-referential `local`. |
 
 ## The pseudo-terminal tests
@@ -130,7 +142,7 @@ Conventions worth knowing, each of which has cost time before:
 The suite drives mocked qdbus and Orca CLI endpoints, so it runs without attaching to a
 real terminal. Those mocks are stand-ins, not proof. They cannot exercise:
 
-- the Plasma graphical-session lifecycle;
+- a real systemd user-manager login/logout, socket-activation, or lingering lifecycle;
 - a live user D-Bus;
 - Konsole's actual `sendText` behavior;
 - a real Orca terminal-send receipt or a future Orca release's JSON contract;
@@ -140,15 +152,19 @@ real terminal. Those mocks are stand-ins, not proof. They cannot exercise:
 - suspend and resume on a specific kernel and session stack.
 
 Work through the live integration checklist in
-[`MAINTENANCE.md`](MAINTENANCE.md#live-integration-test-checklist) on a real
-KDE/Konsole workstation and a disposable Orca agent before treating both backends as
-qualified. Release 1.0.0's Konsole path was validated that way; see
+[`MAINTENANCE.md`](MAINTENANCE.md#live-integration-test-checklist) in both a
+non-KDE systemd user session and, for the Konsole backend, a real KDE/Konsole session.
+Use a disposable Orca agent for live Orca delivery before treating both backends as
+qualified. Release 1.0.0's Konsole path was validated on KDE; see
 [`VALIDATION.md`](VALIDATION.md).
 
 ## Continuous integration
 
-`.github/workflows/ci.yml` runs `scripts/dev-check.sh` and ShellCheck as two blocking
-jobs. ShellCheck was advisory until 1.0.0, when its findings were triaged and cleared.
+`.github/workflows/ci.yml` runs `scripts/dev-check.sh` as root in Ubuntu, Debian, Fedora,
+and Arch containers, plus a separate blocking ShellCheck job. Root intentionally exercises
+the `runuser` and ownership branches. Container jobs verify shell behavior and unit parsing;
+they do not pretend to provide a booted systemd user manager. The live qualification list
+below remains the gate for real `%t` FIFO activation and login/logout lifecycle behavior.
 
 Reading `.shellcheckrc` is worthwhile before adding to it. Six codes are disabled
 project-wide with their reasoning recorded, and one of them matters beyond style: SC2004

@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # High-level manager, target detail, logs, and interactive client screens.
 
+# Row order from the last index sort and the per-UUID type/name/status keys it was computed
+# from; ka_tui_load_index re-sorts only when those keys change. Assigned here, not merely
+# declared: an unassigned associative array is still unbound under `set -u`.
+declare -ga KA_TUI_SORT_ORDER=()
+declare -gA KA_TUI_SORT_KEYS=()
+
 # Role: Map AI client names to stable sorting groups (Claude, Codex, Kimi, then others).
 # Sets REPLY instead of printing: this runs once per row per frame, and a command
 # substitution here costs a fork every time.
@@ -25,11 +31,48 @@ ka_tui_load_index() {
     declare -ga KA_R_BACKEND=()
     [[ -r $KA_INDEX_FILE ]] || return 0
 
-    local sorted rest
-    while IFS= read -r sorted; do
-        # Drop the three synthetic sort keys without disturbing the original columns.
-        rest=${sorted#*$'\t'}; rest=${rest#*$'\t'}; rest=${rest#*$'\t'}
-        ka_tui_split_tsv "$rest"
+    # The row order depends only on each row's UUID, type, name, and status. A watched
+    # index changes every second because countdowns tick, so the external sort ran once a
+    # second for an order that had not moved; it now runs only when one of those keys did.
+    # The comparison is per UUID, so the same rows published in another order do not
+    # count as a change. Rows are parsed from this one read, so the order and the rows
+    # always describe the same publication.
+    local sorted rest line uuid resort=0
+    local -a lines=()
+    local -A row_by_uuid=() keys=()
+    mapfile -t lines <"$KA_INDEX_FILE" || true
+    for line in "${lines[@]}"; do
+        [[ -n $line ]] || continue
+        ka_tui_split_tsv "$line"
+        [[ -n ${KA_TSV[0]-} ]] || continue
+        keys[${KA_TSV[0]}]="${KA_TSV[1]-}"$'\t'"${KA_TSV[2]-}"$'\t'"${KA_TSV[4]-}"
+        row_by_uuid[${KA_TSV[0]}]=$line
+    done
+    if ((${#keys[@]} != ${#KA_TUI_SORT_KEYS[@]})); then
+        resort=1
+    else
+        for uuid in "${!keys[@]}"; do
+            if [[ -z ${KA_TUI_SORT_KEYS[$uuid]+x} || ${KA_TUI_SORT_KEYS[$uuid]} != "${keys[$uuid]}" ]]; then
+                resort=1
+                break
+            fi
+        done
+    fi
+    if ((resort == 1)); then
+        KA_TUI_SORT_ORDER=()
+        while IFS= read -r sorted; do
+            # Drop the three synthetic sort keys; the UUID is the next column.
+            rest=${sorted#*$'\t'}; rest=${rest#*$'\t'}; rest=${rest#*$'\t'}
+            KA_TUI_SORT_ORDER+=("${rest%%$'\t'*}")
+        done < <(printf '%s\n' "${lines[@]}" | ka_tui_sort_index_rows)
+        KA_TUI_SORT_KEYS=()
+        for uuid in "${!keys[@]}"; do KA_TUI_SORT_KEYS[$uuid]=${keys[$uuid]}; done
+    fi
+
+    for uuid in "${KA_TUI_SORT_ORDER[@]}"; do
+        [[ -n ${row_by_uuid[$uuid]+x} ]] || continue
+        ka_tui_split_tsv "${row_by_uuid[$uuid]}"
+        unset 'row_by_uuid[$uuid]'
         KA_R_UUID+=("${KA_TSV[0]-}") KA_R_TYPE+=("${KA_TSV[1]-}") KA_R_NAME+=("${KA_TSV[2]-}")
         KA_R_DIR+=("${KA_TSV[3]-}") KA_R_STATUS+=("${KA_TSV[4]-}")
         KA_R_MAIN_REMAIN+=("${KA_TSV[5]:-0}") KA_R_MAIN_INTERVAL+=("${KA_TSV[6]:-0}")
@@ -37,10 +80,10 @@ ka_tui_load_index() {
         KA_R_SEC_INTERVAL+=("${KA_TSV[9]:-0}") KA_R_MODE+=("${KA_TSV[10]-}")
         KA_R_NOTIFY+=("${KA_TSV[11]:-0}") KA_R_LAST+=("${KA_TSV[12]-}") KA_R_REASON+=("${KA_TSV[13]-}")
         KA_R_BACKEND+=("${KA_TSV[14]:-konsole}")
-    done < <(ka_tui_sort_index_rows)
+    done
 }
 
-# Role: Emit index rows prefixed with family/type/state sort keys for one ordering pass.
+# Role: Emit stdin index rows prefixed with family/type/state sort keys, sorted.
 ka_tui_sort_index_rows() {
     local line type lower rank srank
     while IFS= read -r line; do
@@ -52,7 +95,7 @@ ka_tui_sort_index_rows() {
         ka_tui_type_rank "$type"; rank=$REPLY
         ka_tui_status_rank "${KA_TSV[4]-}"; srank=$REPLY
         printf '%03d\t%s\t%03d\t%s\n' "$rank" "$lower" "$srank" "$line"
-    done <"$KA_INDEX_FILE" | sort -t $'\t' -k1,1n -k2,2f -k3,3n -k6,6f
+    done | sort -t $'\t' -k1,1n -k2,2f -k3,3n -k6,6f
 }
 
 # Role: Read one target checkpoint once into KA_F_* fields for detail rendering.
@@ -63,6 +106,7 @@ ka_tui_load_target_fields() {
     KA_F_BACKEND='konsole' KA_F_TYPE='' KA_F_NAME='' KA_F_DIR='' KA_F_STATUS='' KA_F_MODE='' KA_F_NOTIFY=''
     KA_F_MAIN_REMAIN=0 KA_F_MAIN_INTERVAL=0 KA_F_MAIN_INDEX=0
     KA_F_SEC_ENABLED=0 KA_F_SEC_REMAIN=0 KA_F_SEC_INTERVAL=0 KA_F_SEC_DONE=0
+    KA_F_SEC_MESSAGE_FILE='secondary_message'
     KA_F_LAST='' KA_F_REASON=''
     ka_state_target_dir "$uuid"
     file="$REPLY/state.tsv"
@@ -90,6 +134,13 @@ ka_tui_load_target_fields() {
             secondary_remaining) KA_F_SEC_REMAIN=$value ;;
             secondary_interval) KA_F_SEC_INTERVAL=$value ;;
             secondary_done) KA_F_SEC_DONE=$value ;;
+            secondary_message_file)
+                if [[ $value =~ ^secondary_message\.[0-9]+\.[0-9]+$ ]]; then
+                    KA_F_SEC_MESSAGE_FILE=$value
+                else
+                    KA_F_SEC_MESSAGE_FILE=''
+                fi
+                ;;
             last_seen) KA_F_LAST=$value ;;
             reason) KA_F_REASON=$value ;;
         esac
@@ -124,10 +175,16 @@ ka_tui_find_uuid_index() {
 
 # Role: Derive the manager's session-name column from live width so rows never wrap.
 ka_tui_row_name_width() {
+    ka_tui_row_name_width_set
+    printf '%d' "$REPLY"
+}
+
+# Role: Put the manager's session-name column width for the live terminal width in REPLY.
+ka_tui_row_name_width_set() {
     local width=$((${KA_TUI_COLS:-80} - 65))
     ((width < 16)) && width=16
     ((width > 48)) && width=48
-    printf '%d' "$width"
+    REPLY=$width
 }
 
 # Role: Render one manager row in full-width table form with compact timer depletion bar.
@@ -137,21 +194,26 @@ ka_tui_render_row_full() {
     type=${KA_R_TYPE[$i]}; status=${KA_R_STATUS[$i]}
     mr=${KA_R_MAIN_REMAIN[$i]}; mi=${KA_R_MAIN_INTERVAL[$i]}
     se=${KA_R_SEC_ENABLED[$i]}; sr=${KA_R_SEC_REMAIN[$i]}
-    name=$(ka_tui_truncate "${KA_R_NAME[$i]}" "$name_w")
+    # Every value below comes from a REPLY helper: rows are redrawn once a second, and a
+    # captured printing helper forked once per field per row.
+    ka_tui_truncate_set "${KA_R_NAME[$i]}" "$name_w"; name=$REPLY
+    ka_tui_truncate_set "$type" 10; type=$REPLY
     printf ' %s %2d ' "$marker" "$number"
     [[ -n $KA_I_AI ]] && printf '%s ' "$KA_I_AI"
-    printf '%-10s %-*s ' "$(ka_tui_truncate "$type" 10)" "$name_w" "$name"
+    printf '%-10s %-*s ' "$type" "$name_w" "$name"
     ka_tui_status "$status"
     # Pad from the rendered cell count, not the bare word: the icon adds two cells and
     # used to shift every following column between --no-icons and icon mode.
-    pad=$((14 - $(ka_tui_status_width "$status")))
+    ka_tui_status_width_set "$status"
+    pad=$((14 - REPLY))
     ((pad < 1)) && pad=1
     printf '%*s' "$pad" ''
     if [[ $status == ACTIVE || $status == PAUSED ]]; then
         ka_tui_progress "$mr" "$mi" 10
-        printf ' %-8s ' "$(ka_format_duration "$mr")"
+        ka_format_duration_set "$mr"
+        printf ' %-8s ' "$REPLY"
         # Last column: no padding, so rows carry no trailing whitespace.
-        if [[ $se == 1 ]]; then printf '%s' "$(ka_format_duration "$sr")"; else printf '%s' "$KA_G_NONE"; fi
+        if [[ $se == 1 ]]; then ka_format_duration_set "$sr"; printf '%s' "$REPLY"; else printf '%s' "$KA_G_NONE"; fi
     else
         printf '%s' "$KA_G_NONE"
     fi
@@ -164,13 +226,16 @@ ka_tui_render_row_compact() {
     ((i == selected)) && marker=$KA_G_SEL
     status=${KA_R_STATUS[$i]}; mr=${KA_R_MAIN_REMAIN[$i]}; mi=${KA_R_MAIN_INTERVAL[$i]}
     se=${KA_R_SEC_ENABLED[$i]}; sr=${KA_R_SEC_REMAIN[$i]}
-    name_w=$(ka_tui_field_width 22 12)
-    printf ' %s %2d %-10s / %s\033[K\n' "$marker" "$number" \
-        "$(ka_tui_truncate "${KA_R_TYPE[$i]}" 10)" "$(ka_tui_truncate "${KA_R_NAME[$i]}" "$name_w")"
+    local type name
+    ka_tui_field_width_set 22 12; name_w=$REPLY
+    ka_tui_truncate_set "${KA_R_TYPE[$i]}" 10; type=$REPLY
+    ka_tui_truncate_set "${KA_R_NAME[$i]}" "$name_w"; name=$REPLY
+    printf ' %s %2d %-10s / %s\033[K\n' "$marker" "$number" "$type" "$name"
     printf '      '; ka_tui_status "$status"
     if [[ $status == ACTIVE || $status == PAUSED ]]; then
-        printf '   '; ka_tui_progress "$mr" "$mi" 10; printf ' %s' "$(ka_format_duration "$mr")"
-        [[ $se == 1 ]] && printf '   S %s' "$(ka_format_duration "$sr")"
+        printf '   '; ka_tui_progress "$mr" "$mi" 10
+        ka_format_duration_set "$mr"; printf ' %s' "$REPLY"
+        if [[ $se == 1 ]]; then ka_format_duration_set "$sr"; printf '   S %s' "$REPLY"; fi
     fi
     printf '\033[K\n'
 }
@@ -180,11 +245,13 @@ ka_tui_render_row_compact() {
 # path, so every legacy presentation mode still renders a complete, readable header.
 ka_tui_render_manager_header() {
     local n=$1 active=$2 paused=$3 available=$4 unavailable=$5 summary now
-    now=$(ka_now_hms)
+    printf -v now '%(%H:%M:%S)T' -1
     if ka_tui_bar_supported; then
         ka_tui_bar_begin
-        ka_tui_bar_add 4 7 "$(ka_icon_label "$KA_I_AI" 'Keep Alive')" 1
-        ka_tui_bar_add 2 0 "$(ka_icon_label "$KA_I_SERVICE" 'online')"
+        ka_icon_label_set "$KA_I_AI" 'Keep Alive'
+        ka_tui_bar_add 4 7 "$REPLY" 1
+        ka_icon_label_set "$KA_I_SERVICE" 'online'
+        ka_tui_bar_add 2 0 "$REPLY"
         ka_tui_bar_add 0 7 "$n sessions"
         # Zero counts are omitted so the bar stays short and only shows live facts.
         ((active > 0)) && ka_tui_bar_add 1 7 "$active active"
@@ -224,8 +291,17 @@ ka_tui_render_manager() {
     fi
     cols=${KA_TUI_COLS}; lines=${KA_TUI_LINES}
     n=${#KA_R_UUID[@]}
-    active=$(ka_tui_state_count ACTIVE); paused=$(ka_tui_state_count PAUSED)
-    available=$(ka_tui_state_count AVAILABLE); unavailable=$(ka_tui_state_count UNAVAILABLE)
+    # One counting pass in the current shell; four captured counters forked four times.
+    local status
+    active=0; paused=0; available=0; unavailable=0
+    for status in "${KA_R_STATUS[@]}"; do
+        case $status in
+            ACTIVE) ((active += 1)) ;;
+            PAUSED) ((paused += 1)) ;;
+            AVAILABLE) ((available += 1)) ;;
+            UNAVAILABLE) ((unavailable += 1)) ;;
+        esac
+    done
 
     ka_tui_render_manager_header "$n" "$active" "$paused" "$available" "$unavailable"
 
@@ -233,7 +309,7 @@ ka_tui_render_manager() {
     end=$((offset + max_rows)); ((end > n)) && end=$n
     if ((cols >= 92)); then
         local name_w
-        name_w=$(ka_tui_row_name_width)
+        ka_tui_row_name_width_set; name_w=$REPLY
         printf '    TYPE       %-*s KEEP-ALIVE     MAIN       NUDGE\033[K\n' "$name_w" 'SESSION'
         ka_tui_hrule 2
         for ((i=offset; i<end; i++)); do ka_tui_render_row_full "$i" "$selected" "$((i + 1))" "$name_w"; done
@@ -317,10 +393,13 @@ ka_tui_render_detail_header() {
 
 # Role: Render one existing keep-alive target detail view from atomic persisted state.
 ka_tui_render_detail() {
-    local uuid=$1 secondary cols frozen value_w bar_w
+    local uuid=$1 secondary='' target_dir cols frozen value_w bar_w
     ka_tui_load_target_fields "$uuid" || return 1
     ka_state_target_dir "$uuid"
-    secondary=$(cat "$REPLY/secondary_message" 2>/dev/null || true)
+    target_dir=$REPLY
+    if [[ -n $KA_F_SEC_MESSAGE_FILE ]]; then
+        secondary=$(cat -- "$target_dir/$KA_F_SEC_MESSAGE_FILE" 2>/dev/null || true)
+    fi
 
     ka_tui_frame_begin
     if ka_tui_too_small 52 16; then
@@ -519,18 +598,105 @@ ka_tui_guard_action() {
     return 0
 }
 
+# Role: Stamp the client-presence file the daemon reads to choose its attached cadence.
+# This file is data, not screen output: it must hold only the epoch seconds. An erase
+# sequence once appended here made the daemon reject every stamp, so a watching TUI was
+# never noticed and discovery stayed on the unattended cadence.
+ka_tui_mark_presence() {
+    printf '%(%s)T\n' -1 >"$KA_CLIENT_PRESENCE_FILE" 2>/dev/null || true
+}
+
+# Role: Hold a descriptor on the code this TUI was loaded from, and note the daemon it found.
+# Both are what ka_tui_update_ready compares against once a second.
+ka_tui_watch_install() {
+    KA_TUI_SELF_FD=''
+    KA_TUI_DAEMON_PID=''
+    [[ -n ${KA_INVOKED_AS:-} && -n ${KA_ENTRYPOINT:-} && -r $KA_ENTRYPOINT ]] || return 0
+    { exec {KA_TUI_SELF_FD}<"$KA_ENTRYPOINT"; } 2>/dev/null || { KA_TUI_SELF_FD=''; return 0; }
+    ka_tui_read_service_state
+    KA_TUI_DAEMON_PID=$KA_TUI_SERVICE_PID
+}
+
+# Role: Read the daemon's published pid and state into KA_TUI_SERVICE_PID/STATE with builtins.
+ka_tui_read_service_state() {
+    local key value
+    KA_TUI_SERVICE_PID=''
+    KA_TUI_SERVICE_STATE=''
+    [[ -r $KA_SERVICE_STATE_FILE ]] || return 0
+    while IFS=$'\t' read -r key value _; do
+        case $key in
+            pid) KA_TUI_SERVICE_PID=$value ;;
+            state) KA_TUI_SERVICE_STATE=$value ;;
+        esac
+    done <"$KA_SERVICE_STATE_FILE" || true
+}
+
+# Role: Report whether an update installed new code and the daemon has restarted onto it.
+#
+# An update swaps the installed tree, so the command this TUI was started as now resolves
+# to a different file than the one it holds open; `-ef` compares the two with stat calls
+# and no fork. Waiting for a new, online daemon as well means the re-executed client is
+# never left talking to a daemon that is just restarting. A TUI started from a checkout
+# that the update did not touch keeps running as it is.
+ka_tui_update_ready() {
+    [[ -n ${KA_TUI_SELF_FD:-} ]] || return 1
+    # Mid-swap the command can briefly not exist; that is not yet an update to load.
+    [[ -e $KA_INVOKED_AS && ! $KA_INVOKED_AS -ef /dev/fd/$KA_TUI_SELF_FD ]] || return 1
+    ka_tui_read_service_state
+    [[ $KA_TUI_SERVICE_STATE == online && -n $KA_TUI_SERVICE_PID \
+        && $KA_TUI_SERVICE_PID != "${KA_TUI_DAEMON_PID-}" ]]
+}
+
+# Role: Replace this TUI with the updated installation, keeping the highlighted row.
+# The new version is test-loaded first (`--version` sources every module), because once
+# exec succeeds there is no old client left to fall back to. If that or the exec fails, the
+# old client carries on and stops watching, rather than retrying every second. The terminal
+# is restored before the exec so the new process saves sane settings to restore later.
+ka_tui_reexec() {
+    local uuid=${1-} fd=$KA_TUI_SELF_FD
+    if ! "$KA_INVOKED_AS" --version >/dev/null 2>&1; then
+        { exec {fd}<&-; } 2>/dev/null || true
+        KA_TUI_SELF_FD=''
+        KA_TUI_TOAST='an update was installed, but it does not start; restart keepalive later'
+        printf -v KA_TUI_TOAST_UNTIL '%(%s)T' -1
+        KA_TUI_TOAST_UNTIL=$((KA_TUI_TOAST_UNTIL + 2))
+        return 0
+    fi
+    ka_tui_leave
+    { exec {fd}<&-; } 2>/dev/null || true
+    KA_TUI_SELF_FD=''
+    export KEEPALIVE_TUI_SELECT=$uuid
+    shopt -s execfail
+    exec "$KA_INVOKED_AS" ${KA_CLI_ARGS[@]+"${KA_CLI_ARGS[@]}"}
+    shopt -u execfail
+    unset KEEPALIVE_TUI_SELECT
+    ka_tui_enter || return 1
+    KA_TUI_TOAST='an update was installed, but it could not be started; restart keepalive later'
+    printf -v KA_TUI_TOAST_UNTIL '%(%s)T' -1
+    KA_TUI_TOAST_UNTIL=$((KA_TUI_TOAST_UNTIL + 2))
+}
+
 # Role: Run the attachable manager TUI; exiting this function never stops the daemon or timers.
 ka_tui_main() {
     local response selected=0 offset=0 key n max_rows desired_uuid idx i
+    # Stamped before the first request so the daemon, woken by that request, already
+    # sees a watching client and switches to the attached cadence straight away.
+    ka_tui_mark_presence
     response=$(ka_ipc_call PING '' 2>/dev/null || true)
     [[ $response == OK$'\t'* ]] || { ka_error "service unavailable: ${response#*$'\t'}"; return 1; }
     ka_ipc_call REFRESH '' >/dev/null 2>&1 || true
     ka_wizard_cleanup_stale
     ka_tui_enter || return
+    ka_tui_watch_install
 
     local dirty=1 tick last_tick=''
     # Load once up front so the KA_R_* arrays exist even when the index is empty.
     ka_tui_load_index
+    # A TUI re-executed after an update comes back on the row it was showing.
+    if [[ -n ${KEEPALIVE_TUI_SELECT:-} ]]; then
+        idx=$(ka_tui_find_uuid_index "$KEEPALIVE_TUI_SELECT") && selected=$idx
+        unset KEEPALIVE_TUI_SELECT
+    fi
     while true; do
         if ka_tui_index_changed; then
             desired_uuid=${KA_R_UUID[$selected]-}
@@ -556,7 +722,12 @@ ka_tui_main() {
             last_tick=$tick
             # Tell the daemon a client is watching so it keeps discovery responsive.
             # A redirect from printf is a builtin write, so this costs no fork.
-            printf '%(%s)T\033[K\n' -1 >"$KA_CLIENT_PRESENCE_FILE" 2>/dev/null || true
+            ka_tui_mark_presence
+            # Once a second, and only on the manager screen: never mid-wizard input.
+            if ka_tui_update_ready; then
+                ka_tui_reexec "${KA_R_UUID[$selected]-}" || return 1
+                dirty=1
+            fi
         fi
         [[ -n ${KA_TUI_TOAST:-} ]] && dirty=1
         ((${KA_TUI_RESIZED:-0} == 1)) && dirty=1

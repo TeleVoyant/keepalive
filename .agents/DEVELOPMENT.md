@@ -1,5 +1,74 @@
 # Development and Operations Memory
 
+## Performance and update-reload pass on 2026-10-01
+
+Scope: resource optimization of the daemon, clients, and unit, plus keeping running
+keep-alives across an update (user request). The lead implemented everything in the
+primary worktree; research, proofreading, test writing, and benchmarking were done by
+Orca-supervised Pi workers (`pi --model openai-codex/gpt-5.6-luna --thinking max`; the
+`openai/` provider has no credentials on this host). Released as 1.1.0 (tag `v1.1.0`).
+
+Validation at the end: `./scripts/dev-check.sh` -> 27 test files, 1040 assertions, 0
+failures (one ownership case skips unless root). Four new suites:
+`test_loop_pacing.sh` (60), `test_atomic_io.sh` (108), `test_fork_free_helpers.sh` (95),
+`test_update_reload.sh` (83); `test_systemd_units.sh` grew to 16. ShellCheck (container,
+`koalaman/shellcheck-alpine`) showed no new findings versus the pre-change tree.
+
+Benchmark method, reusable: run each tree's daemon under
+`systemd-run --user --scope --unit=ka-bench-<name>-$RANDOM` with private HOME/XDG dirs
+(runtime dir mode 0700), `KEEPALIVE_QDBUS=tests/fixtures/qdbus-mock` and the Orca mock,
+alternate before/after runs of >= 60 s, and read the scope's `cpu.stat usage_usec`, the
+daemon's `voluntary_ctxt_switches`, and a PATH-shim exec log. The numbers are in RISKS.md
+"Resolved on 2026-10-01: daemon, client, and update resource pass". Quick live check of
+the pacing on a real daemon: sample `grep voluntary_ctxt_switches /proc/<pid>/status`
+a minute apart; idle with nothing monitored should grow by about two dozen.
+
+Hard-won safety rules for agents measuring this daemon:
+
+- An isolated `XDG_RUNTIME_DIR` must be mode 0700. Otherwise `ka_xdg_init` rejects it and
+  silently falls back to `/run/user/<uid>` - the user's real runtime. Assert the resolved
+  runtime path before launching anything.
+- Record the pid of everything you start and signal only those. `pkill -f`/`pgrep -f`
+  patterns match the invoking shell itself, and a worker killed another agent's test run
+  by guessing from command lines.
+- The user's own daemon may be running (systemd, `/run/user/1000/keepalive`) and actively
+  delivering keep-alives; never signal it or touch its runtime.
+- Bash `read -t` resumes after a trapped signal for its whole timeout; only a trap that
+  exits ends it early. This is why the stop path checks `KA_SERVICE_WAITING`.
+- `test_tui_pty.sh` can time out when the machine is loaded by concurrent benchmarks; it
+  is documented as timing-sensitive and passes when rerun on a quiet machine.
+- Mock-only harnesses missed a live bug (dropped control lines). It reproduced only with
+  real socket activation plus the unit's scheduling properties. Replicate the installed
+  service exactly with a transient unit before trusting a cadence change:
+  `systemd-run --user --unit=ka-diag-$RANDOM --socket-property=ListenFIFO=<isolated
+  runtime>/keepalive/control.fifo --socket-property=SocketMode=0600 -p Nice=10
+  -p CPUSchedulingPolicy=batch -p IOSchedulingClass=idle -p TimerSlackNSec=50ms
+  -p KillMode=mixed -p UMask=0077 --setenv=XDG_RUNTIME_DIR=... <tree>/keepalive --service`,
+  drive it with 60+ `keepalive refresh` calls, and trace with a wrapper that sets
+  `BASH_XTRACEFD` and a timestamped `PS4` before `exec bash -x keepalive --service`.
+  `systemctl --user reset-failed` the transient units afterwards.
+
+Installed on the development host on 2026-10-01 (`./scripts/install.sh`, twice: the
+second time with the control-read fix). Live, same machine, 60 s cgroup samples with one
+ACTIVE Orca target and no client: old daemon 7.41% CPU / 586 wakeups per minute; new
+daemon 1.42% / 122. Each update reported `Reloaded 1 running keep-alive(s)` and the
+countdown carried over (1422 -> 1416 s).
+
+## Final robustness pass on 2026-10-01
+
+At that pass the worktree had 23 test files and 683 assertions (now 27 and 1037; see the
+2026-10-01 performance section above). New invariant-focused suites
+cover runtime path ownership/symlinks, checkpoint and index failure propagation, installer
+and uninstaller transaction boundaries, versioned secondary prompts, client configuration
+seeding, and recovery ordering. ShellCheck 0.10.0 was run in a container because it is not
+installed on the host; systemd unit verification and the full Bash suite remain part of
+`scripts/dev-check.sh`.
+
+When changing lifecycle code, retain these precedence rules: response-write errors outrank
+the command result; a primary command error is not masked by index publication; uninstall
+file-cleanup errors outrank a simultaneous daemon-reload error; and failed uninstall
+shutdown probes restore snapshotted enablement before returning the original probe status.
+
 ## Orca integration work on 2026-09-25
 
 The current unreleased work adds an Orca backend without forking the timer/state machine.
@@ -24,9 +93,11 @@ Key implementation points:
 - Read-only qualification against the installed `/home/niel/.local/bin/orca-ide` matched
   the adapter fields. No prompt was sent to a live user agent during development.
 
-With `jq` and Python present, the suite is 389 assertions across 16 files. New coverage
-lives in `test_orca_mock.sh` (50 assertions) and `test_orca_service_integration.sh` (10).
-Run the latter whenever service startup, backend selection, or Orca IPC semantics change.
+At the Orca-integration baseline, the suite was 389 assertions across 16 files. The
+cross-distribution systemd and final hardening passes raised it to 683 assertions across
+23 files. Orca coverage
+lives in `test_orca_mock.sh` (50 assertions) and `test_orca_service_integration.sh` (10);
+run the latter whenever service startup, backend selection, or Orca IPC semantics change.
 
 The user intentionally renamed `.agent/` to `.agents/`. Do not recreate the singular
 directory; `scripts/dev-check.sh` now checks `.agents/README.md`.
@@ -34,12 +105,11 @@ directory; `scripts/dev-check.sh` now checks `.agents/README.md`.
 ## Repository state at review
 
 - Branch `master` tracked `origin/master` with no pre-existing changes.
-- Current baseline HEAD is `96b5931 perf(daemon): cut CPU with monitored targets by
-  roughly five times`, the ninth commit and the basis of the **1.0.0** release.
+- Current baseline HEAD is `ea3d6f3 feat(orca-integration)`; the **1.0.0** release remains
+  tagged at `2ea6951`.
 - `VALIDATION.md` and `docs/VALIDATION.md` were byte-identical.
-- `.agents/` and `.codex/` existed as empty read-only environment directories;
-  there was no repository `AGENTS.md`.
-- `.agents/` was created in response to the request for durable project memory.
+- `.agents/` is the maintained project-memory directory; there is no repository
+  `AGENTS.md`, and the former singular `.agent/` name must not be recreated.
 
 ## Coding conventions
 
@@ -225,13 +295,19 @@ ka_xdg_init; ka_classifier_init; ka_qdbus_find; ka_konsole_discover
 systemd-run --user --pipe -p PrivateTmp=yes /bin/bash -c 'readlink /proc/PID/cwd'
 ```
 
-Remember that `scripts/install.sh` does not restart a running daemon. After changing
-unit files or sourced modules, deploy and restart explicitly:
+`scripts/install.sh` records whether the daemon is active and restarts it after an
+update, so newly copied modules are loaded immediately. For a manual unit deployment:
 
 ```bash
-cp -f systemd/keepalive.service ~/.config/systemd/user/keepalive.service
+unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+mkdir -p "$unit_dir"
+systemctl --user disable keepalive.socket keepalive.service 2>/dev/null || true
+rm -f "$unit_dir/graphical-session.target.wants/keepalive.socket" \
+      "$unit_dir/graphical-session.target.wants/keepalive.service"
+cp -f systemd/keepalive.service systemd/keepalive.socket "$unit_dir/"
 systemctl --user daemon-reload
-systemctl --user restart keepalive.service
+systemctl --user enable --now keepalive.socket
+systemctl --user try-restart keepalive.service
 ```
 
 ## Test inventory
@@ -247,10 +323,16 @@ systemctl --user restart keepalive.service
 | `test_recovery_validation.sh` | Strict checkpoint validation, range/message/symlink rejection, quarantine reasons/log preservation. |
 | `test_ipc.sh` | Two request IDs through one FIFO with independent responses. |
 | `test_konsole_mock.sh` | Discovery/identity validation, qdbus timeout classification, notification deadline. |
+| `test_orca_mock.sh` | Orca CLI/schema normalization, exact runtime identity, drift handling, deadlines, transport dispatch, and backend isolation. |
+| `test_orca_service_integration.sh` | Real FIFO/service/client lifecycle against a mocked Orca-only runtime. |
 | `test_tui_primitives.sh` | ASCII progress/urgency, icon-free state, view-aware clear and resize sequences, width-exact frame rules, truncation safety and control stripping, non-collapsing TSV split, 7-bit glyph set, status cell width, segment-bar width/fallback, and key decoding (arrows, page/home/end, unrecognized sequences, Escape pushback). |
 | `test_function_comments.sh` | Adjacent `# Role:` convention, and no self-referential `local` declaration. |
 | `test_tui_pty.sh` | The real client driven through `pty.fork()`: key classes that once exited it, wizard cancel from step one and from a later step, Escape pushback, and a VT-rendered screen check that no key-hint line is drawn twice. Skips cleanly without `python3`. |
 | `test_install_layout.sh` | Non-root install/uninstall with mocked systemctl. |
+| `test_install_lifecycle.sh` | Manager XDG agreement, migration, installed-tree upgrade, restart, rollback, and uninstall retention with a stateful systemctl mock. |
+| `test_portability.sh` | Runtime-path safety/fallback, HOME/config validation, D-Bus escaping, and early informational modes. |
+| `test_failure_propagation.sh` | Filesystem, FIFO, response, lock, and CLI failure propagation. |
+| `test_systemd_units.sh` | Portable socket target, static-service lifecycle edges, and old-systemd compatibility guard. |
 | `test_service_integration.sh` | Cross-process daemon/client lifecycle, mocked sendText success/failure/timeout with specific reasons, and the full public-CLI lifecycle: delete, create, pause/idempotent pause, resume, `--json` validated by a real parser, and a duplicate-create refusal. |
 
 Each test calls `test_env_setup`, which creates isolated temporary `HOME` and XDG
@@ -264,14 +346,15 @@ multiple simultaneous mutating clients, inject crashes between multi-file
 checkpoint/profile writes, or use real systemd socket activation. See `RISKS.md` for
 specific recommended regressions.
 
-`.github/workflows/ci.yml` runs `scripts/dev-check.sh` as the blocking job, with
-ShellCheck as a second blocking job. Both must pass.
+`.github/workflows/ci.yml` runs `scripts/dev-check.sh` in a blocking root-container matrix
+covering Ubuntu, Debian, Fedora, and Arch, with ShellCheck as a separate blocking job.
+Those lanes are static/mock coverage; real user-manager behavior remains a VM/live-host gate.
 
 The repository explicitly leaves these to live-host qualification:
 
 - real Konsole qdbus method names/output and `sendText` behavior;
 - installed AI CLI process-tree shapes;
-- Plasma graphical-session/socket lifecycle;
+- real systemd user-manager/socket lifecycle across non-KDE and headless sessions;
 - KDE notification delivery;
 - Nerd Font glyph cell width;
 - actual suspend/resume behavior.
@@ -380,8 +463,8 @@ directives, so neither one can qualify this area. Always verify on a live sessio
 1. Confirm the directive is not mount-namespace based. When unsure, test it in
    isolation before editing the unit:
    `systemd-run --user --pipe -p <Directive> /bin/bash -c 'readlink /proc/<a foreign PID>/cwd'`
-2. Deploy the unit, `daemon-reload`, and restart the service explicitly; the
-   installer will not restart a running daemon for you.
+2. Deploy the unit, `daemon-reload`, and restart the service explicitly when bypassing
+   the installer. The installer restarts an already-running daemon itself.
 3. Confirm `keepalive list` still shows real project names, not `unknown`/`?`.
 4. Confirm classification still recognizes an installed AI CLI, since
    `ka_proc_exe_basename` contributes to `ka_proc_signature`.
@@ -394,18 +477,14 @@ directives, so neither one can qualify this area. Always verify on a live sessio
 `~/.local/share/keepalive-manager`, symlinks `~/.local/bin/keepalive`, installs the
 two user units, reloads systemd, and enables/starts only `keepalive.socket`.
 
-The current installer does not explicitly restart an already running daemon after
-copying an update. A maintenance update should therefore include:
+The installer preflights the systemd user manager, requires effective HOME/config/runtime
+agreement with the caller, canonicalizes and records the complete unit root, removes
+obsolete graphical-session/previous-custom-root files, enables only the socket under
+`sockets.target`, and restarts an already-running daemon after copying an update.
 
-```bash
-systemctl --user restart keepalive.service
-```
-
-when a daemon is active and immediate use of new sourced code is desired.
-
-`./scripts/uninstall.sh` disables/stops both units, removes installed source,
-symlink, and units, reloads the user manager, and deliberately retains
-`${XDG_CONFIG_HOME:-$HOME/.config}/keepalive`.
+`./scripts/uninstall.sh` removes files only after it confirms both units inactive (unless
+the operator explicitly uses the recovery-only `--force`), reloads the user manager, and
+deliberately retains `${XDG_CONFIG_HOME:-$HOME/.config}/keepalive`.
 
 ## Packaging
 

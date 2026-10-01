@@ -63,7 +63,8 @@ done
 mv -- "$(target_dir "$gap_uuid")/messages/001" "$(target_dir "$gap_uuid")/messages/002"
 replace_checkpoint_field "$(target_dir "$start_uuid")/state.tsv" ai_start invalid
 replace_checkpoint_field "$(target_dir "$range_uuid")/state.tsv" main_remaining 121
-rm -f -- "$(target_dir "$required_uuid")/secondary_message"
+required_secondary_file=$(ka_state_read_field "$required_uuid" secondary_message_file)
+rm -f -- "$(target_dir "$required_uuid")/$required_secondary_file"
 replace_checkpoint_field "$(target_dir "$identity_uuid")/state.tsv" uuid "$replacement_uuid"
 external_message="$TEST_TMP/external-message"
 ka_write_scalar "$external_message" 'external message must not be followed'

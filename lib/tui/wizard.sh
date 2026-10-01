@@ -374,7 +374,9 @@ ka_tui_run_wizard() {
         fi
     done
 
-    id=$(ka_ipc_new_request "$command" "$uuid") || { ka_wizard_discard "$tmp"; return 1; }
+    ka_ipc_new_request "$command" "$uuid" >/dev/null \
+        || { ka_wizard_discard "$tmp"; return 1; }
+    id=$KA_IPC_REQUEST_ID
     req=$(ka_ipc_request_dir "$id")
     cp -a -- "$tmp/config" "$req/config"
     ka_wizard_discard "$tmp"

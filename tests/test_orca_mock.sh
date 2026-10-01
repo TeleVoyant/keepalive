@@ -197,10 +197,11 @@ touch "$bad_schema_file"
 export FAKE_ORCA_BAD_SCHEMA_FILE=$bad_schema_file
 konsole_uuid='konsole-isolation-row'
 # Role: Emit a complete Konsole snapshot while the Orca adapter is intentionally failing.
-ka_konsole_discover() {
-    printf '%s\tCodex\tKonsole Agent\t/work/konsole\torg.kde.konsole-42\t/Sessions/7\t111\t222\t333\t444\tcodex\n' \
-        "$konsole_uuid"
-    printf '#COMPLETE\n'
+ka_konsole_discover_rows() {
+    KA_DISCOVERY_ROWS=(
+        "$konsole_uuid"$'\tCodex\tKonsole Agent\t/work/konsole\torg.kde.konsole-42\t/Sessions/7\t111\t222\t333\t444\tcodex'
+        '#COMPLETE'
+    )
 }
 KA_KONSOLE_ENABLED=1
 assert_false 'an unknown Orca JSON schema marks only that backend pass incomplete' ka_state_refresh_discovery

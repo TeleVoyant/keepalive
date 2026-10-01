@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Per-target runtime event logging. Logs intentionally live under XDG_RUNTIME_DIR
-# and therefore do not survive a full logout/reboot.
+# Per-target event logging under the selected runtime base. Session-managed logs disappear
+# at logout/reboot; the hardened /tmp fallback has a different physical lifecycle but is
+# still non-durable application state.
 
 # Per-UUID write counters driving periodic trims. Runtime-only, never persisted.
 declare -gA KA_LOG_WRITES=()

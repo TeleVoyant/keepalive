@@ -6,7 +6,7 @@ source_core
 ka_classifier_init
 
 # Role: Override proc signature inside this test to exercise registry behavior deterministically.
-ka_proc_signature() { printf '%s' "$MOCK_SIGNATURE"; }
+ka_proc_signature_set() { REPLY=$MOCK_SIGNATURE; }
 MOCK_SIGNATURE='node /usr/bin/node /x/@anthropic-ai/claude-code/cli.js'
 assert_eq $'Claude\t123' "$(ka_classifier_match_pid 123)" 'recognize Claude Node wrapper signature'
 MOCK_SIGNATURE='node /x/@google/gemini-cli/dist/index.js'

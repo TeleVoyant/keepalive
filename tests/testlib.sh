@@ -49,6 +49,13 @@ assert_contains() {
     if grep -Fq -- "$needle" "$path"; then printf 'ok %d - %s\n' "$TEST_COUNT" "$message"; else printf 'not ok %d - %s\n' "$TEST_COUNT" "$message"; ((TEST_FAIL += 1)); fi
 }
 
+# Role: Record an assertion that the host cannot exercise, without hiding the reason.
+test_skip() {
+    local message=$1 reason=$2
+    ((TEST_COUNT += 1))
+    printf 'ok %d - %s # SKIP %s\n' "$TEST_COUNT" "$message" "$reason"
+}
+
 # Role: Create isolated HOME/XDG directories so tests never touch the real user profile.
 test_env_setup() {
     TEST_TMP=$(mktemp -d)
@@ -60,6 +67,15 @@ test_env_setup() {
     # live Orca runtime merely because orca-ide happens to be on PATH.
     export KEEPALIVE_ORCA_ENABLED=0
     mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_RUNTIME_DIR" "$XDG_STATE_HOME"
+    chmod 700 "$XDG_RUNTIME_DIR"
+}
+
+# Role: Give the conventional unprivileged test account ownership without assuming its group name.
+test_chown_for_unprivileged() {
+    local path=$1 group
+    ((EUID == 0)) || return 0
+    group=$(id -g nobody) || return 1
+    chown -R "nobody:$group" "$path"
 }
 
 # Role: Source all non-TUI runtime modules in production order for unit tests.

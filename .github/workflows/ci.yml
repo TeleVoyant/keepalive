@@ -7,24 +7,64 @@ on:
   workflow_dispatch:
 
 jobs:
-  test:
-    name: Syntax, tests, and unit verification
+  distro-test:
+    name: ${{ matrix.name }} / syntax, tests, units
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Ubuntu 24.04
+            image: ubuntu:24.04
+            family: apt
+          - name: Debian 12
+            image: debian:12
+            family: apt
+          - name: Fedora
+            image: fedora:latest
+            family: dnf
+          - name: Arch Linux
+            image: archlinux:latest
+            family: pacman
     steps:
       - uses: actions/checkout@v4
 
-      - name: Record the environment
-        run: |
-          bash --version | head -1
-          python3 --version
-          command -v systemd-analyze || echo 'systemd-analyze absent; that stage self-skips'
-
-      - name: Run the aggregate developer check
-        # ShellCheck runs as its own job below, so it is skipped here to keep the two
-        # failures distinguishable in the job list.
+      - name: Run the aggregate check as root inside ${{ matrix.name }}
+        # Root deliberately exercises the runuser/chown branches. These containers provide
+        # parser/static coverage only; a booted user manager is qualified separately.
         env:
-          KEEPALIVE_SKIP_SHELLCHECK: '1'
-        run: ./scripts/dev-check.sh
+          DISTRO_IMAGE: ${{ matrix.image }}
+          DISTRO_FAMILY: ${{ matrix.family }}
+        run: |
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/src:ro" \
+            --workdir /src \
+            --env DISTRO_FAMILY \
+            --env LANG=C.UTF-8 \
+            --env LC_ALL=C.UTF-8 \
+            "$DISTRO_IMAGE" \
+            bash -lc '
+              set -Eeuo pipefail
+              case "$DISTRO_FAMILY" in
+                apt)
+                  export DEBIAN_FRONTEND=noninteractive
+                  apt-get update
+                  apt-get install -y --no-install-recommends \
+                    bash coreutils findutils grep sed gawk procps util-linux systemd jq python3
+                  ;;
+                dnf)
+                  dnf install -y \
+                    bash coreutils findutils grep sed gawk procps-ng util-linux systemd jq python3
+                  ;;
+                pacman)
+                  pacman -Syu --noconfirm --needed \
+                    bash coreutils findutils grep sed gawk procps-ng util-linux systemd jq python
+                  ;;
+              esac
+              bash --version | head -1
+              systemd-analyze --version | head -1
+              KEEPALIVE_SKIP_SHELLCHECK=1 ./scripts/dev-check.sh
+            '
 
   lint:
     name: ShellCheck

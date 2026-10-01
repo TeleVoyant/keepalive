@@ -1,5 +1,95 @@
 # Observed Risks, Gaps, and Open Questions
 
+## Open after 2026-10-01 (performance and update-reload pass)
+
+- **One-second charge on activation (pre-existing, accepted).** A target created or
+  resumed mid-wait while another target is ACTIVE is charged the whole elapsed second at
+  the next tick, so its first send can be up to 1 s early. The 1.0.0 loop did the same;
+  moving the error the other way would only make the first send late. Documented, not
+  changed.
+- **Downgrade quarantines current checkpoints.** A release older than versioned
+  secondary-message files reads only the fixed `secondary_message` and quarantines
+  current records. Update forward; documented in `docs/TROUBLESHOOTING.md`.
+- **`pending_submit` is still not a checkpoint field.** The graceful stop removes the
+  update/stop path to a half-delivered message, but a SIGKILL (or stop-timeout kill)
+  between text and Enter still loses it; the next send then repeats the text.
+- **`ka_sleep`'s private pipe is inherited by child processes** of a client (no
+  close-on-exec in Bash). Harmless - nothing writes to it - but it is one extra fd per
+  child until it exits.
+- **Konsole live session never measured.** No Konsole instance was running during this
+  pass; Konsole costs were measured against the qdbus mock and the installed binary's
+  adaptor XML. Konsole session values are D-Bus *methods*, so `Properties.GetAll` cannot
+  batch them.
+- **TUI reload needs the daemon to restart.** A TUI re-execs only when its entrypoint
+  changed *and* a new daemon pid is online, so an update that does not restart the daemon
+  (socket-only, or a hand-started daemon) leaves open TUIs on old code until they exit.
+
+## Resolved on 2026-10-01: daemon, client, and update resource pass
+
+Measured with the mocks in isolated `systemd-run --user --scope` units, two alternating
+62 s repetitions per state (`.agents/DEVELOPMENT.md` has the method):
+
+| state | CPU before -> after | voluntary ctx switches/min | external execs/min |
+|---|---|---|---|
+| idle, nothing monitored | 2.09% -> 0.08% | 557 -> 24 | 222 -> 3 |
+| client attached | 5.42% -> 2.54% | 568 -> 265 | 509 -> 216 |
+| 2 ACTIVE Konsole | 4.92% -> 3.47% | 1134 -> 424 | 507 -> 347 |
+| 2 ACTIVE Orca | 2.50% -> 0.63% | 799 -> 111 | 245 -> 40 |
+| 2 ACTIVE Konsole + client | 8.26% -> 4.94% | 941 -> 532 | 764 -> 456 |
+
+Idle TUI 7.49% -> 2.83%; `keepalive list` 519 -> 388 ms, `pause` 1006 -> 683 ms;
+`ka_state_publish_index` identical 5.92 -> 0.46 ms, changing 6.05 -> 2.91 ms; save
+21.9 -> 14.9 ms; two-target flush 44.6 -> 31.4 ms. Daemon RSS +4-8% (~0.5 MiB).
+
+Root causes and fixes (all in the working tree): fixed 0.20 s FIFO polling -> deadline
+wait; a 1 s tick and 1 s index rewrite with nobody watching -> presence-driven publish and
+ACTIVE-only tick; unattended Konsole discovery whose snapshot health never used ->
+per-backend unattended plan; repeated Orca CLI failures every 3 s -> exponential backoff;
+`mktemp`+`chmod` per atomic write -> descriptor-held noclobber create; identical index
+rewrites -> content comparison; `tr|sed|readlink` and `$(...)` per `/proc` field ->
+`_set` helpers plus a validated exe cache; two `jq` per Orca response -> one; `sort` per
+TUI frame with ticking timers -> per-UUID key cache; external `sleep` per CLI poll ->
+`ka_sleep`. Unit: `Nice=10`, `CPUSchedulingPolicy=batch`, `IOSchedulingClass=idle`,
+`TimerSlackNSec=50ms`, `KillMode=mixed`.
+
+Defects found and fixed on the way: the TUI presence stamp carried `\033[K`, so a
+watching client was never detected (since `d249762`); DELETE answered OK when `rm`
+failed; a negative snapshot age after a monotonic rollback was trusted; the old
+`printf '%.*s'` truncation split multibyte characters; TERM could cut a delivery between
+text and Enter. Proofreading (five reviewers) also caught, before merge: a multi-document
+Orca stream slipping past the merged `jq`; check-then-read races in companion reuse
+(reverted - fresh companion per save); symlinked cleanup roots; FIFO-planted temp names
+blocking; an exe cache discarded by process substitution and blind to same-argv execs;
+presence/clock overflow; disabled backends planning wakeups; installer PID-reuse
+impostors and post-swap aborts. Test writers found one more: companion pruning accepted
+the targets root itself.
+
+Found only after installing on the live host: about 5% of control requests were dropped
+(`keepalive refresh` hit the 8 s client timeout; the TUI took 8 s to open). Trace evidence
+from a socket-activated replica: a `read -t 0.175` returned 142 at the exact moment a line
+arrived, having consumed its first byte `R`; the next read got `EQUEST <id>`, which
+`ka_ipc_handle_line` rejected silently. Bash keeps partial input on timeout, and the loop
+discarded it. Latent since 1.0.0 (the old 0.2 s poll had the same race); timer slack
+(50 ms late timeouts) widened the window to ~1 in 20. `ka_ipc_service_read` now completes
+a partial line; `tests/test_ipc.sh` pins it and fails on the old code. After the fix the
+live daemon answered 40/40 PINGs and 30/30 REFRESHes (max 619 ms).
+
+## Mitigated on 2026-10-01: destructive-path and false-success failure modes
+
+The final review reproduced four destructive or misleading edge cases: installer
+replacement of an arbitrary pre-existing share, uninstall loss of enablement links after
+a failed post-disable probe, target-state writes through a planted symlink, and lock-file
+truncation through a symlink. It also found index append failures and daemon-reload errors
+that could be reported as success, plus startup cleanup that could erase the sole message
+rollback tree.
+
+All are now fail-closed. Regression coverage lives in `test_install_safety.sh`,
+`test_runtime_hardening.sh`, `test_state_hardening.sh`, and
+`test_failure_propagation.sh`. The remaining threat boundary is deliberate: the runtime
+tree is private `0700`, so checks protect against stale/malformed paths and pre-placement;
+they do not claim race-proof transactions against a malicious process running as the same
+UID.
+
 ## Mitigated on 2026-09-25: Orca's evolving CLI contract
 
 Orca is still evolving and its commands or JSON fields may change. Allowing those details
@@ -100,10 +190,16 @@ Note that discovery, PID-reuse guarding, and foreground-ancestry validation were
 never affected, because those read only `comm`, `cmdline`, and `stat`.
 
 The unit now uses only namespace-free hardening (`NoNewPrivileges`,
-`RestrictSUIDSGID`, `RestrictRealtime`, `RestrictNamespaces`, `LockPersonality`,
+`RestrictRealtime`, `RestrictNamespaces`, `LockPersonality`,
 `SystemCallArchitectures=native`, `RestrictAddressFamilies=AF_UNIX`), all verified
 against live Konsole discovery. The unit carries a comment naming the specific
 directives that must never be added back.
+
+The 2026-09-30 portability pass removed `RestrictSUIDSGID`, which systemd added only in
+version 242, so the documented systemd 235 floor is real. `NoNewPrivileges=yes` retains
+the relevant privilege-escalation protection. That compatibility adjustment is covered
+by static unit verification; the dated live observation above applies to the remaining
+namespace-free set, not to a separate live test of every supported systemd release.
 
 This also removes the service-namespace half of the `/tmp` fallback risk below.
 
@@ -395,9 +491,10 @@ Not defects; recorded so the next agent does not have to rediscover them.
   dispatches Konsole and Orca validation/delivery without forking the scheduler. Any
   additional backend still needs a stable identity model; do not add generic focus or
   keystroke injection merely because the dispatch seam exists.
-- **Signal-driven discovery.** Subscribing to `org.freedesktop.DBus.NameOwnerChanged`
-  would let the daemon learn when Konsole services appear or vanish instead of polling
-  every 3 s, which is the structural fix behind remedies 1-3 above.
+- **Signal-driven discovery - evaluated 2026-10-01, not worth it.** A `busctl --user
+  monitor` coprocess on `NameOwnerChanged` costs <0.1% CPU idle, but that signal only
+  reports whole Konsole services appearing or vanishing, not tabs opened inside an
+  existing service, so polling could not be removed. At most it could be a wake hint.
 - **Send policy.** Jitter to avoid synchronized sends across targets, retry with backoff
   instead of waiting a whole interval after a transport failure, and optionally skipping
   a send while the AI process is visibly busy.
@@ -521,32 +618,40 @@ real change rather than four times a second.
 - `q` closes the manager, detail, and log views but not the wizard, where only `Esc`
   cancels. This is what the on-screen hints say, but it is an inconsistency.
 
-## Resolved on 2026-08-23: message replacement commits through a staged swap
+## Mitigated through 2026-09-30: directory replacement commits through staged swaps
 
 `ka_commit_staged_dir` builds the new rotation beside the live one and commits with two
-renames, rolling back if the second fails. The commit window is two renames instead of
-the whole copy; previously the live directory was removed and repopulated file by file,
-so a crash mid-copy left a partially written rotation in place. `ka_cleanup_staged_dirs`
-sweeps abandoned staging and rollback directories at daemon start and profile init.
+`mv -T` renames, rolling back if the second fails without ever nesting a staged directory
+inside a concurrently recreated destination. The commit window is two renames instead of
+the whole copy; previously the live directory was removed and repopulated file by file.
+Profile setup restores one valid rollback directory left by a crash before it creates any
+defaults. `ka_cleanup_staged_dirs` sweeps other abandoned staging/rollback directories at
+daemon start and profile init.
 
-This is not a true transaction, and the notes deliberately do not claim one: POSIX has
-no atomic directory swap. An interruption between the two renames leaves the directory
-missing, which the checkpoint loader already rejects and quarantines rather than using,
-so the failure remains detectable rather than silent.
+The 2026-09-30 robustness pass extended this to the complete persistent profile: all
+profile scalars, the secondary message, and the main-message rotation are built in one
+staged profile directory before the directory swap. Target checkpoints also commit an
+atomic reference to a versioned secondary-message payload, and CONFIGURE snapshots then
+restores the exact prior target when a reported state/profile commit fails. Ordinary I/O
+failures therefore no longer report success with a mixed-generation target/profile.
+
+This is not a true cross-directory transaction, and the notes deliberately do not claim
+one: a process crash can still occur between committing a target and its global profile.
+The profile's own two-rename interruption is recoverable, and ordinary returned failures
+run compensating target restoration rather than silently accepting split generations.
 
 Original finding follows.
 
 ### Original finding: multi-file operations are not transactions
 
-The documentation describes configuration save as a transaction, but atomicity is
-per scalar file or per `state.tsv` rename. Create/configure performs multiple
-steps:
+Earlier documentation described configuration save as a transaction, but atomicity was
+per scalar file or per `state.tsv` rename. Create/configure still spans multiple
+commit points even after the complete profile gained a staged directory swap:
 
 - mutate in-memory target arrays;
 - remove/replace target message directory;
 - write target state and secondary message separately;
-- remove/replace global profile message directory;
-- write profile scalar files separately.
+- replace the complete staged global profile directory.
 
 A crash or I/O failure between steps can leave target messages, target checkpoint,
 and profile at different generations. Likewise, clients may briefly observe a
@@ -561,9 +666,9 @@ semantics and add interruption/corruption tests.
 
 `ka_runtime_secure` is now called from `ka_ensure_runtime_dirs` and is fatal in service
 mode. It refuses a symlinked runtime base, refuses one that exists but is not a directory
-owned by this user, creates it otherwise, forces mode 700, and warns that the fallback
-does not share the login session lifecycle. `ka_runtime_is_xdg` existed for this and had
-never been wired up.
+owned by this user, creates it otherwise, requires successful mode-700 hardening, and warns
+that the fallback does not share the login session lifecycle. The preferred XDG and
+`/run/user` candidates must likewise be private rather than group/world writable.
 
 Original finding follows.
 
@@ -671,10 +776,11 @@ that never ran `pam_systemd` - `su`, `sudo -u`, cron, non-interactive remote exe
 addressed `/tmp/keepalive-$UID` while the daemon listened under `/run/user/$UID`, and
 reported the service as unavailable.
 
-`ka_xdg_resolve_runtime_base` now tries `$XDG_RUNTIME_DIR`, then `/run/user/$UID` when it is
-a directory this user owns, then the `/tmp` fallback, and records which one it picked in
-`KA_RUNTIME_SOURCE`. `ka_runtime_secure` hardens only the fallback, and `doctor` prints the
-base together with its source.
+`ka_xdg_resolve_runtime_base` now tries a safe `$XDG_RUNTIME_DIR`, then `/run/user/$UID`,
+requiring each candidate to be absolute, owned, and free of symlinked path components. It
+then tries the `/tmp` fallback and records the choice in `KA_RUNTIME_SOURCE`.
+`ka_runtime_secure` hardens only the fallback, and `doctor` prints the base together with
+its source.
 
 Verified with the installed client: `env -u XDG_RUNTIME_DIR keepalive status` reported
 `service unavailable` before and `Keep Alive service: online` after.

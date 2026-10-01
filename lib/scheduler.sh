@@ -17,8 +17,23 @@ ka_scheduler_validate_before_send() {
     if ka_transport_validation_is_transient "$backend" "$rc"; then
         return 2
     fi
-    ka_state_mark_unavailable "$uuid" "$reason"
+    if ! ka_state_mark_unavailable "$uuid" "$reason"; then
+        KA_SCHEDULER_VALIDATION_REASON=${KA_LAST_ERROR:-'could not save unavailable target state'}
+        return 3
+    fi
     return 1
+}
+
+# Role: Persist scheduler mutations and retain a dirty retry marker if the write fails.
+ka_scheduler_checkpoint() {
+    local uuid=$1 rc
+    if ka_state_save_target "$uuid"; then
+        return 0
+    else
+        rc=$?
+    fi
+    ka_state_mark_dirty "$uuid"
+    return "$rc"
 }
 
 # Role: Deliver one MAIN event using the selected target's current mode and message rotation.
@@ -34,7 +49,7 @@ ka_scheduler_send_main() {
             ka_log_event "$uuid" MAIN "$detail" "$([[ $origin == MANUAL ]] && printf 'FAILED · manual' || printf FAILED)"
             ka_notify_send_failed "${KA_T_NOTIFY[$uuid]}" "${KA_T_NAME[$uuid]}" "$detail"
             KA_T_MAIN_REMAIN[$uuid]=${KA_T_MAIN_INTERVAL[$uuid]}
-            ka_state_save_target "$uuid" || return
+            ka_scheduler_checkpoint "$uuid" || return
         fi
         return 3
     fi
@@ -47,7 +62,7 @@ ka_scheduler_send_main() {
         # the event so this does not retry every tick, and leave the target usable.
         KA_LAST_ERROR='no main messages are stored for this target; reconfigure it'
         KA_T_MAIN_REMAIN[$uuid]=${KA_T_MAIN_INTERVAL[$uuid]}
-        ka_state_save_target "$uuid" || return
+        ka_scheduler_checkpoint "$uuid" || return
         ka_log_event "$uuid" CONFIG "$KA_LAST_ERROR" FAILED
         return 4
     fi
@@ -60,7 +75,7 @@ ka_scheduler_send_main() {
     # restarted daemon delivered the same event again. Resetting first matches the
     # existing policy that a failed attempt still consumes its event.
     KA_T_MAIN_REMAIN[$uuid]=${KA_T_MAIN_INTERVAL[$uuid]}
-    ka_state_save_target "$uuid" || return
+    ka_scheduler_checkpoint "$uuid" || return
 
     local submit_only=${KA_T_PENDING_SUBMIT[$uuid]:-0}
     if [[ ${KA_T_MODE[$uuid]} == ENTER_ONLY ]]; then
@@ -97,7 +112,7 @@ ka_scheduler_send_main() {
         delivery_failed=1
     fi
     # Second checkpoint: persist the rotation advance or the pending-submit state.
-    ka_state_save_target "$uuid" || return
+    ka_scheduler_checkpoint "$uuid" || return
     # A failed transport attempt still consumes this timer event, but callers must
     # receive failure rather than an incorrect IPC success response.
     ((delivery_failed == 0)) || return 5
@@ -117,14 +132,14 @@ ka_scheduler_send_secondary() {
             ka_log_event "$uuid" SECONDARY "$detail" "$([[ $origin == MANUAL ]] && printf 'FAILED · manual' || printf FAILED)"
             ka_notify_send_failed "${KA_T_NOTIFY[$uuid]}" "${KA_T_NAME[$uuid]}" "$detail"
             KA_T_SECONDARY_REMAIN[$uuid]=${KA_T_SECONDARY_INTERVAL[$uuid]}
-            ka_state_save_target "$uuid" || return
+            ka_scheduler_checkpoint "$uuid" || return
         fi
         return 4
     fi
 
     # Consume this timer event before delivering, for the same crash-window reason as MAIN.
     KA_T_SECONDARY_REMAIN[$uuid]=${KA_T_SECONDARY_INTERVAL[$uuid]}
-    ka_state_save_target "$uuid" || return
+    ka_scheduler_checkpoint "$uuid" || return
 
     message=${KA_T_SECONDARY_MESSAGE[$uuid]}
     if [[ ${KA_T_MODE[$uuid]} == ENTER_ONLY ]]; then detail='[ENTER]'; else detail=$message; fi
@@ -151,7 +166,7 @@ ka_scheduler_send_secondary() {
         delivery_failed=1
     fi
     # Second checkpoint: persist the one-shot flag or the pending-submit state.
-    ka_state_save_target "$uuid" || return
+    ka_scheduler_checkpoint "$uuid" || return
     # Match MAIN semantics: the event is consumed even on failure, while callers still
     # receive a transport error rather than a false success.
     ((delivery_failed == 0)) || return 5
@@ -177,12 +192,16 @@ ka_scheduler_send_enter_once() {
 
     if ka_transport_deliver "$uuid" ENTER_ONLY ''; then
         KA_T_PENDING_SUBMIT[$uuid]=0
-        ka_log_event "$uuid" MAIN '[ENTER] one-shot' 'SENT · manual'
-        ka_notify_sent "${KA_T_NOTIFY[$uuid]}" "${KA_T_NAME[$uuid]}" '[ENTER]'
         KA_T_MAIN_REMAIN[$uuid]=${KA_T_MAIN_INTERVAL[$uuid]}
         # Resume normal delivery; a one-shot Enter is not a mode change.
         KA_T_MODE[$uuid]=MESSAGE_ENTER
-        ka_state_save_target "$uuid"
+        if ! ka_scheduler_checkpoint "$uuid"; then
+            KA_LAST_ERROR='Enter was delivered, but the updated target state could not be saved'
+            ka_log_event "$uuid" MAIN '[ENTER] one-shot' 'FAILED · checkpoint'
+            return 6
+        fi
+        ka_log_event "$uuid" MAIN '[ENTER] one-shot' 'SENT · manual'
+        ka_notify_sent "${KA_T_NOTIFY[$uuid]}" "${KA_T_NAME[$uuid]}" '[ENTER]'
         return 0
     fi
 
@@ -191,7 +210,11 @@ ka_scheduler_send_enter_once() {
     ka_log_event "$uuid" MAIN '[ENTER] one-shot' 'FAILED · manual'
     ka_notify_send_failed "${KA_T_NOTIFY[$uuid]}" "${KA_T_NAME[$uuid]}" '[ENTER]'
     KA_T_MAIN_REMAIN[$uuid]=${KA_T_MAIN_INTERVAL[$uuid]}
-    ka_state_save_target "$uuid"
+    if ! ka_scheduler_checkpoint "$uuid"; then
+        KA_LAST_ERROR+='; the updated target state could not be saved'
+        ka_log_event "$uuid" MAIN '[ENTER] one-shot' 'FAILED · checkpoint'
+        return 6
+    fi
     return 5
 }
 

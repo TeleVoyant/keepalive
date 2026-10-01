@@ -22,7 +22,8 @@ ka_orca_find() {
     else
         # Linux installs use orca-ide: bare orca is commonly the GNOME screen reader.
         # Keep the candidate list here, rather than scattered through service/doctor code.
-        for candidate in orca-ide "$HOME/.local/bin/orca-ide" /usr/local/bin/orca-ide; do
+        for candidate in orca-ide "${HOME:+$HOME/.local/bin/orca-ide}" /usr/local/bin/orca-ide; do
+            [[ -n $candidate ]] || continue
             if command -v "$candidate" >/dev/null 2>&1; then
                 KA_ORCA_CLI=$(command -v "$candidate")
                 break
@@ -153,52 +154,56 @@ ka_orca_discover() {
     # Current Orca omits agentIdentity entirely for ordinary shell terminals. That field
     # is therefore optional on ignored rows, but every eligible agent row must carry the
     # full binding below or the pass is rejected.
-    if ! "$KA_ORCA_JQ" -e '
-        .ok == true and
-        (.result.terminals | type == "array") and
-        (.result.truncated | type == "boolean") and
-        (.result.truncated == false) and
-        (._meta.runtimeId | type == "string" and length > 0) and
-        all(.result.terminals[];
-            (.handle | type == "string") and
-            (.connected | type == "boolean") and
-            (.writable | type == "boolean") and
-            (.orphaned | type == "boolean") and
-            ((.agentIdentity | type) == "null" or (.agentIdentity | type) == "string") and
-            ((.connected != true or .writable != true or .orphaned == true or
-              (.agentIdentity | type) != "string" or (.agentIdentity | length) == 0) or
-                ((.ptyId | type == "string" and length > 0) and
-                 (.incarnationId | type == "string" and length > 0) and
-                 (.worktreeId | type == "string" and length > 0) and
-                 (.worktreePath | type == "string" and length > 0) and
-                 (.executionHostId | type == "string" and length > 0) and
-                 (.tabId | type == "string" and length > 0) and
-                 (.leafId | type == "string" and length > 0))))
-    ' >/dev/null 2>&1 <<<"$output"; then
-        printf '#INCOMPLETE\tschema\n'
-        return 0
-    fi
-
+    # Validation and projection are one jq run (they used to be two), and the program can
+    # only emit rows after the whole response validated. Anything unexpected - a response
+    # that is not an object, input that is not JSON, or any invalid document in a stream
+    # of several - raises a jq error, so the exit status alone fails the pass closed even
+    # when an earlier document already printed rows.
     if ! rows=$("$KA_ORCA_JQ" -r '
-        ._meta.runtimeId as $runtime |
-        .result.terminals[] |
-        select(.connected == true and .writable == true and .orphaned != true) |
-        select(.agentIdentity | type == "string" and length > 0) |
-        [
-            .agentIdentity,
-            (if (.title | type == "string" and length > 0) then .title else (.worktreePath | split("/") | last) end),
-            .worktreePath,
-            .handle,
-            .ptyId,
-            .incarnationId,
-            .worktreeId,
-            $runtime,
-            .executionHostId,
-            .tabId,
-            .leafId
-        ] | @tsv
-    ' <<<"$output"); then
-        printf '#INCOMPLETE\tparse\n'
+        def valid:
+            .ok == true and
+            (.result.terminals | type == "array") and
+            (.result.truncated | type == "boolean") and
+            (.result.truncated == false) and
+            (._meta.runtimeId | type == "string" and length > 0) and
+            all(.result.terminals[];
+                (.handle | type == "string") and
+                (.connected | type == "boolean") and
+                (.writable | type == "boolean") and
+                (.orphaned | type == "boolean") and
+                ((.agentIdentity | type) == "null" or (.agentIdentity | type) == "string") and
+                ((.connected != true or .writable != true or .orphaned == true or
+                  (.agentIdentity | type) != "string" or (.agentIdentity | length) == 0) or
+                    ((.ptyId | type == "string" and length > 0) and
+                     (.incarnationId | type == "string" and length > 0) and
+                     (.worktreeId | type == "string" and length > 0) and
+                     (.worktreePath | type == "string" and length > 0) and
+                     (.executionHostId | type == "string" and length > 0) and
+                     (.tabId | type == "string" and length > 0) and
+                     (.leafId | type == "string" and length > 0))));
+        if (try valid catch false) then
+            ._meta.runtimeId as $runtime |
+            .result.terminals[] |
+            select(.connected == true and .writable == true and .orphaned != true) |
+            select(.agentIdentity | type == "string" and length > 0) |
+            [
+                .agentIdentity,
+                (if (.title | type == "string" and length > 0) then .title else (.worktreePath | split("/") | last) end),
+                .worktreePath,
+                .handle,
+                .ptyId,
+                .incarnationId,
+                .worktreeId,
+                $runtime,
+                .executionHostId,
+                .tabId,
+                .leafId
+            ] | @tsv
+        else
+            error("unsupported Orca terminal list schema")
+        end
+    ' 2>/dev/null <<<"$output"); then
+        printf '#INCOMPLETE\tschema\n'
         return 0
     fi
     while IFS=$'\t' read -r agent name directory handle pty incarnation worktree runtime host tab leaf; do
@@ -238,39 +243,44 @@ ka_orca_validate_target() {
         return 21
     fi
 
-    if ! "$KA_ORCA_JQ" -e '
-        .ok == true and
-        (._meta.runtimeId | type == "string" and length > 0) and
-        (.result.terminal | type == "object") and
-        (.result.terminal |
-            (.handle | type == "string" and length > 0) and
-            (.ptyId | type == "string" and length > 0) and
-            (.incarnationId | type == "string" and length > 0) and
-            (.worktreeId | type == "string" and length > 0) and
-            (.executionHostId | type == "string" and length > 0) and
-            (.tabId | type == "string" and length > 0) and
-            (.leafId | type == "string" and length > 0) and
-            (.connected | type == "boolean") and
-            (.writable | type == "boolean") and
-            (.orphaned | type == "boolean") and
-            has("agentIdentity") and
-            ((.agentIdentity | type) == "string" or (.agentIdentity | type) == "null"))
-    ' >/dev/null 2>&1 <<<"$output"; then
-        # A successful command with an unfamiliar response proves no identity change.
-        # Treat it as transient so an Orca 0.x schema drift cannot make targets sticky.
+    # One jq run validates and extracts; it used to take two, before every send and every
+    # live health check. Any unfamiliar response - unparseable, not an object, or missing
+    # a field - is the schema result: a successful command with an unfamiliar response
+    # proves no identity change, so it stays transient and an Orca 0.x schema drift
+    # cannot make targets sticky.
+    if ! row=$("$KA_ORCA_JQ" -r '
+        def valid:
+            .ok == true and
+            (._meta.runtimeId | type == "string" and length > 0) and
+            (.result.terminal | type == "object") and
+            (.result.terminal |
+                (.handle | type == "string" and length > 0) and
+                (.ptyId | type == "string" and length > 0) and
+                (.incarnationId | type == "string" and length > 0) and
+                (.worktreeId | type == "string" and length > 0) and
+                (.executionHostId | type == "string" and length > 0) and
+                (.tabId | type == "string" and length > 0) and
+                (.leafId | type == "string" and length > 0) and
+                (.connected | type == "boolean") and
+                (.writable | type == "boolean") and
+                (.orphaned | type == "boolean") and
+                has("agentIdentity") and
+                ((.agentIdentity | type) == "string" or (.agentIdentity | type) == "null"));
+        if (try valid catch false) then
+            ._meta.runtimeId as $runtime |
+            .result.terminal |
+            [
+                .handle, .ptyId, .incarnationId, .worktreeId, $runtime,
+                .executionHostId, .tabId, .leafId,
+                (if (.agentIdentity | type) == "string" then .agentIdentity else "-" end),
+                (.connected | tostring), (.writable | tostring), (.orphaned | tostring)
+            ] | @tsv
+        else
+            error("unsupported Orca terminal show schema")
+        end
+    ' 2>/dev/null <<<"$output"); then
         return 22
     fi
-
-    row=$("$KA_ORCA_JQ" -r '
-        ._meta.runtimeId as $runtime |
-        .result.terminal |
-        [
-            .handle, .ptyId, .incarnationId, .worktreeId, $runtime,
-            .executionHostId, .tabId, .leafId,
-            (if (.agentIdentity | type) == "string" then .agentIdentity else "-" end),
-            (.connected | tostring), (.writable | tostring), (.orphaned | tostring)
-        ] | @tsv
-    ' 2>/dev/null <<<"$output") || return 21
     [[ -n $row ]] || return 21
     IFS=$'\t' read -r actual_handle pty incarnation worktree runtime host tab leaf agent connected writable orphaned <<<"$row"
 

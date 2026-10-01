@@ -56,7 +56,7 @@ cleanup_orca_service() {
 trap cleanup_orca_service EXIT
 
 if ((EUID == 0)); then
-    chown -R nobody:nogroup "$TEST_TMP"
+    test_chown_for_unprivileged "$TEST_TMP"
     chmod 755 "$TEST_TMP"
 fi
 

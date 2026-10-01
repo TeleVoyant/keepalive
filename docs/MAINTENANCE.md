@@ -66,11 +66,27 @@ Do not merge changes that weaken these rules:
     `ProtectKernel*` family all break `/proc/PID/cwd` and `/proc/PID/exe` resolution
     for processes the daemon does not own, silently reducing every session to
     `unknown`/`?` while all tests still pass. Restrict hardening to seccomp/prctl
-    directives.
+    directives. Process-level scheduling directives (`Nice=`, `CPUSchedulingPolicy=batch`,
+    `IOSchedulingClass=idle`, `TimerSlackNSec=`) create no namespace and are in use; never
+    use `CPUSchedulingPolicy=idle`, which can starve a due send, and never rely on cgroup
+    caps (`CPUWeight=`, `Memory*=`, `TasksMax=`), which need controller delegation that
+    user managers do not guarantee.
 41. Keep Orca commands, JSON paths, and error-code mappings inside `orca.sh`; the generic
     state machine and scheduler consume only the normalized transport contract.
 42. Never invoke bare `orca` on Linux; resolve `orca-ide` explicitly so the GNOME screen
     reader cannot be mistaken for the terminal CLI.
+43. Plan the scheduler tick only while a target is ACTIVE, and then every second: the
+    tick's elapsed time is the suspend detector, so a slower tick would preserve every
+    countdown as a false gap and a tick across a planned long sleep would log one.
+44. Never publish screen escapes into `clients.seen`; it is data the daemon parses as
+    epoch seconds, and a decorated stamp silently disables attached-client cadence.
+45. A stop signal never ends the daemon mid-work. It exits at once only while idle in the
+    control read, and otherwise at the top of the next loop iteration, so a delivery in
+    flight completes; `KillMode=mixed` keeps systemd from killing that delivery's helper.
+    Never restore `trap 'exit ...' TERM`: an update's restart then cut sends in half.
+46. A timed-out control read may still hold the first bytes of a request (Bash keeps
+    partial input on timeout). `ka_ipc_service_read` must complete such a line, never
+    discard it; timer slack makes the race common enough to drop about 5% of requests.
 
 ## Module responsibilities
 
@@ -113,7 +129,7 @@ Do not merge changes that weaken these rules:
 Prefer adding a conservative signature in `ka_classifier_init`, or use user config during experimentation:
 
 ```text
-~/.config/keepalive/classifiers.tsv
+${XDG_CONFIG_HOME:-$HOME/.config}/keepalive/classifiers.tsv
 ```
 
 Test exact executable/package boundaries. Avoid generic substrings such as plain `amp` without separators because they can match unrelated commands.
@@ -173,7 +189,7 @@ keepalive doctor
 
 ## Live integration test checklist
 
-On the real KDE workstation:
+On a real systemd user session (and on KDE as well when validating Konsole):
 
 1. Start two Claude Code sessions in separate Konsole tabs and one Codex/Kimi if available.
 2. `keepalive` should list each once, sorted Claude → Codex → Kimi → other.
@@ -201,7 +217,9 @@ On the real KDE workstation:
 24. Drive the full lifecycle from the CLI: `create`, `pause`, `resume`, `send`, `reset`, `mode`, `delete`, and `list --json`.
 25. Confirm `systemctl --user stop keepalive.service` logs no `Failed with result`.
 26. Press `r` repeatedly in target detail and add a message in the wizard; no key-hint line may appear twice.
-27. Re-run the installer while the daemon is active; it must restart the service.
+27. Re-run the installer while the daemon is active with an ACTIVE and a PAUSED target and
+    the manager TUI open; it must restart the service, print `Reloaded 2 running
+    keep-alive(s)`, keep both countdowns, and the TUI must restart itself on the same row.
 28. Press `e` in target detail: one Enter must be sent and delivery must return to MESSAGE+ENTER.
 29. Press `E`: delivery must stay ENTER ONLY until `e` or a reconfigure changes it.
 30. Enable the secondary prompt and let it fire; it must not fire a second time until reconfigured.
@@ -222,6 +240,17 @@ On the real KDE workstation:
     reason while the target remains ACTIVE until the transient strike budget is exhausted.
 42. Run Konsole and Orca together, then break one backend's discovery; rows from the other
     backend must continue to refresh.
+43. In a GNOME, other-desktop, or headless login where `graphical-session.target` is
+    inactive, install and confirm `keepalive.socket` is enabled through `sockets.target`.
+44. Stop `keepalive.service` and confirm the next client request reactivates it; then stop
+    `keepalive.socket` and confirm the service stops and the FIFO is removed.
+45. Upgrade an installation that still has
+    `graphical-session.target.wants/keepalive.socket`; confirm the obsolete link is gone
+    and the `sockets.target.wants` link is present.
+46. With nothing monitored and no client attached, sample the daemon for a minute
+    (`grep ctxt /proc/<pid>/status` before and after); voluntary context switches must
+    grow by roughly a dozen, not hundreds. Attach the TUI and confirm `clients.seen`
+    holds bare digits and the AVAILABLE rows refresh within a few seconds.
 
 ## Cutting a release
 
@@ -236,8 +265,9 @@ mechanical rather than a thing to remember.
    matching link reference at the bottom of the file. `dev-check.sh` requires this
    section to exist, because a tag is cut from it.
 4. Run `./scripts/dev-check.sh`; it must end with `ALL VALIDATION CHECKS PASSED`.
-5. Work through the live integration checklist above on a real KDE/Konsole workstation
-   and a disposable Orca agent. Neither mock can prove the live provider contract.
+5. Work through the live integration checklist above in a non-KDE systemd user session,
+   on a real KDE/Konsole workstation for that backend, and with a disposable Orca agent.
+   Neither mocks nor container unit parsing can prove a live provider/user-manager contract.
 6. Refresh `VALIDATION.md` and `docs/VALIDATION.md` with the observed assertion count
    and the live evidence.
 7. Commit, then tag: `git tag -a vX.Y.Z -m 'Keep Alive Manager X.Y.Z'` and

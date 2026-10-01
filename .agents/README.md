@@ -4,8 +4,8 @@ This directory is a durable, evidence-based handoff for future work on this
 repository.
 
 It records the repository understanding produced from a full source, test, documentation,
-service-unit, and history review, most recently refreshed for the Orca backend work on
-2026-09-25.
+service-unit, and history review, most recently refreshed after the final portability and
+transaction-safety review and the performance and update-reload pass on 2026-10-01.
 
 It does **not** contain hidden model instructions, private chain-of-thought, secrets,
 or transient platform state. It contains the useful project context another
@@ -15,18 +15,25 @@ maintainer or coding agent needs in order to continue safely.
 
 - Repository: `TeleVoyant/keepalive`
 - Branch: `master`
-- Reviewed baseline commit: `a37b8ff` (the repository HEAD before Orca integration)
-- Release: **1.0.0**, the first public release. Licensed MIT.
-- Product version: `1.0.0`
+- Reviewed baseline commit: the `v1.1.0` release commit (previous release `v1.0.0` at
+  `2ea6951`, Orca integration at `ea3d6f3`)
+- Release: **1.1.0**, released 2026-10-01 and tagged `v1.1.0`. Licensed MIT.
+- Product version: `1.1.0`
 - Implementation: Bash 5+, Linux `/proc`, Konsole D-Bus and Orca CLI adapters,
   `systemd --user`
-- History at review time: nine commits - `1e67c2b` implementation, then eight hardening
-  and performance passes ending at `96b5931`
-- State: 1.0.0 is released; the current worktree adds unreleased Orca support. Orca's
-  volatile CLI/JSON contract is intentionally isolated in `lib/orca.sh`, with generic
+- Contents of 1.1.0 since `ea3d6f3`, in order: the cross-distribution systemd portability and
+  transaction-safety hardening pass, then the **2026-10-01 performance and update-reload
+  pass** - deadline-paced daemon loop, presence-driven publication and discovery,
+  fork-free hot paths, single-`jq` Orca parsing, low-priority unit scheduling, graceful
+  stop, installer reload verification, and TUI self-reload after an update. Measured
+  results are in RISKS.md; method and safety rules in DEVELOPMENT.md.
+- Tests: 27 files, 1040 assertions, all passing (`./scripts/dev-check.sh`).
+- Installed on the development host from the release tree (2026-10-01); the live
+  daemon runs 1.1.0.
+- Orca's volatile CLI/JSON contract stays isolated in `lib/orca.sh`, with generic
   dispatch in `lib/transport.sh` and a mock-backed daemon integration test.
-- Working tree: intentionally contains this integration plus the user-directed rename
-  from `.agent/` to `.agents/`; do not restore the deleted singular directory.
+- `.agent/` was renamed to `.agents/` by the user; do not recreate the singular
+  directory.
 
 ## Memory map
 
@@ -46,7 +53,7 @@ these notes deliberately do not duplicate it:
 - [`../docs/CONFIGURATION.md`](../docs/CONFIGURATION.md): every environment knob with its
   default and the reasoning for it.
 - [`../docs/TROUBLESHOOTING.md`](../docs/TROUBLESHOOTING.md): symptom-first diagnosis.
-- [`../docs/TESTING.md`](../docs/TESTING.md): what each of the 389 assertions covers and
+- [`../docs/TESTING.md`](../docs/TESTING.md): what each of the 1040 assertions covers and
   the conventions for adding one.
 - [`../CONTRIBUTING.md`](../CONTRIBUTING.md): the conventions the automated checks
   enforce.
