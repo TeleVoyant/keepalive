@@ -66,6 +66,14 @@ names the regression file that pins the behavior.
   uses a generic title can remain a classifier false negative; no installed AI CLI showed
   this form in the read-only process scan.
 
+- **`tests/test_tui_pty.sh` wizard capture on hosted runners:** after the v1.1.1 push, one
+  GitHub Debian job reported `WAIT-TIMEOUT:a add` - the `1` key that opens the wizard was
+  not acted on within 30 s - and passed on re-run (it also passed ten consecutive local
+  runs under CPU load). Unlike the `tui_exit` helper, this capture step does not retry. A
+  narrow fix is one retry only when the wizard never opens (`WAIT-TIMEOUT:a add` on the
+  first barrier); that cannot mask the duplicate-redraw defect the assertions target.
+  Re-run the job first if it recurs.
+
 ### Deferred items and feature candidates
 
 - Konsole health/snapshot reuse still needs a live Konsole measurement; current CPU results

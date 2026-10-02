@@ -1,11 +1,17 @@
 # Development and Operations Memory
 
-## Uncommitted fix round on top of v1.1.0 — 2026-10-02
+## 1.1.1 release round — 2026-10-02
 
-This snapshot is the final documentation/fix round on top of the `v1.1.0` release; it is
-not a version bump. The aggregate suite currently passes **31 test files and 1519
-assertions** (`./tests/run.sh`), and `./scripts/dev-check.sh` is the final gate before
-shipping the patch.
+Released as **1.1.1** (`7b723f9`, tag `v1.1.1`), followed by `418e2e6` (release workflow
+locale fix). The aggregate suite passes **31 test files and 1519 assertions**
+(`./tests/run.sh`; containers report 1517 because two host-only cases skip), and
+`./scripts/dev-check.sh` is the final gate.
+
+How the round ran: an eight-part read-only audit of 1.1.0, one fix proposer per area
+delivering validated patches, the lead reviewing and refining each before applying it,
+three independent proofreading waves (each reproducing every defect before reporting
+it), and a regression-test wave in which every new assertion was shown to fail with its
+fix reverted. Local replicas of every CI lane ran before tagging.
 
 Engineering lessons from this round:
 
@@ -22,6 +28,29 @@ Engineering lessons from this round:
 - When adding validation to a startup path, measure fork counts with `bash -x` and
   `strace`, not just wall time. The XDG safety/memoization pass reduced the representative
   CLI path from about 1677 ms to about 100 ms while retaining ownership/mode checks.
+
+Release lessons from 1.1.1:
+
+- **Every container that runs the suite needs `LANG=C.UTF-8 LC_ALL=C.UTF-8`.** The display
+  assertions (truncation, glyphs) describe a UTF-8 terminal; under the C locale Bash counts
+  bytes. `ci.yml` always set it, but the new `release.yml` did not, so the `v1.1.1` tag run
+  stopped at validation (fixed in `418e2e6`). The local replicas set the locale too, which
+  is why they missed it: replicate the release job exactly, not just the CI lanes.
+- **If the release job fails before publishing, fix forward and publish from the tag**
+  rather than moving a pushed tag: GitHub Actions runs the workflow file at the tagged
+  commit, so a re-run cannot pick up the fix. Reproduce the job's steps locally against
+  the tag - version check, `git archive --prefix=keepalive-X.Y.Z/`, the `.agents/.github`
+  guard, `SHA256SUMS`, `scripts/release-notes.sh` from the tag's tree - then
+  `gh release create vX.Y.Z <archive> SHA256SUMS --title "Keep Alive Manager X.Y.Z"
+  --notes-file <notes> --verify-tag`. Later tags publish through the workflow.
+- `scripts/bump-version.sh` rewrites files through `mktemp`, which creates mode 0600; it now
+  copies the original mode (`chmod --reference`). A 0600 `CHANGELOG.md` broke every
+  installer run as another account (all root CI lanes run it as `nobody`) and the non-root
+  lane. `tests/test_cli_status.sh` pins the modes.
+- The bump tool updates only bare `Version: X.Y.Z` lines; a decorated line (`Version: 1.1.0
+  (unreleased ...)`) is skipped and then fails dev-check's version-consistency gate, and
+  `.agents/README.md` is checked by its *first* version-shaped string. Keep those lines
+  plain and the current version first.
 
 ## Performance and update-reload pass on 2026-10-01
 
@@ -129,9 +158,9 @@ directory; `scripts/dev-check.sh` now checks `.agents/README.md`.
 
 ## Repository state at review
 
-- Branch `master` tracked `origin/master` with no pre-existing changes.
-- Current baseline HEAD is `ea3d6f3 feat(orca-integration)`; the **1.0.0** release remains
-  tagged at `2ea6951`.
+- Branch `master` tracks `origin/master`; HEAD is `418e2e6` (v1.1.1 plus the release
+  workflow locale fix). Release tags: `v1.0.0` at `2ea6951`, `v1.1.0` at `cf27db4`,
+  `v1.1.1` at `7b723f9`; Orca integration landed at `ea3d6f3`.
 - `VALIDATION.md` and `docs/VALIDATION.md` were byte-identical.
 - `.agents/` is the maintained project-memory directory; there is no repository
   `AGENTS.md`, and the former singular `.agent/` name must not be recreated.

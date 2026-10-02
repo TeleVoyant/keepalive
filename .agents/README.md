@@ -15,9 +15,15 @@ maintainer or coding agent needs in order to continue safely.
 
 - Repository: `TeleVoyant/keepalive`
 - Branch: `master`
-- Release: **1.1.1**, released 2026-10-02 and tagged `v1.1.1`. Licensed MIT.
-- Reviewed baseline commit: the `v1.1.1` release commit (previous releases `v1.1.0` at
-  `cf27db4` and `v1.0.0` at `2ea6951`; Orca integration at `ea3d6f3`)
+- Release: **1.1.1**, released 2026-10-02 and tagged `v1.1.1` at `7b723f9`. Licensed MIT.
+  GitHub release "Keep Alive Manager 1.1.1" carries `keepalive-1.1.1.tar.gz` and
+  `SHA256SUMS`; it was published from the tag with the release workflow's own steps after
+  the tag's workflow run stopped at validation (see DEVELOPMENT.md, release lessons).
+- `master` is at `418e2e6` = `v1.1.1` plus the release-workflow UTF-8 locale fix. GitHub
+  CI is green on both commits (8 jobs: ShellCheck, Ubuntu, Debian, Fedora, Arch, non-root
+  Debian, Bash 5.0 and 5.1) - the first green CI since before 1.1.0.
+- Previous releases: `v1.1.0` at `cf27db4`, `v1.0.0` at `2ea6951`; Orca integration at
+  `ea3d6f3`.
 - Product version: `1.1.1`
 - Implementation: Bash 5+, Linux `/proc`, Konsole D-Bus and Orca CLI adapters,
   `systemd --user`
@@ -31,7 +37,10 @@ maintainer or coding agent needs in order to continue safely.
   results are in RISKS.md; method and safety rules in DEVELOPMENT.md.
 - Tests: 31 files, 1519 assertions, all passing (`./tests/run.sh`; dev-check is the final gate).
 - Installed on the development host from the release tree (2026-10-02); the live
-  daemon runs 1.1.1.
+  daemon runs 1.1.1. The update reloaded the one ACTIVE Orca keep-alive with its countdown,
+  discovery found the same five AVAILABLE sessions as 1.1.0, `doctor` passed with both
+  backends reachable, and the daemon measured 0.20% CPU over 60 s (1.1.0: 0.30%) and
+  about 11 MB RSS (1.1.0: 8.7 MB).
 - Orca's volatile CLI/JSON contract stays isolated in `lib/orca.sh`, with generic
   dispatch in `lib/transport.sh` and a mock-backed daemon integration test.
 - `.agent/` was renamed to `.agents/` by the user; do not recreate the singular
