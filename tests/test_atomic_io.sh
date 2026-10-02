@@ -49,12 +49,12 @@ atomic_writer_case() {
     fi
     assert_eq 0 "$rc" "$writer writer succeeds in a subshell ($umask_mode umask, noclobber $noclobber_mode)"
     assert_true "$writer writer preserves exact bytes ($umask_mode umask, noclobber $noclobber_mode)" \
-        cmp -s "$expected_file" "$destination"
+        files_equal "$expected_file" "$destination"
     assert_eq 600 "$(mode_of "$destination")" \
         "$writer writer uses mode 0600 ($umask_mode umask, noclobber $noclobber_mode)"
 
     shopt -s nullglob
-    for path in "$TEST_TMP"/.atomic-${writer}-${umask_mode}-${noclobber_mode}.tmp.*; do
+    for path in "$TEST_TMP"/.atomic-"$writer"-"$umask_mode"-"$noclobber_mode".tmp.*; do
         [[ -f $path ]] && leftovers+=("$path")
     done
     shopt -u nullglob
@@ -182,7 +182,7 @@ atomic_swap_case() {
     assert_eq 'old destination remains' "$(cat -- "$destination")" \
         "$writer close-time swap never commits the destination"
     shopt -s nullglob
-    for path in "$TEST_TMP"/.swap-${writer}-destination.tmp.*; do
+    for path in "$TEST_TMP"/.swap-"$writer"-destination.tmp.*; do
         [[ -f $path ]] && leftovers+=("$path")
     done
     shopt -u nullglob
@@ -230,13 +230,21 @@ assert_true 'wrong same-owner index bytes are repaired' ka_state_publish_index
 assert_true 'repairing wrong index bytes replaces the inode' \
     test "$(stat -Lc '%i' -- "$KA_INDEX_FILE")" -ne "$tampered_inode"
 assert_true 'repaired index bytes match the current payload' \
-    cmp -s "$TEST_TMP/index.expected.changed" "$KA_INDEX_FILE"
+    files_equal "$TEST_TMP/index.expected.changed" "$KA_INDEX_FILE"
 
 chmod 000 -- "$KA_INDEX_FILE"
-assert_true 'an unreadable same-owner index is repaired' ka_state_publish_index
-assert_eq 600 "$(mode_of "$KA_INDEX_FILE")" 'index repair restores private mode after chmod 000'
+assert_true 'publishing an index after chmod 000 succeeds' ka_state_publish_index
+# Root can still read mode-000 files, so its byte comparison deliberately keeps the
+# existing inode and mode; an ordinary user must take the repair path and restore 0600.
+if ((EUID == 0)); then
+    expected_index_mode=0
+else
+    expected_index_mode=600
+fi
+assert_eq "$expected_index_mode" "$(mode_of "$KA_INDEX_FILE")" \
+    'index repair restores private mode after chmod 000'
 assert_true 'unreadable-index repair restores the payload' \
-    cmp -s "$TEST_TMP/index.expected.changed" "$KA_INDEX_FILE"
+    files_equal "$TEST_TMP/index.expected.changed" "$KA_INDEX_FILE"
 
 index_external="$TEST_TMP/index-external"
 printf 'external index target remains unchanged' >"$index_external"
@@ -247,7 +255,7 @@ assert_false 'index publication replaces the symlink itself' test -L "$KA_INDEX_
 assert_eq 'external index target remains unchanged' "$(cat -- "$index_external")" \
     'index publication never follows a destination symlink'
 assert_true 'repaired symlink index has the current payload' \
-    cmp -s "$TEST_TMP/index.expected.changed" "$KA_INDEX_FILE"
+    files_equal "$TEST_TMP/index.expected.changed" "$KA_INDEX_FILE"
 
 rm -f -- "$KA_INDEX_FILE"
 mkdir -- "$KA_INDEX_FILE"
@@ -357,17 +365,6 @@ assert_true 'a symlinked targets root is never traversed' \
 rm -f -- "$KA_TARGETS_DIR"
 mv -- "$targets_real" "$KA_TARGETS_DIR"
 
-# Role: Make rm fail only for the target directory under the delete-failure probe.
-rm() {
-    local arg
-    if [[ -n ${FAIL_RM_DIR:-} ]]; then
-        for arg in "$@"; do
-            [[ $arg == "$FAIL_RM_DIR" ]] && return 73
-        done
-    fi
-    command rm "$@"
-}
-
 delete_uuid='delete-rm-failure-uuid'
 ka_state_register_uuid "$delete_uuid"
 KA_T_STATUS[$delete_uuid]=ACTIVE
@@ -378,16 +375,33 @@ delete_dir=$REPLY
 mkdir -p "$delete_dir"
 chmod 700 "$delete_dir"
 ka_write_scalar "$delete_dir/state.tsv" 'kept checkpoint'
+rm_shim_dir="$TEST_TMP/rm-shim"
+mkdir -p "$rm_shim_dir"
+cat >"$rm_shim_dir/rm" <<'RMSHIM'
+#!/usr/bin/env bash
+if [[ -n ${FAIL_RM_DIR:-} ]]; then
+    for arg in "$@"; do
+        [[ $arg == "$FAIL_RM_DIR" ]] && exit 73
+    done
+fi
+exec /bin/rm "$@"
+RMSHIM
+chmod +x "$rm_shim_dir/rm"
+old_path=$PATH
 FAIL_RM_DIR=$delete_dir
+export FAIL_RM_DIR
+PATH="$rm_shim_dir:$PATH"
+export PATH
 delete_rc=0
 ka_state_delete_target "$delete_uuid" || delete_rc=$?
+PATH=$old_path
+export PATH
 assert_true 'target deletion reports an rm failure' test "$delete_rc" -ne 0
 assert_true 'target deletion keeps the in-memory target after rm failure' ka_state_has_target "$delete_uuid"
 assert_eq ACTIVE "${KA_T_STATUS[$delete_uuid]}" \
     'target deletion keeps the target status after rm failure'
 assert_true 'target deletion keeps the runtime directory after rm failure' test -d "$delete_dir"
 unset FAIL_RM_DIR
-unset -f rm
 
 # Role: Read this Bash process CPU tick count for a no-busy-loop sleep assertion.
 process_cpu_ticks() {

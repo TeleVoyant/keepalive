@@ -1,0 +1,110 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Validate and publish release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the tagged source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify the tag matches the declared version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -Eeuo pipefail
+          [[ $RELEASE_TAG =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          tag_version=${RELEASE_TAG#v}
+          declared=$(sed -n "s/^KEEPALIVE_VERSION='\(.*\)'$/\1/p" keepalive)
+          [[ -n $declared && $declared == "$tag_version" ]] || {
+            printf 'tag %s does not match KEEPALIVE_VERSION=%s\n' "$RELEASE_TAG" "${declared:-missing}" >&2
+            exit 1
+          }
+          printf 'release version: %s\n' "$tag_version"
+
+      - name: Run the aggregate check in the CI container
+        run: |
+          set -Eeuo pipefail
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/src:ro" \
+            --workdir /src \
+            docker.io/library/debian:12 \
+            bash -lc '
+              set -Eeuo pipefail
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update
+              apt-get install -y --no-install-recommends \
+                bash coreutils findutils grep sed gawk procps util-linux systemd jq python3
+              KEEPALIVE_SKIP_SHELLCHECK=1 ./scripts/dev-check.sh
+            '
+
+      - name: Build the source archive, checksum, and release notes
+        id: artifacts
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -Eeuo pipefail
+          version=${RELEASE_TAG#v}
+          release_dir="$RUNNER_TEMP/keepalive-release"
+          mkdir -p "$release_dir"
+          archive="$release_dir/keepalive-$version.tar.gz"
+          sums="$release_dir/SHA256SUMS"
+          notes="$release_dir/release-notes.md"
+
+          git archive --format=tar.gz \
+            --prefix="keepalive-$version/" "$RELEASE_TAG" >"$archive"
+          # Capture the listing first: with pipefail, grep -q exiting at the first match
+          # would SIGPIPE tar and turn a detected internal path into an accepted archive.
+          listing=$(tar -tzf "$archive")
+          if grep -Eq '(^|/)(\.agents|\.github)(/|$)' <<<"$listing"; then
+            printf 'release archive contains internal paths\n' >&2
+            exit 1
+          fi
+          (cd "$release_dir" && sha256sum "$(basename "$archive")") >"$sums"
+
+          # The section body only, matched literally; see scripts/release-notes.sh.
+          ./scripts/release-notes.sh "$version" CHANGELOG.md >"$notes"
+
+          {
+            printf 'archive=%s\n' "$archive"
+            printf 'sums=%s\n' "$sums"
+            printf 'notes=%s\n' "$notes"
+          } >>"$GITHUB_OUTPUT"
+          tar -tzf "$archive" | sed -n '1,12p'
+          cat "$sums"
+          cat "$notes"
+
+      - name: Create or update the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          ARCHIVE: ${{ steps.artifacts.outputs.archive }}
+          SUMS: ${{ steps.artifacts.outputs.sums }}
+          NOTES: ${{ steps.artifacts.outputs.notes }}
+        run: |
+          set -Eeuo pipefail
+          version=${RELEASE_TAG#v}
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "Keep Alive Manager $version" \
+              --notes-file "$NOTES"
+            gh release upload "$RELEASE_TAG" "$ARCHIVE" "$SUMS" \
+              --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$RELEASE_TAG" "$ARCHIVE" "$SUMS" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "Keep Alive Manager $version" \
+              --notes-file "$NOTES" \
+              --verify-tag
+          fi

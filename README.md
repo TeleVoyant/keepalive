@@ -4,7 +4,7 @@ Keep Alive Manager is a **distribution- and desktop-neutral Linux per-user keep-
 
 It evolves the original single-session Bash keep-alive into one persistent manager that can safely control multiple Claude Code, Codex, Kimi, and other recognized AI CLI sessions at the same time. The daemon owns timers and target state. Running `keepalive` from any terminal opens a disposable TUI client; closing that TUI does **not** stop active keep-alives.
 
-Version: **1.1.0** · [Changelog](CHANGELOG.md) · [MIT licensed](LICENSE)
+Version: **1.1.1** · [Changelog](CHANGELOG.md) · [MIT licensed](LICENSE)
 
 ## Documentation
 
@@ -13,7 +13,7 @@ Version: **1.1.0** · [Changelog](CHANGELOG.md) · [MIT licensed](LICENSE)
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Process model, identity, state schemas, IPC, scheduler, recovery |
 | [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) | Every environment variable, with defaults and when to change them |
 | [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) | Symptom-first fixes, from `unknown` session names to CPU cost |
-| [`docs/TESTING.md`](docs/TESTING.md) | What the 1040 assertions cover, and how to add one |
+| [`docs/TESTING.md`](docs/TESTING.md) | What the 1519 assertions cover, and how to add one |
 | [`docs/MAINTENANCE.md`](docs/MAINTENANCE.md) | Safety invariants, module map, live checklist, release flow |
 | [`docs/VALIDATION.md`](docs/VALIDATION.md) | Evidence recorded for this release |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Conventions the automated checks enforce |
@@ -103,6 +103,16 @@ cd keepalive
 ./scripts/install.sh
 ```
 
+For a reproducible, pinned install, select a release tag before running the installer:
+
+```bash
+git clone https://github.com/TeleVoyant/keepalive.git
+cd keepalive
+git fetch --tags
+git checkout vX.Y.Z
+./scripts/install.sh
+```
+
 The installer creates:
 
 ```text
@@ -135,12 +145,38 @@ move can clean the previous root safely. It does not enable lingering. A normal 
 enable lingering yourself only if the managed Orca/backend processes are also intended
 to remain usable without a login session.
 
+A re-run is an in-place upgrade: the daemon is stopped gracefully, the installed tree is
+swapped atomically, and monitored checkpoints are loaded by the new version. The installer
+refuses a semantic-version downgrade before changing units or code because older releases
+may not understand newer checkpoint/message companion files; use
+`./scripts/install.sh --allow-downgrade` only after backing up the runtime tree and accepting
+that checkpoint compatibility risk. A failed normal upgrade rolls back its source, units,
+and enablement links.
+
+Path safety is deliberate. A symlinked `HOME` or `~/.config` is allowed when its
+canonical target is owned by you; an absolute `XDG_CONFIG_HOME` is treated the same way.
+The configured roots are canonicalized before use. Existing components may be group-writable
+only when the group is your private primary group (same name as you, no group members, and
+no other account has it as a primary group); world-writable components are rejected except
+for trusted root-owned sticky ancestors such as `/tmp`. The tool-owned `keepalive` profile, `keepalive-manager` root, unit-root parent
+components, and runtime tree must not be symlinks. Exact unit entries are lstat-validated
+and never followed (systemd's ordinary enablement links remain supported). Existing
+unit-root metadata is used only when it names a
+previously validated canonical root; unrelated persisted paths are ignored. If a custom
+layout is rejected, fix ownership/permissions or point the environment at a private
+directory rather than weakening the checks.
+
 Verify installation:
 
 ```bash
 keepalive doctor
 keepalive status
 ```
+
+`doctor` reports executable presence separately from live backend reachability and counts
+only reachable Konsole D-Bus or Orca runtimes as usable. It exits nonzero for missing core
+requirements or when no enabled backend is reachable; an unavailable optional backend or
+user manager is diagnostic output, not by itself a failure.
 
 If `~/.local/bin` is not in `PATH`, add it to your shell configuration.
 
@@ -206,8 +242,10 @@ Every operation the TUI performs is available from the command line, so keep-ali
 can be managed without a terminal UI:
 
 ```bash
-keepalive list --json                  # machine-readable rows
+keepalive list --json                  # machine-readable rows; refreshes discovery
+keepalive status --json                # read-only, presence-free snapshot for status bars
 keepalive create <uuid>                # create from the saved profile
+keepalive configure <uuid> [options]    # edit one target; updates the profile by default
 keepalive pause <uuid> / resume <uuid> # idempotent
 keepalive send <uuid> [secondary]      # deliver immediately
 keepalive reset <uuid>                 # reset the main countdown
@@ -216,8 +254,31 @@ keepalive mode <uuid> [message-enter|enter-only]
 keepalive delete <uuid>
 ```
 
+`configure` accepts `--message TEXT` (repeatable, replacing the rotation),
+`--main-interval SECONDS`, `--secondary-enabled 0|1`,
+`--secondary-interval SECONDS`, `--secondary-message TEXT`, `--notifications 0|1`,
+and `--delivery-mode message-enter|enter-only`. Intervals are integer seconds in the
+range `1..999999999`; messages are bounded by the configured message limit and are
+stored as data. Omitted settings are copied from
+the target's current checkpoint, and configuration resets that target's timers as
+the TUI wizard does. It updates the one persistent profile by default; pass
+`--no-profile` to change only the selected target (`--profile` makes the default
+explicit). A refusal from the daemon is printed with terminal controls sanitized and
+returns non-zero.
+
 Refused operations return the daemon's specific reason rather than a generic
-failure, both on the CLI and in the TUI.
+failure, both on the CLI and in the TUI; human-facing output is sanitized before it
+reaches the terminal.
+
+`status --json` never contacts or starts the daemon, stamps `clients.seen`, or writes
+anything. It reads the last validated `service.state`/`index.tsv` (republished at least
+every 15 s) and reports snapshot ages; it needs no `HOME` or configuration directory.
+A tmux status bar can poll it without causing discovery work:
+
+```tmux
+# ~/.tmux.conf: show the number of active targets and index age.
+set -g status-right '#(keepalive status --json 2>/dev/null | jq -r "\"KA \(.targets | map(select(.status == \\\"ACTIVE\\\")) | length) (\(.index.age_seconds // \"?\")s)\"")'
+```
 
 ### Remote and non-desktop access
 
@@ -341,8 +402,8 @@ There is exactly one persistent profile.
 
 When a keep-alive is created or configured:
 
-- the selected target receives the saved settings;
-- the global profile is updated to those settings;
+- the selected target receives the submitted settings;
+- the global profile is updated to those settings by default (`configure --no-profile` opts out);
 - all other already-active keep-alives remain unchanged;
 - a future new keep-alive starts from the latest profile values.
 
@@ -356,12 +417,16 @@ Main messages rotate only when a message is actually sent:
 Message 1 → Message 2 → Message 3 → Message 1 ...
 ```
 
-When `e` switches a target to `ENTER ONLY`, timer events send only carriage return (`\r`) and **do not consume the queued main message**. The queue resumes from the same message if `MESSAGE + ENTER` is later restored.
+When `e` sends a one-shot Enter, the target returns to `MESSAGE + ENTER`; ordinary
+Enter-only timer events send only carriage return (`\r`) and **do not consume the queued
+main message**. If a partial delivery left an owed submit, that one-shot Enter completes
+it (advancing the owed MAIN rotation only) rather than sending a message. The queue then
+resumes from the next message if `MESSAGE + ENTER` is later restored.
 
 Every Enter-only event is still logged, for example:
 
 ```text
-13:14:06  MAIN  [ENTER]  SENT
+13:14:06  ENTER  [ENTER]  SENT
 ```
 
 If the selected terminal transport fails, the event is logged/notified as failed and a manual
@@ -481,6 +546,8 @@ The manager never reattaches the old record to the new terminal. Delete the old 
 
 Recognition is best-effort and process-tree based. The classifier inspects `/proc/PID/comm`, `/proc/PID/exe`, `/proc/PID/cmdline`, and walks parent processes. This allows detection through common Node/Python/wrapper launch paths rather than relying only on the foreground executable name.
 
+Built-in signatures are position-aware: they match only `comm`, the resolved executable path/basename, `argv[0]` path/basename, and the identifying script/module/package position for known launchers (`node`, Python, shell scripts (but not `sh/bash/zsh -c` payloads), `bun`, `deno`, `uv`/`uvx`, `pipx`, `npx`/`bunx`, `pnpm`/`pnpx`, `yarn`, `npm`, and `env`). Launcher option values are skipped; shell `-c` payloads, environment assignments, editor/pager/grep/git arguments, and arbitrary option values are never searched. Entries in the optional `classifiers.tsv` registry intentionally retain legacy behavior and match the complete lower-case `comm exe cmdline` signature, so keep those user regexes conservative.
+
 Built-in signatures currently attempt to recognize:
 
 - Claude Code
@@ -527,7 +594,7 @@ Format:
 My Agent	(^|[ /])my-agent([ /]|$)|@company/my-agent
 ```
 
-Matching is case-insensitive because the process signature is normalized to lowercase; write extension regexes accordingly.
+Matching is case-insensitive because built-in token candidates and the legacy user signature are normalized to lowercase; write extension regexes accordingly. User entries are not position-aware and may intentionally inspect the full command line.
 
 Use conservative, command/path-specific expressions. Overly broad expressions can classify unrelated processes as AI clients.
 
@@ -577,8 +644,11 @@ Presentation flags affect only that client. Two attached clients can use differe
 keepalive                  open TUI
 keepalive list             plain-text manager list
 keepalive status           ping service
+keepalive status --json    read-only, presence-free service/index JSON
 keepalive refresh          force discovery now
 keepalive profile          show current persistent profile
+keepalive configure UUID [options]
+                            edit one target; intervals are seconds and omitted values stay unchanged
 keepalive logs UUID        print one target's runtime history
 keepalive doctor           dependency/session diagnostics
 keepalive --icons-test     Nerd Font visual check
@@ -828,9 +898,16 @@ Every Bash function is expected to have an adjacent `# Role:` comment. A test en
 The uninstaller removes the units, installed source tree, and command symlink. It
 intentionally leaves the persistent profile at
 `${XDG_CONFIG_HOME:-$HOME/.config}/keepalive` so preferences are not destroyed
-accidentally. By default it aborts before file removal unless the user manager confirms
-both units are inactive. `--force` is available only for recovery after you have manually
-confirmed that no old daemon is running.
+accidentally. Runtime checkpoints, indexes, and logs are also retained by default. To
+remove that exact private runtime tree after a confirmed stop, opt in explicitly:
+
+```bash
+./scripts/uninstall.sh --purge-runtime
+```
+
+By default it aborts before file removal unless the user manager confirms both units are
+inactive. `--force` is available only for recovery after you have manually confirmed that
+no old daemon is running; it never authorizes an unconfirmed `--purge-runtime`.
 
 ## Changelog
 

@@ -131,8 +131,9 @@ assert_eq 0 "$(tui_exit 'ESC,q' 0.02)" 'Escape and a fast following key are both
 
 # A cancelled wizard is normal navigation, not a client failure. Under `set -e` the
 # non-zero return used to escape the loop body and terminate the TUI.
-assert_eq 0 "$(tui_exit '1,@a add,ESC,@navigate,q')" 'cancelling the wizard at step one returns to the manager'
-assert_eq 0 "$(tui_exit '1,@a add,ENTER,@Main interval,ENTER,@Secondary prompt,ESC,ESC,ESC,@navigate,q')" \
+assert_eq 0 "$(tui_exit '@navigate,1,@a add,ESC,@navigate,q')" \
+    'cancelling the wizard at step one returns to the manager'
+assert_eq 0 "$(tui_exit '@navigate,1,@a add,ENTER,@Main interval,ENTER,@Secondary prompt,ESC,@Main interval,ESC,@a add,ESC,@navigate,q')" \
     'backing out through wizard steps returns to the manager'
 
 # The rendered screen, not the byte stream, is what shows stale tails. Adding a wizard
@@ -140,10 +141,16 @@ assert_eq 0 "$(tui_exit '1,@a add,ENTER,@Main interval,ENTER,@Secondary prompt,E
 # content; the key-hint footer used to appear twice.
 VT="$TEST_ROOT/tests/fixtures/vt-render.py"
 capture="$TEST_TMP/wizard-add.cap"
+capture_status="$TEST_TMP/wizard-add.status"
 # Wait for each screen instead of guessing with sleeps, or the typed message races the
-# wizard's first draw and lands nowhere.
-python3 "$DRIVER" 100 30 0.4 '1,@a add,a,@New message,hello world,ENTER,@hello world' \
-    -- "$TEST_ROOT/keepalive" >"$capture" 2>/dev/null || true
+# wizard's first draw and lands nowhere. CAPTURE stops the child after the final barrier,
+# so this assertion never waits for the driver's normal 40-second timeout.
+capture_rc=0
+python3 "$DRIVER" 100 30 0.4 '@navigate,1,@a add,a,@New message,hello world,ENTER,@hello world,CAPTURE' \
+    -- "$TEST_ROOT/keepalive" >"$capture" 2>"$capture_status" || capture_rc=$?
+assert_eq 0 "$capture_rc" 'wizard capture driver exits successfully'
+assert_eq CAPTURED "$(sed -n 's/^exit=//p' "$capture_status")" \
+    'wizard capture driver reports a checked CAPTURED status'
 screen=$(python3 "$VT" "$capture" 100 30)
 assert_eq 1 "$(grep -c 'a add' <<<"$screen")" 'the wizard key hint is drawn exactly once after adding a message'
 assert_eq 1 "$(grep -c 'hello world' <<<"$screen")" 'the newly added message appears exactly once'

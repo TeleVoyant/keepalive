@@ -19,7 +19,7 @@ Every change must pass:
 ```
 
 It must end with `ALL VALIDATION CHECKS PASSED`. This runs Bash syntax checks, ShellCheck,
-version consistency, the full 484-assertion/20-file suite, and static systemd unit verification.
+version consistency, the complete aggregate test suite, and static systemd unit verification.
 CI gates on the same checks.
 
 ShellCheck must stay at zero findings. Before adding a code to `.shellcheckrc`, read the

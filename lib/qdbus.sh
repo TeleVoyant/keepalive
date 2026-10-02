@@ -9,7 +9,10 @@ ka_dbus_escape_address_value() {
         case $byte in
             [[:alnum:]_./-]) output+=$byte ;;
             *)
-                printf -v hex '%02X' "'$byte"
+                # Mask to the byte itself: musl's C locale reports a high byte as
+                # 0xDF00 plus the byte, glibc as the byte (see ka_sanitize_human_set).
+                printf -v hex '%d' "'$byte"
+                printf -v hex '%02X' "$((hex & 255))"
                 output+="%$hex"
                 ;;
         esac
@@ -49,12 +52,6 @@ ka_qdbus_find() {
 ka_dbus_timeout_resolve() {
     ka_tunable KEEPALIVE_QDBUS_TIMEOUT 2
     KA_DBUS_TIMEOUT=$REPLY
-}
-
-# Role: Return a validated positive qdbus subprocess timeout in integer seconds.
-ka_qdbus_timeout_seconds() {
-    ka_dbus_timeout_resolve
-    printf '%s' "$KA_DBUS_TIMEOUT"
 }
 
 # Role: Invoke qdbus under a hard deadline so one D-Bus call cannot stall the daemon.

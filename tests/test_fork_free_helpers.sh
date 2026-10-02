@@ -1,4 +1,14 @@
 #!/usr/bin/env bash
+# /proc cache behavior is a same-user contract; exercise it as nobody in root CI rather
+# than letting root's unrestricted procfs view change the process-discovery fixture.
+if ((EUID == 0)); then
+    if command -v runuser >/dev/null 2>&1 && id nobody >/dev/null 2>&1; then
+        exec runuser -u nobody -- env PATH="$PATH" bash "${BASH_SOURCE[0]}"
+    fi
+    printf '# skip: an unprivileged account runner is required for the procfs cache test\n'
+    printf '# 0 assertions passed\n'
+    exit 0
+fi
 set -Eeuo pipefail
 source "${BASH_SOURCE[0]%/*}/testlib.sh"
 test_env_setup
@@ -47,10 +57,13 @@ start_crafted_helper() {
 # Role: Launch two same-argv, same-comm ELF copies so an in-place exec can probe cache invalidation.
 start_exec_probe() {
     local fifo=$1 first_binary=$2 second_binary=$3 pid script
-    script='exec 3<>"$PROBE_FIFO"; trap '\''exec -a "$0" "$NEXT_PROBE" -c "$PROBE_SCRIPT" "$0"'\'' USR1; while read -r -t 30 ignored <&3; do :; done'
-    PROBE_FIFO=$fifo NEXT_PROBE=$second_binary PROBE_SCRIPT=$script
-    export PROBE_FIFO NEXT_PROBE PROBE_SCRIPT
-    bash -c 'exec -a "$1" "$2" -c "$3" "$1"' _ cache-probe "$first_binary" "$script" &
+    IFS= read -r -d '' script <<'PROBE' || true
+exec 3<>"$3"
+trap 'exec -a "$0" "$2" -c "$1" "$0" "$1" "$2" "$3"' USR1
+while read -r -t 30 ignored <&3; do :; done
+PROBE
+    bash -c 'exec -a "$1" "$2" -c "$3" "$1" "$3" "$4" "$5"' \
+        _ cache-probe "$first_binary" "$script" "$second_binary" "$fifo" &
     pid=$!
     TEST_STARTED_PIDS+=("$pid")
     wait_for_proc_cmdline "$pid" cache-probe
@@ -221,6 +234,8 @@ start_exec_probe "$exec_fifo" "$probe_a_dir/probe" "$probe_b_dir/probe"
 exec_probe_pid=$REPLY
 ka_proc_starttime_set "$exec_probe_pid"
 exec_cache_key="$exec_probe_pid:$REPLY"
+ka_proc_cmdline_set "$exec_probe_pid"
+exec_cmdline_before=$REPLY
 ka_proc_signature_set "$exec_probe_pid"
 exec_before=$REPLY
 exec_before_count=$(shim_count "$readlink_count")
@@ -235,6 +250,17 @@ for ((poll = 0; poll < 10000; poll += 1)); do
     fi
 done
 assert_eq 1 "$exec_changed" 'same-argv same-comm probe successfully execs a different binary'
+# An exec updates /proc/exe before every procfs field is guaranteed to be observed
+# consistently; wait for the unchanged command line before checking cache invalidation.
+exec_cmdline_ready=0
+for ((poll = 0; poll < 10000; poll += 1)); do
+    ka_proc_cmdline_set "$exec_probe_pid" || continue
+    if [[ $REPLY == "$exec_cmdline_before" ]]; then
+        exec_cmdline_ready=1
+        break
+    fi
+done
+assert_eq 1 "$exec_cmdline_ready" 'same-argv same-comm exec settles its command line before signature lookup'
 ka_proc_signature_set "$exec_probe_pid"
 exec_after=$REPLY
 exec_after_count=$(shim_count "$readlink_count")
@@ -339,7 +365,8 @@ JSON
     cat >"$valid_show" <<'JSON'
 {"ok":true,"result":{"terminal":{"handle":"term-agent","ptyId":"pty-1","incarnationId":"inc-1","worktreeId":"wt-1","worktreePath":"/work/agent","connected":true,"writable":true,"orphaned":false,"executionHostId":"host-1","tabId":"tab-1","leafId":"leaf-1","agentIdentity":"codex"}},"_meta":{"runtimeId":"runtime-1"}}
 JSON
-    export KEEPALIVE_ORCA_ENABLED=1 KEEPALIVE_ORCA_CLI="$orca_stub" KEEPALIVE_JQ="$(command -v jq)"
+    KEEPALIVE_JQ=$(command -v jq)
+    export KEEPALIVE_ORCA_ENABLED=1 KEEPALIVE_ORCA_CLI="$orca_stub" KEEPALIVE_JQ
     export FAKE_ORCA_JSON_FILE="$TEST_TMP/orca-selected.json" KEEPALIVE_ORCA_TIMEOUT=3
     KA_ORCA_CLI=''
     KA_ORCA_JQ=''
@@ -349,6 +376,38 @@ JSON
     ka_orca_discover >"$valid_discovery_output"
     assert_contains "$valid_discovery_output" $'#COMPLETE' \
         'valid Orca list JSON reaches the complete discovery marker'
+    # A title is display text set by the program in the terminal: an odd one is cleaned
+    # and bounded rather than allowed to fail discovery for every Orca terminal.
+    oversized_title_list="$TEST_TMP/orca-oversized-title-list.json"
+    jq '.result.terminals[0].title = ("x" * 1025)' "$valid_list" >"$oversized_title_list"
+    cp -- "$oversized_title_list" "$FAKE_ORCA_JSON_FILE"
+    title_row=$(ka_orca_discover)
+    title_row=${title_row%%$'\n'*}
+    IFS=$'\t' read -r _ _ title_name _ <<<"$title_row"
+    assert_eq 256 "${#title_name}" 'an over-long Orca title is truncated to its display bound, not rejected'
+    control_title_list="$TEST_TMP/orca-control-title-list.json"
+    jq '.result.terminals[0].title = "safe\u001btitle"' "$valid_list" >"$control_title_list"
+    cp -- "$control_title_list" "$FAKE_ORCA_JSON_FILE"
+    title_row=$(ka_orca_discover)
+    title_row=${title_row%%$'\n'*}
+    IFS=$'\t' read -r _ _ title_name _ <<<"$title_row"
+    assert_eq safetitle "$title_name" 'control characters are stripped from an Orca title, not passed through'
+    # The rows are read with IFS=tab, which collapses adjacent tabs: an empty fallback name
+    # (a trailing-slash worktree path) would shift every later field, including the ID.
+    slash_path_list="$TEST_TMP/orca-slash-path-list.json"
+    jq '.result.terminals[0].title = "" | .result.terminals[0].worktreePath = "/work/agent/"' \
+        "$valid_list" >"$slash_path_list"
+    cp -- "$slash_path_list" "$FAKE_ORCA_JSON_FILE"
+    title_row=$(ka_orca_discover)
+    title_row=${title_row%%$'\n'*}
+    IFS=$'\t' read -r title_id _ title_name _ <<<"$title_row"
+    assert_eq agent "$title_name" 'a trailing-slash Orca worktree path still names the row'
+    assert_eq orca-runtime-1-inc-1 "$title_id" 'an empty title fallback cannot shift the Orca row fields'
+    duplicate_id_list="$TEST_TMP/orca-duplicate-id-list.json"
+    jq '.result.terminals += [.result.terminals[0] | .handle = "term-other"]' \
+        "$valid_list" >"$duplicate_id_list"
+    assert_orca_discovery_schema "$duplicate_id_list" \
+        'Orca discovery rejects duplicate eligible manager IDs before projection'
     cp -- "$valid_show" "$FAKE_ORCA_JSON_FILE"
     ORCA_HANDLE=term-agent ORCA_PTY=pty-1 ORCA_INCAR=inc-1 ORCA_WORKTREE=wt-1 \
         ORCA_RUNTIME=runtime-1 ORCA_HOST=host-1 ORCA_TAB=tab-1 ORCA_LEAF=leaf-1 ORCA_AGENT=codex
@@ -410,13 +469,24 @@ JSON
     assert_orca_discovery_schema "$missing_list" \
         'Orca discovery rejects a response missing _meta.runtimeId'
 
-    for missing_show_field in handle ptyId incarnationId worktreeId executionHostId tabId leafId agentIdentity; do
+    for missing_show_field in handle ptyId incarnationId worktreeId executionHostId tabId leafId; do
         missing_show="$TEST_TMP/orca-missing-show-$missing_show_field.json"
         jq --arg field "$missing_show_field" 'del(.result.terminal[$field])' \
             "$valid_show" >"$missing_show"
         assert_orca_validation_schema "$missing_show" \
             "Orca validation returns 22 when show is missing $missing_show_field"
     done
+    missing_show="$TEST_TMP/orca-missing-show-agentIdentity.json"
+    jq 'del(.result.terminal.agentIdentity)' "$valid_show" >"$missing_show"
+    cp -- "$missing_show" "$FAKE_ORCA_JSON_FILE"
+    if ka_orca_validate_target "$ORCA_HANDLE" "$ORCA_PTY" "$ORCA_INCAR" \
+        "$ORCA_WORKTREE" "$ORCA_RUNTIME" "$ORCA_HOST" "$ORCA_TAB" "$ORCA_LEAF" "$ORCA_AGENT"; then
+        missing_agent_rc=0
+    else
+        missing_agent_rc=$?
+    fi
+    assert_eq 15 "$missing_agent_rc" \
+        'Orca validation returns definitive agent loss when show omits agentIdentity'
     missing_show="$TEST_TMP/orca-missing-show-runtimeId.json"
     jq 'del(._meta.runtimeId)' "$valid_show" >"$missing_show"
     assert_orca_validation_schema "$missing_show" \

@@ -14,10 +14,13 @@ if [[ -n ${FAKE_QDBUS_HANG_FILE:-} && -e ${FAKE_QDBUS_HANG_FILE:-} ]]; then
 fi
 
 if (($# == 0)); then
+    [[ -n ${FAKE_QDBUS_EMPTY_FILE:-} && -e ${FAKE_QDBUS_EMPTY_FILE:-} ]] && exit 0
+    [[ -n ${FAKE_QDBUS_LIST_FAIL_FILE:-} && -e ${FAKE_QDBUS_LIST_FAIL_FILE:-} ]] && exit 1
     printf 'org.kde.konsole-100\norg.example.unrelated\n'
     exit 0
 fi
 if [[ $1 == org.kde.konsole-100 && $# == 1 ]]; then
+    [[ -n ${FAKE_QDBUS_PATH_FAIL_FILE:-} && -e ${FAKE_QDBUS_PATH_FAIL_FILE:-} ]] && exit "${FAKE_QDBUS_PATH_FAIL_RC:-1}"
     printf '/Sessions/1\n/MainWindow_1\n'
     exit 0
 fi

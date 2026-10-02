@@ -37,6 +37,39 @@ assert_eq 124 "$notify_rc" 'desktop notification subprocess is terminated at its
 rm -f -- "$hang_file"
 unset FAKE_QDBUS_HANG_FILE KEEPALIVE_QDBUS_TIMEOUT KEEPALIVE_NOTIFY_SEND KEEPALIVE_NOTIFY_TIMEOUT
 
+list_fail_file="$TEST_TMP/qdbus-list-fail"
+touch "$list_fail_file"
+export FAKE_QDBUS_LIST_FAIL_FILE=$list_fail_file
+list_fail_output=$(ka_konsole_discover)
+assert_eq $'#INCOMPLETE\tcommand-1' "$list_fail_output" \
+    'a failed Konsole service enumeration marks the pass incomplete'
+rm -f -- "$list_fail_file"
+unset FAKE_QDBUS_LIST_FAIL_FILE
+
+path_fail_file="$TEST_TMP/qdbus-path-fail"
+touch "$path_fail_file"
+export FAKE_QDBUS_PATH_FAIL_FILE=$path_fail_file
+# A service whose session list errors (a window closing mid-pass) is skipped; only a
+# timeout leaves the pass unknowable, so only a timeout marks it incomplete.
+path_fail_output=$(ka_konsole_discover)
+assert_eq '#COMPLETE' "$path_fail_output" \
+    'a Konsole service whose session list errors is skipped without failing the pass'
+export FAKE_QDBUS_PATH_FAIL_RC=124
+path_fail_output=$(ka_konsole_discover)
+assert_eq $'#INCOMPLETE\tcommand-124' "$path_fail_output" \
+    'a timed-out Konsole session-path enumeration marks the pass incomplete'
+rm -f -- "$path_fail_file"
+unset FAKE_QDBUS_PATH_FAIL_FILE FAKE_QDBUS_PATH_FAIL_RC
+
+empty_bus_file="$TEST_TMP/qdbus-empty"
+touch "$empty_bus_file"
+export FAKE_QDBUS_EMPTY_FILE=$empty_bus_file
+empty_bus_output=$(ka_konsole_discover)
+assert_eq '#COMPLETE' "$empty_bus_output" \
+    'a genuinely empty Konsole bus result remains complete'
+rm -f -- "$empty_bus_file"
+unset FAKE_QDBUS_EMPTY_FILE
+
 # A discovery pass that runs out of budget must keep the previous snapshot rather than
 # publishing a truncated one, which would look like sessions disappearing.
 source "$TEST_ROOT/lib/logging.sh"; source "$TEST_ROOT/lib/notifications.sh"

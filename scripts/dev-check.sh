@@ -35,6 +35,31 @@ check_shellcheck() {
     shellcheck -x "${files[@]}"
 }
 
+# Role: Test whether CHANGELOG.md has the dated release heading for exactly this version.
+# Literal, not a regex (the dots in X.Y.Z would match any character, so "[1x1x0]" would
+# pass), and complete: "## [X.Y.Z] - YYYY-MM-DD", never an undated or annotated heading.
+changelog_has_release() {
+    awk -v heading="## [$1] - " '
+        index($0, heading) == 1 && length($0) == length(heading) + 10 &&
+            substr($0, length(heading) + 1) ~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]$/ {
+            found=1; exit
+        }
+        END { exit !found }
+    ' "$2"
+}
+
+# Role: Test whether CHANGELOG.md has a section heading for exactly this version.
+# Literal, not a regex: the dots in X.Y.Z would match any character ("[1x1x0]").
+changelog_has_version() {
+    awk -v heading="## [$1]" '
+        index($0, heading) == 1 &&
+            (length($0) == length(heading) || substr($0, length(heading) + 1, 1) ~ /[[:space:]]/) {
+            found=1; exit
+        }
+        END { exit !found }
+    ' "$2"
+}
+
 # Role: Confirm every documented version string still matches the one the tool reports.
 # The version appears in the executable and in four documents. Nothing but habit kept them
 # aligned, and a release that ships mismatched numbers is confusing in a way no test caught.
@@ -47,6 +72,11 @@ check_version() {
         return 1
     fi
     for file in README.md VALIDATION.md docs/VALIDATION.md .agents/README.md; do
+        if [[ ! -f $ROOT/$file ]]; then
+            [[ $file == .agents/README.md ]] || { printf 'FAIL: %s is missing\n' "$file" >&2; status=1; continue; }
+            printf 'skip  %s (not included in installed tree)\n' "$file"
+            continue
+        fi
         found=$(grep -oE '[0-9]+\.[0-9]+\.[0-9]+' "$ROOT/$file" | head -1)
         if [[ $found != "$declared" ]]; then
             printf 'FAIL: %s declares %s, expected %s\n' "$file" "${found:-none}" "$declared" >&2
@@ -56,7 +86,7 @@ check_version() {
         printf 'ok  %s\n' "$file"
     done
     # A release tag is cut from CHANGELOG.md, so an unreleased version there is a mistake.
-    if ! grep -q "^## \[$declared\]" "$ROOT/CHANGELOG.md"; then
+    if ! changelog_has_release "$declared" "$ROOT/CHANGELOG.md"; then
         printf 'FAIL: CHANGELOG.md has no released section for %s\n' "$declared" >&2
         status=1
     else

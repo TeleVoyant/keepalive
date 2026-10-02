@@ -149,18 +149,6 @@ ka_tui_sync_size() {
     KA_TUI_LINES=$lines
 }
 
-# Role: Return current terminal columns from the per-frame cache.
-ka_tui_cols() {
-    [[ -n ${KA_TUI_COLS:-} ]] || ka_tui_sync_size
-    printf '%d' "$KA_TUI_COLS"
-}
-
-# Role: Return current terminal rows from the per-frame cache.
-ka_tui_lines() {
-    [[ -n ${KA_TUI_LINES:-} ]] || ka_tui_sync_size
-    printf '%d' "$KA_TUI_LINES"
-}
-
 # Role: Start a frame and clear the visible screen when its view identity changes or resizes.
 ka_tui_frame_begin() {
     local view=${1:-${FUNCNAME[1]:-unknown}} resized=${KA_TUI_RESIZED:-0}
@@ -409,21 +397,16 @@ ka_tui_progress() {
     printf '%s%s%s%s' "$REPLY" "$bar" "$KA_RESET" "$marker"
 }
 
-# Role: Remove every control byte from untrusted text before it reaches the screen.
-# Message, directory, and process labels are user/filesystem data; an embedded escape
-# sequence would otherwise repaint or reposition the live frame.
+# Role: Print shared-sanitized untrusted text for screen primitives and tests.
+# The byte/Unicode filter lives in common.sh so every human-facing sink agrees on C0/C1,
+# UTF-8, and bidi handling.
 ka_tui_sanitize() {
-    local value=${1-}
-    value=${value//$'\t'/ }
-    value=${value//$'\n'/ }
-    value=${value//$'\r'/ }
-    value=${value//[[:cntrl:]]/}
-    printf '%s' "$value"
+    ka_sanitize_human "${1-}"
 }
 
-# Role: Truncate a display string to a maximum cell budget using a simple ellipsis policy.
-# Control bytes are stripped inline (not via a subshell, because rows call this per field),
-# and non-positive budgets yield nothing rather than falling through to printf's
+# Role: Truncate a display string to a maximum cell budget using shared sanitization.
+# Sanitization stays in the current shell because rows call this per field, and
+# non-positive budgets yield nothing rather than falling through to printf's
 # "precision omitted" behavior and printing the whole untruncated string.
 #
 # Width is counted in characters, not terminal cells; wide CJK/emoji still under-count.
@@ -437,20 +420,50 @@ ka_tui_truncate() {
 # The manager frame truncates several fields per row once a second; the printing form
 # above costs a fork per call when captured, so the frame uses this one.
 ka_tui_truncate_set() {
-    local text=${1-} width=$2 ellipsis=${KA_G_ELL:-…}
-    text=${text//$'\t'/ }
-    text=${text//$'\n'/ }
-    text=${text//$'\r'/ }
-    text=${text//[[:cntrl:]]/}
+    local text=${1-} width=$2 ellipsis=${KA_G_ELL:-…} cut
+    ka_sanitize_human_set "$text"
+    text=$REPLY
     if ((width <= 0)); then
         REPLY=''
+        return 0
     elif ((${#text} <= width)); then
         REPLY=$text
+        return 0
     elif ((width <= ${#ellipsis})); then
-        REPLY=${text:0:width}
+        cut=${text:0:width}
+        ellipsis=''
     else
-        REPLY=${text:0:width - ${#ellipsis}}$ellipsis
+        cut=${text:0:width - ${#ellipsis}}
     fi
+    # In a byte locale (C/POSIX) the slice above counts bytes and can end inside a UTF-8
+    # sequence; drop that partial character rather than emit a lone lead byte.
+    if [[ -z ${KA_TUI_BYTE_LOCALE-} ]]; then
+        local probe=$'\xc3\xa9'
+        if ((${#probe} == 2)); then KA_TUI_BYTE_LOCALE=1; else KA_TUI_BYTE_LOCALE=0; fi
+    fi
+    if ((KA_TUI_BYTE_LOCALE == 1)); then
+        ka_utf8_trim_partial_tail_set "$cut"
+        cut=$REPLY
+    fi
+    REPLY=$cut$ellipsis
+}
+
+# Role: Drop an incomplete trailing UTF-8 sequence that a byte-locale slice left behind.
+# Called only in a byte locale, where ${s: -i:1} is one byte; ordinals are masked with
+# 255 for musl (see ka_sanitize_human_scan_set).
+ka_utf8_trim_partial_tail_set() {
+    local s=${1-} i ord need
+    for ((i = 1; i <= 3 && i <= ${#s}; i++)); do
+        printf -v ord '%d' "'${s: -i:1}"
+        ord=$((ord & 255))
+        ((ord < 128)) && break
+        if ((ord >= 192)); then
+            if ((ord >= 240)); then need=4; elif ((ord >= 224)); then need=3; else need=2; fi
+            ((i < need)) && s=${s:0:${#s} - i}
+            break
+        fi
+    done
+    REPLY=$s
 }
 
 # Role: Split one tab-separated record into KA_TSV without collapsing empty columns.
@@ -482,6 +495,10 @@ ka_tui_split_tsv() {
 # the real shell rather than a subshell, and hands back exactly what was typed.
 ka_tui_prompt_line() {
     local prompt=$1 default=${2-} value
+    # Sanitize before the default is printed: it is persisted user/filesystem data and
+    # may otherwise inject OSC/CSI controls into the active terminal.
+    ka_sanitize_human_set "$default"
+    default=$REPLY
     KA_PROMPT_VALUE=''
     stty echo 2>/dev/null || true
     tput cnorm 2>/dev/null || printf '\033[?25h'
@@ -493,14 +510,14 @@ ka_tui_prompt_line() {
     stty -echo 2>/dev/null || true
     value=${value:-$default}
     # Typed input is stored and later replayed into a terminal; keep it control-free.
-    value=${value//$'\t'/ }
-    value=${value//[[:cntrl:]]/}
-    KA_PROMPT_VALUE=$value
+    ka_sanitize_human_set "$value"
+    KA_PROMPT_VALUE=$REPLY
 }
 
 # Role: Render a short transient action result at the bottom of the next screen frame.
 ka_tui_toast() {
-    KA_TUI_TOAST=$(ka_tui_sanitize "$1")
+    ka_sanitize_human_set "$1"
+    KA_TUI_TOAST=$REPLY
     KA_TUI_TOAST_UNTIL=$(( $(ka_now_epoch) + 2 ))
 }
 

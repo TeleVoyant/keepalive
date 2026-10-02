@@ -79,7 +79,7 @@ KA_T_MODE[$uuid]=MESSAGE_ENTER
 KA_T_PENDING_SUBMIT[$uuid]=0
 DELIVERY_RC=3
 assert_false 'a partial delivery reports failure' ka_scheduler_send_main "$uuid" MANUAL
-assert_eq 1 "${KA_T_PENDING_SUBMIT[$uuid]}" 'a partial delivery records that a submit is owed'
+assert_eq MAIN "${KA_T_PENDING_SUBMIT[$uuid]}" 'a partial MAIN delivery records its submit owner'
 assert_contains "$(ka_log_path "$uuid")" 'submit owed' 'the event log distinguishes a partial delivery'
 assert_eq 'message delivered but submit failed; the next attempt will only submit' "$KA_LAST_ERROR" \
     'the client is told a submit is owed rather than a generic transport failure'
@@ -88,7 +88,7 @@ DELIVERY_RC=0
 before=${KA_T_MAIN_INDEX[$uuid]}
 ka_scheduler_send_main "$uuid" MANUAL
 assert_eq 1 "$SUBMIT_ONLY_SEEN" 'the retry submits the pending line instead of resending the message'
-assert_eq 0 "${KA_T_PENDING_SUBMIT[$uuid]}" 'a successful submit clears the pending state'
+assert_eq 0 "${KA_T_PENDING_SUBMIT[$uuid]}" 'a successful submit clears the pending owner'
 assert_eq "$(( (before + 1) % 2 ))" "${KA_T_MAIN_INDEX[$uuid]}" 'completing a pending submit advances the rotation'
 
 ka_scheduler_send_main "$uuid" MANUAL
@@ -97,15 +97,16 @@ assert_eq 0 "$SUBMIT_ONLY_SEEN" 'the following send delivers a full message agai
 # `e` sends one Enter now and resumes normal delivery; it is not a mode toggle.
 KA_T_MODE[$uuid]=ENTER_ONLY
 KA_T_MAIN_REMAIN[$uuid]=3
-KA_T_PENDING_SUBMIT[$uuid]=1
+KA_T_PENDING_SUBMIT[$uuid]=MAIN
 before_index=${KA_T_MAIN_INDEX[$uuid]}
 DELIVERIES=()
 assert_true 'a one-shot Enter is delivered' ka_scheduler_send_enter_once "$uuid" MANUAL
 assert_eq 'ENTER_ONLY:' "${DELIVERIES[0]}" 'the one-shot sends only a submit, with no message'
 assert_eq MESSAGE_ENTER "${KA_T_MODE[$uuid]}" 'the one-shot resumes message+enter delivery'
 assert_eq 10 "${KA_T_MAIN_REMAIN[$uuid]}" 'the one-shot resets the main countdown'
-assert_eq "$before_index" "${KA_T_MAIN_INDEX[$uuid]}" 'the one-shot never consumes a queued message'
-assert_eq 0 "${KA_T_PENDING_SUBMIT[$uuid]}" 'a bare Enter completes any pending submit'
+assert_eq "$(( (before_index + 1) % 2 ))" "${KA_T_MAIN_INDEX[$uuid]}" \
+    'the one-shot completes the pending MAIN message without sending a new one'
+assert_eq 0 "${KA_T_PENDING_SUBMIT[$uuid]}" 'a bare Enter completes any pending owner'
 
 # `E` pins enter-only; setting a mode is explicit, not a flip.
 assert_true 'enter-only can be set explicitly' ka_state_set_mode "$uuid" ENTER_ONLY

@@ -70,6 +70,14 @@ client times out rather than hanging, which is the symptom you are seeing. Resta
 systemctl --user restart keepalive.socket keepalive.service
 ```
 
+**What does `doctor` consider usable?** The qdbus/dbus-send lines only report executable
+presence. `Konsole D-Bus bus: REACHABLE` is what counts that backend, even when the
+service count is zero because Konsole is not running. For Orca, both `orca-ide` and `jq`
+must be present and the runtime probe must be reachable. The `usable terminal backends`
+count includes only those reachable backends; `doctor` exits nonzero only for missing core
+requirements or when no enabled backend is reachable, not merely because an optional
+backend is offline or the systemd user manager is unavailable.
+
 **Is the machine simply loaded?** The client waits `KEEPALIVE_RESPONSE_TIMEOUT_MS`
 (default 8000). Raise it for one call:
 
@@ -217,9 +225,18 @@ trades list freshness for idle cost.
 The installer prints which ones. Each was either quarantined - look in
 `$XDG_RUNTIME_DIR/keepalive/quarantine/` for the record and its `quarantine_reason` - or
 found its terminal gone and is listed as `UNAVAILABLE`, which the installer reports as a
-state change rather than a loss. Downgrading to a release older than versioned
-secondary-message files is a known exception: such a release cannot read current
-checkpoints and quarantines them, so update forward instead.
+state change rather than a loss. The installer refuses a semantic-version downgrade before
+it disables units or swaps code. Older releases may not understand newer checkpoint/message
+companion files and can quarantine otherwise healthy targets. Prefer a pinned forward
+update; only override this checkpoint-compatibility guard after taking a runtime backup and
+confirming that the old release can read the saved state:
+
+```bash
+./scripts/install.sh --allow-downgrade
+```
+
+If an older release has already quarantined current checkpoints, restore the newer release
+and its backup, then update forward; do not delete the quarantine while investigating.
 
 If the installer warned that a daemon was **not started by systemd**, it is still running
 the previous code; stop it with the `kill` command it printed (it saves every countdown on
@@ -230,6 +247,31 @@ it prints is the daemon, never a process that merely reused a stale pid.
 If it warned that the restarted daemon **has not reported online**, recovery is still
 revalidating targets - each one is checked live before the daemon reports itself online -
 or the unit failed; `systemctl --user status keepalive.service` tells which.
+
+## Installer refuses an XDG or unit path
+
+This is intentional. A symlinked `HOME` or `~/.config` is allowed for dotfile layouts
+when its canonical target is yours; an absolute `XDG_CONFIG_HOME` is treated the same way.
+Configured roots are canonicalized before use. Existing components may be group-writable
+only when the group is your private primary group (same name as you, no members, and no
+other account has it as a primary group); world-writable components are rejected except
+for trusted root-owned sticky ancestors such as `/tmp`. The managed `keepalive` profile, `keepalive-manager` root, unit-root parent
+components, and runtime tree must not be symlinks. Exact unit entries are lstat-validated
+and never followed (systemd's ordinary enablement links remain supported). The installer
+also ignores a persisted unit-root marker unless
+it comes from a recognized managed tree and still equals the previously validated canonical
+root. Fix the path ownership/mode or choose a private XDG directory rather than bypassing
+the check.
+
+To remove runtime checkpoints intentionally, stop the service and use the explicit purge:
+
+```bash
+./scripts/uninstall.sh --purge-runtime
+```
+
+The default uninstall leaves runtime state and the persistent profile. A purge is refused
+unless both units were confirmed inactive and the exact runtime tree is owned, private, and
+free of symlinks; `--force` cannot authorize an unconfirmed purge.
 
 ---
 
@@ -255,7 +297,7 @@ complete rendering path, not a degraded one:
 ```bash
 keepalive --no-icons     # drop Nerd Font glyphs
 keepalive --no-color     # drop ANSI color (same as NO_COLOR=1)
-keepalive --ascii        # drop glyphs, color, and box-drawing characters
+keepalive --ascii        # use ASCII glyphs; color is retained unless --no-color/NO_COLOR=1
 ```
 
 The TUI is laid out for 52 columns and up. Below that, output is truncated rather than

@@ -256,6 +256,20 @@ assert_eq 0 "$KA_ORCA_FAILURES" 'a successful refresh resets Orca failure count'
 assert_eq 0 "$KA_ORCA_RETRY_AT" 'a successful refresh clears the Orca retry deadline'
 assert_eq orca "${KA_SVC_DISCOVER[*]}" 'a successful refresh permits the next Orca discovery'
 
+KA_ORCA_DISCOVERY_FAILURE='command-124'
+KA_DISCOVERY_STAMP_ORCA=90
+KA_ORCA_RETRY_AT=104
+orca_warning=$(ka_service_warn_discovery_incomplete Orca 100 2>&1)
+if [[ $orca_warning == *'reason=command-124'* ]]; then warning_rc=0; else warning_rc=1; fi
+assert_eq 0 "$warning_rc" 'Orca discovery warning includes the failure reason'
+if [[ $orca_warning == *'snapshot_age=10s'* ]]; then warning_rc=0; else warning_rc=1; fi
+assert_eq 0 "$warning_rc" 'Orca discovery warning includes snapshot age'
+if [[ $orca_warning == *'next_retry_in=4s'* ]]; then warning_rc=0; else warning_rc=1; fi
+assert_eq 0 "$warning_rc" 'Orca discovery warning includes the next retry delay'
+KA_ORCA_DISCOVERY_FAILURE=''
+KA_DISCOVERY_STAMP_ORCA=0
+KA_ORCA_RETRY_AT=0
+
 # Prepare two independent isolated daemon homes after all direct helper assertions.
 idle_root="$TEST_TMP/idle-daemon"
 flight_root="$TEST_TMP/flight-daemon"

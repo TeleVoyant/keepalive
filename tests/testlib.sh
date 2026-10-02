@@ -49,6 +49,14 @@ assert_contains() {
     if grep -Fq -- "$needle" "$path"; then printf 'ok %d - %s\n' "$TEST_COUNT" "$message"; else printf 'not ok %d - %s\n' "$TEST_COUNT" "$message"; ((TEST_FAIL += 1)); fi
 }
 
+# Role: Compare file bytes with coreutils so tests do not depend on diffutils' cmp.
+files_equal() {
+    local left=$1 right=$2 left_hash right_hash
+    left_hash=$(sha256sum -- "$left") || return 1
+    right_hash=$(sha256sum -- "$right") || return 1
+    [[ ${left_hash%% *} == "${right_hash%% *}" ]]
+}
+
 # Role: Record an assertion that the host cannot exercise, without hiding the reason.
 test_skip() {
     local message=$1 reason=$2

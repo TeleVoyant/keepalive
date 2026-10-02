@@ -2,6 +2,9 @@
 # Authoritative daemon state for monitored targets and current terminal discovery.
 # Runtime state is data-only: no target/config file is ever sourced or eval'd.
 
+# Longest last-delivery detail kept: enough to recognize the message in list/detail views.
+KA_LAST_DELIVERY_DETAIL_MAX=256
+
 # Role: Initialize all in-memory target and discovery collections used by the daemon.
 ka_state_init_arrays() {
     declare -ga KA_T_UUIDS=()
@@ -13,12 +16,15 @@ ka_state_init_arrays() {
     declare -gA KA_T_MODE=() KA_T_NOTIFY=() KA_T_MAIN_INTERVAL=() KA_T_MAIN_REMAIN=()
     declare -gA KA_T_MAIN_INDEX=() KA_T_SECONDARY_ENABLED=() KA_T_SECONDARY_INTERVAL=()
     declare -gA KA_T_SECONDARY_REMAIN=() KA_T_SECONDARY_MESSAGE=() KA_T_LAST_SEEN=()
+    declare -gA KA_T_LAST_DELIVERY_TIME=() KA_T_LAST_DELIVERY_EVENT=()
+    declare -gA KA_T_LAST_DELIVERY_RESULT=() KA_T_LAST_DELIVERY_DETAIL=()
     declare -gA KA_T_REASON=()
     # Consecutive transient validation failures. Runtime-only debounce, never persisted:
     # a checkpoint should not carry a grudge across a daemon restart.
     declare -gA KA_T_STRIKES=()
-    # Set when a message reached the terminal but its submit did not. The next attempt
-    # completes that pending line instead of appending the message again.
+    # Owner of a message whose text reached the terminal but whose submit did not:
+    # 0, MAIN, SECONDARY_AUTO, SECONDARY_MANUAL, or STALE. The scheduler accepts legacy
+    # in-memory 1 as MAIN, but checkpoints always write the named enum.
     declare -gA KA_T_PENDING_SUBMIT=()
     # The secondary prompt is a one-shot nudge: once it has fired for this arming it
     # stays quiet until the target is reconfigured.
@@ -101,6 +107,17 @@ ka_state_unregister_uuid() {
 # Role: Note that a target's in-memory state has moved ahead of its checkpoint.
 ka_state_mark_dirty() {
     KA_T_DIRTY[$1]=1
+}
+
+# Role: Canonicalize one pending-submit owner for checkpoint compatibility.
+ka_state_pending_submit_value() {
+    local uuid=$1
+    local pending=${KA_T_PENDING_SUBMIT[$uuid]:-0}
+    case $pending in
+        0|MAIN|SECONDARY_AUTO|SECONDARY_MANUAL|STALE) REPLY=$pending ;;
+        1) REPLY=MAIN ;;
+        *) REPLY=STALE ;;
+    esac
 }
 
 # Role: Checkpoint every target whose countdown has moved since the last flush.
@@ -200,12 +217,14 @@ ka_state_sweep_temp_files() {
 # Role: Save one monitored target's mutable scalar state using atomic file replacement.
 ka_state_save_target() {
     local uuid=$1 dir file old_secondary_file=''
-    local secondary_file secondary_path
+    local secondary_file secondary_path pending_submit
     ka_state_target_dir "$uuid"; dir=$REPLY
     ka_state_prepare_messages_dir "$dir" || return 1
     file="$dir/state.tsv"
     ka_state_referenced_companion "$dir" || return 1
     old_secondary_file=$REPLY
+    ka_state_pending_submit_value "$uuid"
+    pending_submit=$REPLY
     # Every save commits a fresh companion. Reusing an unchanged one saved a single rename
     # per flush, but deciding "unchanged" meant reading a file that could be swapped between
     # that check and the state commit, leaving state.tsv naming something it never verified.
@@ -248,6 +267,13 @@ ka_state_save_target() {
     ka_state_payload_row secondary_message_file "$secondary_file"
     ka_state_payload_row last_seen           "${KA_T_LAST_SEEN[$uuid]-}"
     ka_state_payload_row reason              "${KA_T_REASON[$uuid]-}"
+    ka_state_payload_row pending_submit     "$pending_submit"
+    # These fields are deliberately appended: older daemons ignore unknown checkpoint
+    # keys, while a new daemon treats their absence as the never-delivered state.
+    ka_state_payload_row last_delivery_time   "${KA_T_LAST_DELIVERY_TIME[$uuid]-}"
+    ka_state_payload_row last_delivery_event  "${KA_T_LAST_DELIVERY_EVENT[$uuid]-}"
+    ka_state_payload_row last_delivery_result "${KA_T_LAST_DELIVERY_RESULT[$uuid]-}"
+    ka_state_payload_row last_delivery_detail "${KA_T_LAST_DELIVERY_DETAIL[$uuid]-}"
     if ! ka_atomic_write_value "$file" "$KA_STATE_PAYLOAD"; then
         rm -f -- "$secondary_path"
         return 1
@@ -288,13 +314,21 @@ ka_state_load_target_dir() {
     local orca_host='' orca_tab='' orca_leaf='' orca_agent=''
     local status='' mode='' notifications='' main_interval='' main_remaining='' main_index=''
     local secondary_enabled='' secondary_interval='' secondary_remaining='' last_seen='' reason=''
-    local secondary_done='' secondary_message_file=''
+    local secondary_done='' secondary_message_file='' pending_submit=''
+    local last_delivery_time='' last_delivery_event='' last_delivery_result='' last_delivery_detail=''
     local parse_error='' secondary_message='' secondary_path='' message_count=0 safe_uuid=''
     local -A seen=()
+    local delivery_malformed=0
 
     while IFS=$'\t' read -r key value extra; do
+        # Display-only delivery metadata is never a reason to reject the target: a
+        # duplicated or split field just clears all four (see below).
+        if [[ $key == last_delivery_* ]] && [[ -n ${seen[$key]+x} || -n $extra ]]; then
+            delivery_malformed=1
+            continue
+        fi
         case $key in
-            uuid|backend|type|name|directory|service|path|term_pid|ai_pid|ai_start|orca_handle|orca_pty|orca_incarnation|orca_worktree|orca_runtime|orca_host|orca_tab|orca_leaf|orca_agent|status|mode|notifications|main_interval|main_remaining|main_index|secondary_enabled|secondary_interval|secondary_remaining|secondary_done|secondary_message_file|last_seen|reason)
+            uuid|backend|type|name|directory|service|path|term_pid|ai_pid|ai_start|orca_handle|orca_pty|orca_incarnation|orca_worktree|orca_runtime|orca_host|orca_tab|orca_leaf|orca_agent|status|mode|notifications|main_interval|main_remaining|main_index|secondary_enabled|secondary_interval|secondary_remaining|secondary_done|secondary_message_file|last_seen|reason|pending_submit|last_delivery_time|last_delivery_event|last_delivery_result|last_delivery_detail)
                 if [[ -n ${seen[$key]+x} ]]; then
                     parse_error="duplicate state field: $key"
                     continue
@@ -340,6 +374,11 @@ ka_state_load_target_dir() {
             secondary_message_file) secondary_message_file=$value ;;
             last_seen) last_seen=$value ;;
             reason) reason=$value ;;
+            pending_submit) pending_submit=$value ;;
+            last_delivery_time) last_delivery_time=$value ;;
+            last_delivery_event) last_delivery_event=$value ;;
+            last_delivery_result) last_delivery_result=$value ;;
+            last_delivery_detail) last_delivery_detail=$value ;;
         esac
     done <"$file"
 
@@ -408,6 +447,31 @@ ka_state_load_target_dir() {
     else
         secondary_done=0
     fi
+    if [[ -n ${seen[pending_submit]+x} ]]; then
+        case $pending_submit in
+            0|MAIN|SECONDARY_AUTO|SECONDARY_MANUAL|STALE) ;;
+            # The pre-enum flag value; ka_state_pending_submit_value maps it the same way.
+            1) pending_submit=MAIN ;;
+            *)
+                ka_state_load_reject 'pending_submit must be 0, MAIN, SECONDARY_AUTO, SECONDARY_MANUAL, or STALE'
+                return 1
+                ;;
+        esac
+    else
+        pending_submit=0
+    fi
+    # The last-delivery fields are display metadata only. A value outside its shape is
+    # dropped or shortened rather than rejected: quarantining a healthy target over a
+    # cosmetic field (or a detail longer than a since-lowered message limit) would cost
+    # the user the target itself.
+    ((delivery_malformed == 0)) || last_delivery_event=''
+    case $last_delivery_event in
+        MAIN|SECONDARY|ENTER) ;;
+        *) last_delivery_event='' last_delivery_time='' last_delivery_result='' last_delivery_detail='' ;;
+    esac
+    last_delivery_time=${last_delivery_time:0:64}
+    last_delivery_result=${last_delivery_result:0:128}
+    last_delivery_detail=${last_delivery_detail:0:${KA_LAST_DELIVERY_DETAIL_MAX:-256}}
     if [[ -n ${seen[secondary_message_file]+x} ]]; then
         [[ $secondary_message_file =~ ^secondary_message\.[0-9]+\.[0-9]+$ ]] || {
             ka_state_load_reject 'secondary message checkpoint reference is invalid'
@@ -422,12 +486,23 @@ ka_state_load_target_dir() {
         ka_state_load_reject 'secondary_message is missing or not an owned regular file'
         return 1
     }
-    secondary_message=$(cat -- "$secondary_path") || { ka_state_load_reject 'secondary_message could not be read'; return 1; }
-    if [[ $secondary_enabled == 1 ]]; then
-        [[ -n $secondary_message && $secondary_message != *$'\n'* ]] || {
-            ka_state_load_reject 'enabled secondary_message must be one non-empty logical line'
-            return 1
-        }
+    # Bounded like every other message read: an oversized companion must not be pulled
+    # into daemon memory. A disabled secondary was never validated and is never sent, so
+    # an unreadable one only loses its stale text instead of quarantining the target.
+    local max_len
+    ka_tunable KEEPALIVE_MAX_MESSAGE_LENGTH 2000
+    max_len=$REPLY
+    if ka_request_read_scalar "$secondary_path" "$max_len"; then
+        secondary_message=$REPLY
+    elif [[ $secondary_enabled == 1 ]]; then
+        ka_state_load_reject "enabled secondary_message must be one logical line of at most $max_len characters"
+        return 1
+    else
+        secondary_message=''
+    fi
+    if [[ $secondary_enabled == 1 && -z $secondary_message ]]; then
+        ka_state_load_reject 'enabled secondary_message must be one non-empty logical line'
+        return 1
     fi
     ka_profile_validate_main_messages "$dir/messages" >/dev/null 2>&1 || {
         ka_state_load_reject 'main message rotation is not contiguous non-empty 001..N'
@@ -471,8 +546,12 @@ ka_state_load_target_dir() {
     KA_T_SECONDARY_MESSAGE[$uuid]=$secondary_message
     KA_T_LAST_SEEN[$uuid]=$last_seen
     KA_T_REASON[$uuid]=$reason
+    KA_T_LAST_DELIVERY_TIME[$uuid]=$last_delivery_time
+    KA_T_LAST_DELIVERY_EVENT[$uuid]=$last_delivery_event
+    KA_T_LAST_DELIVERY_RESULT[$uuid]=$last_delivery_result
+    KA_T_LAST_DELIVERY_DETAIL[$uuid]=$last_delivery_detail
     KA_T_STRIKES[$uuid]=0
-    KA_T_PENDING_SUBMIT[$uuid]=0
+    KA_T_PENDING_SUBMIT[$uuid]=$pending_submit
 }
 
 # Role: Move a malformed runtime record out of active targets and preserve its reason.
@@ -697,28 +776,51 @@ ka_state_refresh_discovery() {
 
 # Role: Copy a validated wizard request's message rotation into a target runtime directory.
 ka_state_copy_request_messages() {
-    local request_dir=$1 target_dir=$2 staged
+    local request_dir=$1 target_dir=$2 staged file name max_len
     ka_state_validate_message_destination "$target_dir" || return 1
+    ka_request_validate_dir "$request_dir" || return 1
+    ka_request_validate_dir "$request_dir/messages" || return 1
+    ka_tunable KEEPALIVE_MAX_MESSAGE_LENGTH 2000
+    max_len=$REPLY
     staged=$(mktemp -d "$target_dir/messages.staged.XXXXXX") || return 1
     chmod 700 "$staged" 2>/dev/null || { rm -rf -- "$staged"; return 1; }
-    cp -f -- "$request_dir/messages"/[0-9][0-9][0-9] "$staged/" || { rm -rf -- "$staged"; return 1; }
+    shopt -s nullglob
+    local -a files=("$request_dir/messages"/[0-9][0-9][0-9])
+    shopt -u nullglob
+    ((${#files[@]} > 0)) || { rm -rf -- "$staged"; return 1; }
+    for file in "${files[@]}"; do
+        name=${file##*/}
+        ka_request_copy_file "$file" "$staged/$name" "$max_len" \
+            || { rm -rf -- "$staged"; return 1; }
+    done
     chmod 600 "$staged"/* 2>/dev/null || { rm -rf -- "$staged"; return 1; }
     ka_commit_staged_dir "$staged" "$target_dir/messages"
 }
 
 # Role: Apply one validated request to a target and durably checkpoint the new settings.
 ka_state_apply_request_configuration() {
-    local uuid=$1 request_dir=$2 target_dir secondary_message
-    local mode notifications main_interval secondary_enabled secondary_interval
+    local uuid=$1 request_dir=$2 target_dir secondary_message pending_submit
+    local mode notifications main_interval secondary_enabled secondary_interval max_len
     ka_state_target_dir "$uuid"; target_dir=$REPLY
-    mode=$(ka_read_first_line "$request_dir/delivery_mode")
-    notifications=$(ka_read_first_line "$request_dir/notifications")
-    main_interval=$(ka_read_first_line "$request_dir/main_interval")
-    secondary_enabled=$(ka_read_first_line "$request_dir/secondary_enabled")
-    secondary_interval=$(ka_read_first_line "$request_dir/secondary_interval")
-    secondary_message=$(cat -- "$request_dir/secondary_message") || return 1
+    ka_request_read_scalar "$request_dir/delivery_mode" 64 || return 1
+    mode=$REPLY
+    ka_request_read_scalar "$request_dir/notifications" 64 || return 1
+    notifications=$REPLY
+    ka_request_read_scalar "$request_dir/main_interval" 64 || return 1
+    main_interval=$REPLY
+    ka_request_read_scalar "$request_dir/secondary_enabled" 64 || return 1
+    secondary_enabled=$REPLY
+    ka_request_read_scalar "$request_dir/secondary_interval" 64 || return 1
+    secondary_interval=$REPLY
+    ka_tunable KEEPALIVE_MAX_MESSAGE_LENGTH 2000
+    max_len=$REPLY
+    ka_request_read_scalar "$request_dir/secondary_message" "$max_len" || return 1
+    secondary_message=$REPLY
 
-    ka_state_copy_request_messages "$request_dir" "$target_dir" || return 1
+    ka_state_pending_submit_value "$uuid"
+    pending_submit=$REPLY
+    [[ $pending_submit == 0 ]] && pending_submit=0 || pending_submit=STALE
+    KA_T_PENDING_SUBMIT[$uuid]=$pending_submit
     KA_T_MODE[$uuid]=$mode
     KA_T_NOTIFY[$uuid]=$notifications
     KA_T_MAIN_INTERVAL[$uuid]=$main_interval
@@ -729,7 +831,13 @@ ka_state_apply_request_configuration() {
     KA_T_SECONDARY_REMAIN[$uuid]=$secondary_interval
     KA_T_SECONDARY_DONE[$uuid]=0
     KA_T_SECONDARY_MESSAGE[$uuid]=$secondary_message
-    ka_state_save_target "$uuid"
+    # Commit the checkpoint (index 0, any owed submit STALE) before swapping messages/.
+    # A daemon killed between the two then restarts with a valid pair - index 0 exists in
+    # every rotation and a STALE Enter never advances it - instead of the old index and
+    # owner applied to the new rotation, which skips a line or quarantines the target.
+    # The restore path keeps the opposite order for the same reason.
+    ka_state_save_target "$uuid" || return 1
+    ka_state_copy_request_messages "$request_dir" "$target_dir"
 }
 
 # Role: Restore an exact pre-configuration target snapshot after a failed commit.
@@ -737,9 +845,13 @@ ka_state_restore_configuration() {
     local uuid=$1 request_dir=$2 mode=$3 notifications=$4 main_interval=$5
     local main_remaining=$6 main_index=$7 secondary_enabled=$8 secondary_interval=$9
     shift 9
-    local secondary_remaining=$1 secondary_done=$2 secondary_message=$3 target_dir
+    local secondary_remaining=$1 secondary_done=$2 secondary_message=$3 target_dir pending_submit
     ka_state_target_dir "$uuid"; target_dir=$REPLY
     ka_state_copy_request_messages "$request_dir" "$target_dir" || return 1
+    ka_state_pending_submit_value "$uuid"
+    pending_submit=$REPLY
+    [[ $pending_submit == 0 ]] && pending_submit=0 || pending_submit=STALE
+    KA_T_PENDING_SUBMIT[$uuid]=$pending_submit
     KA_T_MODE[$uuid]=$mode
     KA_T_NOTIFY[$uuid]=$notifications
     KA_T_MAIN_INTERVAL[$uuid]=$main_interval
@@ -788,7 +900,7 @@ ka_state_create_target() {
     [[ -n ${KA_D_TYPE[$uuid]+x} ]] || { ka_error 'selected terminal session is no longer available'; return 1; }
     ka_profile_validate_request "$request_dir" || return 1
 
-    local target_dir main_interval secondary_interval
+    local target_dir main_interval secondary_interval max_len
     ka_state_target_dir "$uuid"; target_dir=$REPLY
     ka_state_create_runtime_target_dir "$target_dir" \
         || { ka_error 'could not create target runtime state'; return 1; }
@@ -801,8 +913,10 @@ ka_state_create_target() {
         ka_error 'could not copy target message rotation'
         return "$copy_rc"
     fi
-    main_interval=$(ka_read_first_line "$request_dir/main_interval")
-    secondary_interval=$(ka_read_first_line "$request_dir/secondary_interval")
+    ka_request_read_scalar "$request_dir/main_interval" 64 || return 1
+    main_interval=$REPLY
+    ka_request_read_scalar "$request_dir/secondary_interval" 64 || return 1
+    secondary_interval=$REPLY
 
     ka_state_register_uuid "$uuid"
     KA_T_BACKEND[$uuid]=${KA_D_BACKEND[$uuid]:-konsole}
@@ -824,17 +938,27 @@ ka_state_create_target() {
     KA_T_ORCA_LEAF[$uuid]=${KA_D_ORCA_LEAF[$uuid]-}
     KA_T_ORCA_AGENT[$uuid]=${KA_D_ORCA_AGENT[$uuid]-}
     KA_T_STATUS[$uuid]=ACTIVE
-    KA_T_MODE[$uuid]=$(ka_read_first_line "$request_dir/delivery_mode")
-    KA_T_NOTIFY[$uuid]=$(ka_read_first_line "$request_dir/notifications")
+    ka_request_read_scalar "$request_dir/delivery_mode" 64 || return 1
+    KA_T_MODE[$uuid]=$REPLY
+    ka_request_read_scalar "$request_dir/notifications" 64 || return 1
+    KA_T_NOTIFY[$uuid]=$REPLY
     KA_T_MAIN_INTERVAL[$uuid]=$main_interval
     KA_T_MAIN_REMAIN[$uuid]=$main_interval
     KA_T_MAIN_INDEX[$uuid]=0
-    KA_T_SECONDARY_ENABLED[$uuid]=$(ka_read_first_line "$request_dir/secondary_enabled")
+    ka_request_read_scalar "$request_dir/secondary_enabled" 64 || return 1
+    KA_T_SECONDARY_ENABLED[$uuid]=$REPLY
     KA_T_SECONDARY_INTERVAL[$uuid]=$secondary_interval
     KA_T_SECONDARY_REMAIN[$uuid]=$secondary_interval
-    KA_T_SECONDARY_MESSAGE[$uuid]=$(cat -- "$request_dir/secondary_message")
+    ka_tunable KEEPALIVE_MAX_MESSAGE_LENGTH 2000
+    max_len=$REPLY
+    ka_request_read_scalar "$request_dir/secondary_message" "$max_len" || return 1
+    KA_T_SECONDARY_MESSAGE[$uuid]=$REPLY
     KA_T_LAST_SEEN[$uuid]=$(ka_now_full)
     KA_T_REASON[$uuid]=''
+    KA_T_LAST_DELIVERY_TIME[$uuid]=''
+    KA_T_LAST_DELIVERY_EVENT[$uuid]=''
+    KA_T_LAST_DELIVERY_RESULT[$uuid]=''
+    KA_T_LAST_DELIVERY_DETAIL[$uuid]=''
     KA_T_STRIKES[$uuid]=0
     KA_T_PENDING_SUBMIT[$uuid]=0
     KA_T_SECONDARY_DONE[$uuid]=0
@@ -852,13 +976,27 @@ ka_state_create_target() {
     ka_log_event "$uuid" CREATED "${KA_T_TYPE[$uuid]} / ${KA_T_NAME[$uuid]}" ACTIVE
 }
 
-# Role: Reconfigure one existing available target and update the single global profile.
-# Applying configuration deliberately resets that target's main/secondary countdowns.
+# Role: Reconfigure one existing target and optionally update the single global profile.
+# Applying configuration deliberately resets that target's main/secondary countdowns. An
+# absent profile_update field preserves the wizard's historical default of updating it.
 ka_state_configure_target() {
     local uuid=$1 request_dir=$2
     ka_state_has_target "$uuid" || { ka_error 'unknown keep-alive target'; return 1; }
     [[ ${KA_T_STATUS[$uuid]} != UNAVAILABLE ]] || { ka_error 'unavailable targets cannot be reconfigured'; return 1; }
     ka_profile_validate_request "$request_dir" || return 1
+
+    local profile_update=1
+    if [[ -e $request_dir/profile_update || -L $request_dir/profile_update ]]; then
+        ka_request_read_scalar "$request_dir/profile_update" 64 || {
+            ka_error 'profile update policy is missing or not a regular file'
+            return 1
+        }
+        profile_update=$REPLY
+        [[ $profile_update == 0 || $profile_update == 1 ]] || {
+            ka_error 'profile update policy must be 0 or 1'
+            return 1
+        }
+    fi
 
     local rollback_dir failure
     local old_mode=${KA_T_MODE[$uuid]} old_notifications=${KA_T_NOTIFY[$uuid]}
@@ -869,6 +1007,9 @@ ka_state_configure_target() {
     local old_secondary_remaining=${KA_T_SECONDARY_REMAIN[$uuid]}
     local old_secondary_done=${KA_T_SECONDARY_DONE[$uuid]:-0}
     local old_secondary_message=${KA_T_SECONDARY_MESSAGE[$uuid]-}
+    # Applying a configuration marks any owed submit STALE; a rollback restores the old
+    # rotation, so it must restore the owner too or its completion would stop advancing it.
+    local old_pending_submit=${KA_T_PENDING_SUBMIT[$uuid]:-0}
     rollback_dir=$(mktemp -d "$KA_RUNTIME_DIR/configure.staged.XXXXXX") \
         || { ka_error 'could not create configuration rollback state'; return 1; }
     if ! ka_state_copy_target_to_request "$uuid" "$rollback_dir"; then
@@ -883,18 +1024,24 @@ ka_state_configure_target() {
             "$old_main_index" "$old_secondary_enabled" "$old_secondary_interval" \
             "$old_secondary_remaining" "$old_secondary_done" "$old_secondary_message"; then
             failure+='; restoring the previous target configuration also failed'
+        else
+            KA_T_PENDING_SUBMIT[$uuid]=$old_pending_submit
+            ka_state_save_target "$uuid" || ka_state_mark_dirty "$uuid"
         fi
         rm -rf -- "$rollback_dir"
         ka_error "$failure"
         return 1
     fi
-    if ! ka_profile_update_from_request "$request_dir"; then
+    if ((profile_update == 1)) && ! ka_profile_update_from_request "$request_dir"; then
         failure=${KA_LAST_ERROR:-'could not update the persistent profile'}
         if ! ka_state_restore_configuration "$uuid" "$rollback_dir" \
             "$old_mode" "$old_notifications" "$old_main_interval" "$old_main_remaining" \
             "$old_main_index" "$old_secondary_enabled" "$old_secondary_interval" \
             "$old_secondary_remaining" "$old_secondary_done" "$old_secondary_message"; then
             failure+='; restoring the previous target configuration also failed'
+        else
+            KA_T_PENDING_SUBMIT[$uuid]=$old_pending_submit
+            ka_state_save_target "$uuid" || ka_state_mark_dirty "$uuid"
         fi
         rm -rf -- "$rollback_dir"
         ka_error "$failure"
@@ -925,6 +1072,8 @@ ka_state_delete_target() {
     unset 'KA_T_MAIN_REMAIN[$uuid]' 'KA_T_MAIN_INDEX[$uuid]' 'KA_T_SECONDARY_ENABLED[$uuid]'
     unset 'KA_T_SECONDARY_INTERVAL[$uuid]' 'KA_T_SECONDARY_REMAIN[$uuid]' 'KA_T_SECONDARY_MESSAGE[$uuid]'
     unset 'KA_T_LAST_SEEN[$uuid]' 'KA_T_REASON[$uuid]' 'KA_T_STRIKES[$uuid]' 'KA_T_DIRTY[$uuid]'
+    unset 'KA_T_LAST_DELIVERY_TIME[$uuid]' 'KA_T_LAST_DELIVERY_EVENT[$uuid]'
+    unset 'KA_T_LAST_DELIVERY_RESULT[$uuid]' 'KA_T_LAST_DELIVERY_DETAIL[$uuid]'
     unset 'KA_T_PENDING_SUBMIT[$uuid]' 'KA_T_SECONDARY_DONE[$uuid]'
 }
 
@@ -1090,7 +1239,7 @@ ka_state_validate_from_discovery() {
 # Transient failures are debounced rather than ignored: a backend that never comes back
 # still ends in UNAVAILABLE, but a momentary outage does not destroy identity immediately.
 ka_state_validate_targets() {
-    local uuid rc reason limit strikes backend seen_at
+    local uuid rc reason limit strikes backend seen_at failed=0
     ((${#KA_T_UUIDS[@]} > 0)) || return 0
     # Both read once per pass with builtins: this runs every health interval, and each
     # command substitution here used to fork, per pass and per target respectively.
@@ -1125,9 +1274,13 @@ ka_state_validate_targets() {
                 ((strikes >= limit)) || continue
                 reason="$reason (${strikes} consecutive attempts)"
             fi
-            ka_state_mark_unavailable "$uuid" "$reason"
+            if ! ka_state_mark_unavailable "$uuid" "$reason"; then
+                failed=1
+                ka_warn "could not save unavailable target state for $uuid; validation will retry"
+            fi
         fi
     done
+    return "$failed"
 }
 
 # Role: Publish one atomic merged index containing monitored and currently AVAILABLE sessions.
@@ -1140,7 +1293,9 @@ ka_state_validate_targets() {
 # rewritten.
 ka_state_publish_index() {
     local uuid status payload='' row published
-    local type name directory last reason
+    local type name directory last reason next_main next_secondary
+    local delivery_time delivery_event delivery_result delivery_detail publication_epoch
+    printf -v publication_epoch '%(%s)T' -1
     for uuid in "${KA_T_UUIDS[@]}"; do
         status=${KA_T_STATUS[$uuid]}
         ka_single_line "${KA_T_TYPE[$uuid]}";       type=$REPLY
@@ -1148,12 +1303,26 @@ ka_state_publish_index() {
         ka_single_line "${KA_T_DIR[$uuid]}";        directory=$REPLY
         ka_single_line "${KA_T_LAST_SEEN[$uuid]-}"; last=$REPLY
         ka_single_line "${KA_T_REASON[$uuid]-}";    reason=$REPLY
-        printf -v row '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        next_main=''; next_secondary=''
+        if [[ $status == ACTIVE ]]; then
+            printf -v next_main '%(%F %T)T' "$((publication_epoch + ${KA_T_MAIN_REMAIN[$uuid]:-0}))"
+            if [[ ${KA_T_SECONDARY_ENABLED[$uuid]:-0} == 1 \
+                && ${KA_T_SECONDARY_DONE[$uuid]:-0} != 1 ]]; then
+                printf -v next_secondary '%(%F %T)T' \
+                    "$((publication_epoch + ${KA_T_SECONDARY_REMAIN[$uuid]:-0}))"
+            fi
+        fi
+        ka_single_line "${KA_T_LAST_DELIVERY_TIME[$uuid]-}";   delivery_time=$REPLY
+        ka_single_line "${KA_T_LAST_DELIVERY_EVENT[$uuid]-}";  delivery_event=$REPLY
+        ka_single_line "${KA_T_LAST_DELIVERY_RESULT[$uuid]-}"; delivery_result=$REPLY
+        ka_single_line "${KA_T_LAST_DELIVERY_DETAIL[$uuid]-}"; delivery_detail=$REPLY
+        printf -v row '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
             "$uuid" "$type" "$name" "$directory" "$status" "${KA_T_MAIN_REMAIN[$uuid]}" \
             "${KA_T_MAIN_INTERVAL[$uuid]}" "${KA_T_SECONDARY_ENABLED[$uuid]}" \
             "${KA_T_SECONDARY_REMAIN[$uuid]}" "${KA_T_SECONDARY_INTERVAL[$uuid]}" \
             "${KA_T_MODE[$uuid]}" "${KA_T_NOTIFY[$uuid]}" "$last" "$reason" \
-            "${KA_T_BACKEND[$uuid]:-konsole}"
+            "${KA_T_BACKEND[$uuid]:-konsole}" "$next_main" "$next_secondary" \
+            "$delivery_time" "$delivery_event" "$delivery_result" "$delivery_detail"
         payload+=$row
     done
 
@@ -1162,7 +1331,7 @@ ka_state_publish_index() {
         ka_single_line "${KA_D_TYPE[$uuid]}"; type=$REPLY
         ka_single_line "${KA_D_NAME[$uuid]}"; name=$REPLY
         ka_single_line "${KA_D_DIR[$uuid]}";  directory=$REPLY
-        printf -v row '%s\t%s\t%s\t%s\tAVAILABLE\t0\t0\t0\t0\t0\t\t0\t\t\t%s\n' \
+        printf -v row '%s\t%s\t%s\t%s\tAVAILABLE\t0\t0\t0\t0\t0\t\t0\t\t\t%s\t\t\t\t\t\t\n' \
             "$uuid" "$type" "$name" "$directory" "${KA_D_BACKEND[$uuid]:-konsole}"
         payload+=$row
     done
@@ -1173,13 +1342,6 @@ ka_state_publish_index() {
         [[ $published == "$payload" ]] && return 0
     fi
     ka_atomic_write_value "$KA_INDEX_FILE" "$payload"
-}
-
-# Role: Find one indexed target/available row by UUID for TUI and CLI readers.
-ka_state_index_row() {
-    local uuid=$1
-    [[ -r $KA_INDEX_FILE ]] || return 1
-    awk -F '\t' -v id="$uuid" '$1 == id { print; exit }' "$KA_INDEX_FILE"
 }
 
 # Role: Read one scalar field from a persisted target state file for client-side rendering.
@@ -1213,10 +1375,21 @@ ka_state_copy_target_to_request() {
     fi
     [[ -f $secondary_path && ! -L $secondary_path && -O $secondary_path && -r $secondary_path ]] \
         || return 1
-    secondary_message=$(cat -- "$secondary_path") || return 1
     ka_profile_validate_main_messages "$dir/messages" >/dev/null 2>&1 || return 1
     main_interval=$(ka_state_read_field "$uuid" main_interval) || return 1
     secondary_enabled=$(ka_state_read_field "$uuid" secondary_enabled) || return 1
+    # Bounded exactly as the checkpoint loader reads it: a disabled secondary that is
+    # oversized or unreadable seeds as empty (it is never sent), an enabled one fails.
+    local max_len
+    ka_tunable KEEPALIVE_MAX_MESSAGE_LENGTH 2000
+    max_len=$REPLY
+    if ka_request_read_scalar "$secondary_path" "$max_len"; then
+        secondary_message=$REPLY
+    elif [[ $secondary_enabled == 0 ]]; then
+        secondary_message=''
+    else
+        return 1
+    fi
     secondary_interval=$(ka_state_read_field "$uuid" secondary_interval) || return 1
     notifications=$(ka_state_read_field "$uuid" notifications) || return 1
     delivery_mode=$(ka_state_read_field "$uuid" mode) || return 1

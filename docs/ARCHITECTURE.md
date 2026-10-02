@@ -87,6 +87,20 @@ SEND_MAIN
 SEND_SECONDARY
 ```
 
+### IPC result contract
+
+A completed command is answered `OK` when the command itself completed. If the
+post-command `index.tsv` publication fails, the daemon keeps the command result, marks
+publication stale for a paced retry, and appends a deferred-publication warning to the
+successful response; it does not invite a client retry that could duplicate a send.
+`REFRESH` also answers `OK`, with a warning naming discovery or target-validation failure,
+when either pass fails; each backend keeps its last complete snapshot. A client that
+reaches its response timeout removes its request directory so a late daemon cannot execute
+the request after the caller has given up.
+
+`status --json` is deliberately outside this IPC path: it reads validated snapshots only,
+does not activate the service, and does not stamp `clients.seen`.
+
 ## Backend boundary
 
 Terminal-specific behavior is split into adapters:
@@ -136,6 +150,15 @@ transient; a completed response showing a different runtime/incarnation/binding 
 definitive identity loss. Delivery uses one atomic `terminal send --text ... --enter`
 request.
 
+### Position-aware classifier contract
+
+Built-in classifier rules inspect only command-identifying positions: `comm`, the resolved
+executable path, `argv[0]`, and the identifying script/module/package position for a known
+launcher. Launcher option values, shell `-c` payloads, assignments, editor/pager/grep/git
+arguments, and arbitrary non-file option values are not searched. User `classifiers.tsv`
+entries remain an explicit legacy escape hatch and match the complete lower-case
+`comm exe cmdline` signature.
+
 ## State machine
 
 ```text
@@ -163,9 +186,10 @@ UNAVAILABLE is sticky. Discovery never changes it back to ACTIVE and never rebin
 
 ## Discovery versus monitored records
 
-Discovery caches are ephemeral and periodically rebuilt from every enabled backend.
-Each backend commits independently: an incomplete Orca response retains only the prior
-Orca rows while a complete Konsole pass can still commit, and vice versa.
+Discovery snapshots are ephemeral in-memory data and are periodically rebuilt from every
+enabled backend; no `discovery/` runtime directory is created. Each backend commits
+independently: an incomplete Orca response retains only the prior Orca rows while a
+complete Konsole pass can still commit, and vice versa.
 
 Monitored target records are retained independently. `index.tsv` is a merged snapshot:
 
@@ -270,9 +294,9 @@ five seconds instead of five times a second.
 TERM, INT, and HUP are recorded, not acted on mid-work. While the loop waits in the control
 read, the trap exits at once - Bash would otherwise resume the read for its whole timeout -
 and anywhere else the loop exits at the top of its next iteration. A delivery in flight
-therefore completes before the process ends: exiting between a message and its Enter left
-half-delivered text that the next daemon could not know about, because the pending-submit
-state is not a checkpoint field. The unit's `KillMode=mixed` signals only the daemon, so the
+therefore completes before the process ends. The pending-submit owner is also persisted
+for crash recovery; only an uncatchable kill can leave the provider-side text/Enter outcome
+unknown. The unit's `KillMode=mixed` signals only the daemon, so the
 helper carrying that delivery is not killed either. The EXIT trap then flushes every dirty
 countdown and writes `state stopped`.
 
@@ -313,8 +337,63 @@ targets/<UUID>/messages/002
 `main_index` is zero-based. MESSAGE+ENTER success advances it modulo message count. ENTER_ONLY does not advance because no queued message was consumed.
 
 Configuration validation requires a non-empty contiguous `001..N` sequence before
-any target/profile mutation. Transport failure resets the consumed event's timer
-but returns failure to manual IPC callers and never advances main rotation.
+any target/profile mutation. Per-target intervals are integer seconds bounded to
+`1..999999999`; scalar reads count UTF-8 code points rather than locale-dependent bytes.
+Transport failure resets the consumed event's timer but returns failure to manual IPC
+callers and never advances main rotation.
+
+### Pending-submit ownership
+
+A partial text-plus-Enter delivery persists `pending_submit` as one of `0`, `MAIN`,
+`SECONDARY_AUTO`, `SECONDARY_MANUAL`, or `STALE`. `0` means no owed Enter; the other
+values identify the event that owns the next submit. A persisted legacy value `1` is
+loaded as `MAIN`, and an absent field loads as `0`. The owner is completed before a
+different event can append text: MAIN completion advances the rotation, automatic
+secondary completion consumes `secondary_done`, and STALE completion never advances the
+replacement rotation. The one-shot `e` Enter completes an owed owner when present; with
+no owner it sends only Enter and leaves the queued message untouched.
+
+CONFIGURE marks any owed owner `STALE`, resets the replacement index to zero, and commits
+that checkpoint before swapping the new `messages/` directory. If the daemon stops between
+those commits, restart sees a valid replacement state and the STALE Enter cannot advance
+its new rotation; this ordering prevents the old owner/index from being paired with new
+message files. Rollback restores the prior owner with the prior rotation.
+
+## Persisted service and index contracts
+
+`service.state` is a six-row key/value snapshot:
+
+```text
+state
+pid
+version
+updated
+updated_epoch
+pid_start
+```
+
+`pid_start` pairs the published PID with its `/proc` start-time generation so
+`status --json` can report a reused PID as offline. The status reader is read-only and
+presence-free: it does not contact the daemon, create runtime/configuration state, or
+write `clients.seen`.
+
+The merged `index.tsv` has 21 positional columns. Columns 1-15 are the original stable
+layout; columns 16-21 are appended compatibility extensions:
+
+```text
+1 uuid                 2 type                 3 name
+4 directory            5 status               6 main_remaining
+7 main_interval        8 secondary_enabled   9 secondary_remaining
+10 secondary_interval  11 mode               12 notifications
+13 last_seen           14 reason              15 backend
+16 next_main           17 next_secondary     18 last_delivery_time
+19 last_delivery_event 20 last_delivery_result 21 last_delivery_detail
+```
+
+Older readers can continue to consume columns 1-15, while newer readers treat absent
+16-21 fields as empty. The `ENTER` event is part of the event vocabulary alongside
+`MAIN` and `SECONDARY`: it records the one-shot Enter command and automatic
+`ENTER_ONLY` main deliveries, whose detail is `[ENTER]`.
 
 ## Runtime recovery
 

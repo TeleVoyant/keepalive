@@ -187,7 +187,9 @@ ka_wizard_step_main_interval() {
                     2) value=300 ;;
                     3)
                         ka_tui_prompt_line 'Custom interval in minutes' "$((current / 60))"; value=$KA_PROMPT_VALUE
-                        ka_is_positive_int "$value" || { ka_tui_toast 'Enter a positive whole number of minutes.'; continue; }
+                        # Bounded before scaling: the seconds must stay a valid interval.
+                        { ka_is_interval "$value" && ka_is_interval "$((value * 60))"; } \
+                            || { ka_tui_toast 'Enter a whole number of minutes from 1 to 16666666.'; continue; }
                         value=$((value * 60))
                         ;;
                 esac
@@ -232,7 +234,8 @@ ka_wizard_step_secondary() {
                     [[ -n $value ]] || continue
                     message=$value
                     ka_tui_prompt_line 'Secondary interval in minutes' "$((interval / 60))"; value=$KA_PROMPT_VALUE
-                    ka_is_positive_int "$value" || { ka_tui_toast 'Enter a positive whole number of minutes.'; continue; }
+                    { ka_is_interval "$value" && ka_is_interval "$((value * 60))"; } \
+                        || { ka_tui_toast 'Enter a whole number of minutes from 1 to 16666666.'; continue; }
                     interval=$((value * 60))
                 fi
                 ka_write_scalar "$config_dir/secondary_enabled" "$choice"
@@ -282,7 +285,7 @@ ka_wizard_step_delivery() {
         ka_wizard_header "$KA_I_ENTER" 5 'Delivery mode'
         ka_wizard_option "$((choice == 0))" '1' 'MESSAGE + ENTER'
         ka_wizard_option "$((choice == 1))" '2' 'ENTER ONLY'
-        printf '%s\033[K\n%s Pressing e later toggles this mode for the selected target.\033[K\n' "$KA_G_V" "$KA_G_V"
+        printf '%s\033[K\n%s Pressing e later sends one Enter; E switches to ENTER ONLY.\033[K\n' "$KA_G_V" "$KA_G_V"
         ka_wizard_hint 'up/down toggle    Enter continue    Esc back' 'up/down  Enter next  Esc back'
         ka_tui_box_bottom
         ka_tui_frame_end

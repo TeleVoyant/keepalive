@@ -64,9 +64,15 @@ ka_service_acquire_lock() {
 # Role: Publish lightweight service metadata used by diagnostics and operator tooling.
 ka_service_write_status() {
     local state=${1:-online}
-    local payload
-    printf -v payload 'state\t%s\npid\t%s\nversion\t%s\nupdated\t%s\n' \
-        "$state" "$$" "${KEEPALIVE_VERSION:-unknown}" "$(ka_now_full)"
+    local payload updated_epoch
+    printf -v updated_epoch '%(%s)T' -1
+    # The start time lets a reader tell this daemon from a later process reusing its PID.
+    if [[ -z ${KA_SERVICE_PID_START-} ]] && ka_proc_starttime_set "$$"; then
+        KA_SERVICE_PID_START=$REPLY
+    fi
+    printf -v payload 'state\t%s\npid\t%s\nversion\t%s\nupdated\t%s\nupdated_epoch\t%s\npid_start\t%s\n' \
+        "$state" "$$" "${KEEPALIVE_VERSION:-unknown}" "$(ka_now_full)" "$updated_epoch" \
+        "${KA_SERVICE_PID_START-}"
     ka_atomic_write_value "$KA_SERVICE_STATE_FILE" "$payload"
 }
 
@@ -295,6 +301,29 @@ ka_service_note_orca_discovery() {
 # vanished runtime directory or a client that attached without sending a request.
 KA_SERVICE_MAX_WAIT_MS=5000
 
+# Role: Explain one incomplete discovery episode with its Orca reason, snapshot age, and retry.
+ka_service_warn_discovery_incomplete() {
+    local backend=$1 now=$2 stamp age retry retry_text
+    if [[ " $backend " == *' Orca '* ]]; then
+        stamp=${KA_DISCOVERY_STAMP_ORCA:-0}
+        if [[ $stamp =~ ^[0-9]+$ ]] && ((stamp > 0 && now >= stamp)); then
+            printf -v age '%ds' "$((now - stamp))"
+        else
+            age=never
+        fi
+        retry=${KA_ORCA_RETRY_AT:-0}
+        if [[ $retry =~ ^[0-9]+$ ]] && ((retry > now)); then
+            retry=$((retry - now))
+        else
+            retry=0
+        fi
+        printf -v retry_text '%ds' "$retry"
+        ka_warn "Orca discovery did not complete (reason=${KA_ORCA_DISCOVERY_FAILURE:-unknown}; snapshot_age=${age}; next_retry_in=${retry_text}); using the previous backend snapshot"
+    else
+        ka_warn "${backend:-terminal} discovery did not complete; using the previous backend snapshot"
+    fi
+}
+
 # Role: Run the single-threaded daemon loop that interleaves IPC, timers, health, and discovery.
 #
 # The loop sleeps in the FIFO read until the earliest periodic task is due instead of
@@ -307,6 +336,8 @@ ka_service_loop() {
     local control_read=0 timeout wait_ms due now_ms ticking=0
     local now last_tick elapsed last_health last_discovery last_publish last_cleanup last_status
     local stale_logged=0 clock_warned=0 control_failures=0 last_flush=0 checkpoint_interval
+    local publish_rc=0
+    KA_INDEX_STALE=${KA_INDEX_STALE:-0}
     # Resolved once: these are process-wide settings, and validating them here keeps an
     # operator typo out of every arithmetic expression below.
     local health_interval status_interval cleanup_interval
@@ -340,6 +371,9 @@ ka_service_loop() {
             due=$((last_status + status_interval))
             ((last_cleanup + cleanup_interval < due)) && due=$((last_cleanup + cleanup_interval))
             ((last_publish + KA_PUBLISH_INTERVAL < due)) && due=$((last_publish + KA_PUBLISH_INTERVAL))
+            # A command may have completed after its index became unwritable. Retry the
+            # publication on the next second without changing the command's real result.
+            ((KA_INDEX_STALE == 1 && last_publish + 1 < due)) && due=$((last_publish + 1))
             if ((KA_CLIENT_PRESENT == 1 || ${#KA_SVC_IDLE_DISCOVERY[@]} > 0)); then
                 ((last_discovery + KA_DISCOVERY_INTERVAL < due)) && due=$((last_discovery + KA_DISCOVERY_INTERVAL))
             fi
@@ -433,19 +467,35 @@ ka_service_loop() {
                 # hit its budget", which is a normal signal handled below, not a failure.
                 if ka_state_refresh_discovery "${KA_SVC_DISCOVER[@]}"; then
                     stale_logged=0
-                elif ((stale_logged == 0)); then
-                    # The pass hit its budget, so the previous snapshot is retained. Warn
-                    # once per episode rather than on every cycle.
-                    ka_warn "${KA_DISCOVERY_STALE_BACKENDS:-terminal} discovery did not complete; using the previous backend snapshot"
-                    stale_logged=1
+                    [[ " ${KA_SVC_DISCOVER[*]} " == *' orca '* ]] && ka_service_note_orca_discovery "$now"
+                else
+                    # The previous snapshot is retained. Advance Orca's backoff before
+                    # warning so the message tells the operator when the next attempt is due.
+                    [[ " ${KA_SVC_DISCOVER[*]} " == *' orca '* ]] && ka_service_note_orca_discovery "$now"
+                    if ((stale_logged == 0)); then
+                        ka_service_warn_discovery_incomplete "${KA_DISCOVERY_STALE_BACKENDS:-terminal}" "$now"
+                        stale_logged=1
+                    fi
                 fi
-                [[ " ${KA_SVC_DISCOVER[*]} " == *' orca '* ]] && ka_service_note_orca_discovery "$now"
             fi
             last_discovery=$now
         fi
 
-        if ((now - last_publish >= KA_PUBLISH_INTERVAL)); then
-            ka_service_try 'index publication' ka_state_publish_index
+        # A stale index retries at most once per second: a burst of client requests
+        # wakes the loop many times a second and must not become a burst of rewrites.
+        if ((now - last_publish >= KA_PUBLISH_INTERVAL || (KA_INDEX_STALE == 1 && now > last_publish))); then
+            publish_rc=0
+            ka_state_publish_index || publish_rc=$?
+            if ((publish_rc == 0)); then
+                ((KA_INDEX_STALE == 0)) || ka_info 'runtime index publication recovered'
+                KA_INDEX_STALE=0
+            else
+                # Warn on the transition only; a persistent failure (a full runtime
+                # filesystem) would otherwise write one journal line every second.
+                ((KA_INDEX_STALE == 1)) \
+                    || ka_warn "index publication failed (status $publish_rc); retrying every second"
+                KA_INDEX_STALE=1
+            fi
             last_publish=$now
         fi
 

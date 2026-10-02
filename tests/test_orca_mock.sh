@@ -31,6 +31,30 @@ assert_eq term_mock-agent "$handle" 'discovery records the runtime-scoped handle
 assert_true 'strict Orca validation accepts the exact recorded binding' \
     ka_orca_validate_target "$handle" "$pty" "$incarnation" "$worktree" "$runtime" "$host" "$tab" "$leaf" "$agent"
 
+shell_show_file="$TEST_TMP/show-shell"
+touch "$shell_show_file"
+export FAKE_ORCA_SHOW_NO_AGENT_FILE=$shell_show_file
+if ka_orca_validate_target "$handle" "$pty" "$incarnation" "$worktree" "$runtime" "$host" "$tab" "$leaf" "$agent"; then
+    validation_rc=0
+else
+    validation_rc=$?
+fi
+assert_eq 15 "$validation_rc" 'a complete Orca show without agentIdentity is definitive agent loss'
+rm -f -- "$shell_show_file"
+unset FAKE_ORCA_SHOW_NO_AGENT_FILE
+
+null_agent_file="$TEST_TMP/show-null-agent"
+touch "$null_agent_file"
+export FAKE_ORCA_SHOW_NULL_AGENT_FILE=$null_agent_file
+if ka_orca_validate_target "$handle" "$pty" "$incarnation" "$worktree" "$runtime" "$host" "$tab" "$leaf" "$agent"; then
+    validation_rc=0
+else
+    validation_rc=$?
+fi
+assert_eq 15 "$validation_rc" 'a complete Orca show with null agentIdentity is definitive agent loss'
+rm -f -- "$null_agent_file"
+unset FAKE_ORCA_SHOW_NULL_AGENT_FILE
+
 missing_binding_file="$TEST_TMP/missing-binding"
 touch "$missing_binding_file"
 export FAKE_ORCA_MISSING_BINDING_FILE=$missing_binding_file

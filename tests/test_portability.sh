@@ -79,6 +79,7 @@ assert_eq "$TEST_TMP/absolute-config" "$KA_CONFIG_HOME" 'absolute config works w
 ka_dbus_escape_address_value '/tmp/runtime with #percent%=,;?'
 assert_eq '/tmp/runtime%20with%20%23percent%25%3D%2C%3B%3F' "$REPLY" \
     'D-Bus address values percent-escape reserved bytes'
+# Byte values are masked in the escaper, so this holds on musl as well as glibc.
 ka_dbus_escape_address_value '/tmp/é'
 assert_eq '/tmp/%C3%A9' "$REPLY" 'D-Bus address escaping operates on UTF-8 bytes'
 

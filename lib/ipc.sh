@@ -139,7 +139,17 @@ ka_ipc_wait_response() {
         ka_sleep "$REPLY"
         ((waited += step))
     done
-    printf 'ERROR\tTimed out waiting for keepalive service\n'
+    # Cancel by renaming the request away (see ka_ipc_handle_request): if that wins, the
+    # daemon will never execute it, so a retry cannot act twice; if the daemon already
+    # claimed it, say so rather than claim a cancellation. The marker is left for the
+    # daemon (or the stale sweep) to remove.
+    local request
+    request=$(ka_ipc_request_dir "$id")
+    if mv -T -- "$request" "$request.cancelled" 2>/dev/null; then
+        printf 'ERROR\tTimed out waiting for keepalive service; the request was cancelled\n'
+    else
+        printf 'ERROR\tTimed out waiting for keepalive service; it may still complete the request\n'
+    fi
     return 1
 }
 
@@ -234,19 +244,58 @@ ka_ipc_cleanup_stale() {
     return 0
 }
 
+# Role: Read an optional bounded request scalar, rejecting any planted file type.
+ka_ipc_read_optional_scalar() {
+    local path=$1 max=$2
+    if [[ -e $path || -L $path ]]; then
+        ka_request_read_scalar "$path" "$max" || return 1
+    else
+        REPLY=''
+    fi
+}
+
 # Role: Dispatch one request directory to authoritative daemon state operations.
 ka_ipc_handle_request() {
-    local id=$1 dir command uuid rc=0 publish_rc=0 response_rc=0 cleanup_rc=0 message='ok'
+    local id=$1 dir command uuid value rc=0 publish_rc=0 response_rc=0 cleanup_rc=0 message='ok'
     dir=$(ka_ipc_request_dir "$id")
+    # Claim the request before reading any of it. A client that timed out renames it to
+    # <id>.cancelled instead; rename(2) succeeds for exactly one side, so a cancelled
+    # request is never executed and a claimed one is never reported as cancelled.
+    if mv -T -- "$dir" "$dir.claimed" 2>/dev/null; then
+        dir="$dir.claimed"
+    elif [[ -e $dir.cancelled || -L $dir.cancelled ]]; then
+        rm -rf -- "$dir.cancelled" 2>/dev/null || true
+        return 0
+    fi
     if ! ka_ipc_validate_private_dir "$dir"; then
         ka_ipc_respond "$id" ERROR 'request directory not found' || response_rc=$?
         ((response_rc == 0)) || return "$response_rc"
         return 1
     fi
-    command=$(ka_read_first_line "$dir/command")
-    uuid=$(ka_read_first_line "$dir/uuid")
-    local value
-    value=$(ka_read_first_line "$dir/value")
+    if ! ka_request_read_scalar "$dir/command" 64; then
+        ka_ipc_respond "$id" ERROR 'request command is missing or not a regular file' || response_rc=$?
+        rm -rf -- "$dir" || cleanup_rc=$?
+        ((response_rc == 0)) || return "$response_rc"
+        ((cleanup_rc == 0)) || return "$cleanup_rc"
+        return 1
+    fi
+    command=$REPLY
+    if ! ka_ipc_read_optional_scalar "$dir/uuid" 256; then
+        ka_ipc_respond "$id" ERROR 'request target is not a regular file' || response_rc=$?
+        rm -rf -- "$dir" || cleanup_rc=$?
+        ((response_rc == 0)) || return "$response_rc"
+        ((cleanup_rc == 0)) || return "$cleanup_rc"
+        return 1
+    fi
+    uuid=$REPLY
+    if ! ka_ipc_read_optional_scalar "$dir/value" 4096; then
+        ka_ipc_respond "$id" ERROR 'request value is not a regular file' || response_rc=$?
+        rm -rf -- "$dir" || cleanup_rc=$?
+        ((response_rc == 0)) || return "$response_rc"
+        ((cleanup_rc == 0)) || return "$cleanup_rc"
+        return 1
+    fi
+    value=$REPLY
     # Validators record why they refused; start clean so a stale reason cannot leak
     # into an unrelated response.
     ka_error_reset
@@ -256,9 +305,12 @@ ka_ipc_handle_request() {
             message='service online'
             ;;
         REFRESH)
-            ka_state_refresh_discovery
-            ka_state_validate_targets
+            # A failed pass keeps each backend's last good snapshot, so the index still
+            # answers list and the reply stays OK; the failure is reported rather than a
+            # bare "refreshed", and list prints it.
             message='refreshed'
+            ka_state_refresh_discovery || message+=' (warning: discovery failed; showing the last good snapshot)'
+            ka_state_validate_targets || message+=' (warning: target validation failed)'
             ;;
         CREATE)
             ka_state_create_target "$uuid" "$dir/config" || { rc=$?; message=${KA_LAST_ERROR:-'could not create keep-alive'}; }
@@ -296,14 +348,29 @@ ka_ipc_handle_request() {
             ;;
     esac
 
-    ka_state_publish_index || publish_rc=$?
+    # While a publication failure is outstanding, leave the retry to the service loop,
+    # which paces it at one attempt per second; a burst of requests must not become a
+    # burst of failing rewrites and warnings.
+    if ((${KA_INDEX_STALE:-0} == 1)); then
+        publish_rc=75
+    else
+        ka_state_publish_index || publish_rc=$?
+    fi
     if ((publish_rc != 0)); then
-        if ((rc == 0)); then
-            rc=$publish_rc
-            message='could not publish the runtime index'
-        else
-            ka_warn "index publication also failed while handling $command (status $publish_rc)"
+        # The command has already run by this point. Reporting ERROR would invite a
+        # client retry that sends/deletes/configures the same target a second time.
+        KA_INDEX_STALE=1
+        ((rc == 0)) && message+=" (warning: runtime index publication deferred)"
+        # Status 75 is the deliberate skip above: the outstanding failure was warned once.
+        if ((publish_rc != 75)); then
+            if ((rc == 0)); then
+                ka_warn "index publication failed after successful $command (status $publish_rc); retrying soon"
+            else
+                ka_warn "index publication also failed while handling $command (status $publish_rc)"
+            fi
         fi
+    else
+        KA_INDEX_STALE=0
     fi
     if ((rc == 0)); then
         ka_ipc_respond "$id" OK "$message" || response_rc=$?

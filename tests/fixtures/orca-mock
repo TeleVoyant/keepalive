@@ -101,8 +101,17 @@ case "${1-} ${2-}" in
                 "$(json_escape "$worktree")" "$(json_escape "$worktree_path")" \
                 "$(json_escape "$tab")" "$(json_escape "$leaf")"
         fi
-        printf '"title":"%s","connected":%s,"writable":true,"executionHostId":"%s","agentIdentity":"%s"' \
-            "$(json_escape "$title")" "$connected" "$(json_escape "$host")" "$(json_escape "$agent")"
+        if [[ -n ${FAKE_ORCA_SHOW_NO_AGENT_FILE:-} && -e ${FAKE_ORCA_SHOW_NO_AGENT_FILE:-} ]]; then
+            # A plain shell show is structurally complete but omits the agent binding.
+            printf '"title":"%s","connected":%s,"writable":true,"executionHostId":"%s"' \
+                "$(json_escape "$title")" "$connected" "$(json_escape "$host")"
+        elif [[ -n ${FAKE_ORCA_SHOW_NULL_AGENT_FILE:-} && -e ${FAKE_ORCA_SHOW_NULL_AGENT_FILE:-} ]]; then
+            printf '"title":"%s","connected":%s,"writable":true,"executionHostId":"%s","agentIdentity":null' \
+                "$(json_escape "$title")" "$connected" "$(json_escape "$host")"
+        else
+            printf '"title":"%s","connected":%s,"writable":true,"executionHostId":"%s","agentIdentity":"%s"' \
+                "$(json_escape "$title")" "$connected" "$(json_escape "$host")" "$(json_escape "$agent")"
+        fi
         printf '}},"_meta":{"runtimeId":"%s"}}\n' "$(json_escape "$runtime")"
         ;;
     'terminal send')

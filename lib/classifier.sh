@@ -3,58 +3,78 @@
 # The built-in registry is intentionally data-driven and can be extended through
 # ${XDG_CONFIG_HOME:-$HOME/.config}/keepalive/classifiers.tsv without changing service code.
 
-# Role: Initialize the built-in AI CLI signature registry and optional user extensions.
+# Role: Initialize the built-in AI CLI token registry and optional user extensions.
 ka_classifier_init() {
     declare -gA KA_CLASS_NAMES=()
     declare -gA KA_CLASS_PATTERNS=()
+    declare -gA KA_CLASS_MODES=()
     declare -ga KA_CLASS_ORDER=()
 
-    # Exact command boundaries reduce false positives from generic process names while
-    # package/path signatures still recognize Node/Python wrapper installations.
-    ka_classifier_add 'Claude'  '(^|[ /])claude([ /]|$)|@anthropic-ai/claude-code|claude-code'
-    ka_classifier_add 'Codex'   '(^|[ /])codex([ /]|$)|@openai/codex|openai-codex'
-    ka_classifier_add 'Kimi'    '(^|[ /])kimi([ /]|$)|kimi-cli|kimi-code|moonshot.*kimi'
-    ka_classifier_add 'Gemini'  '(^|[ /])gemini([ /]|$)|@google/gemini-cli|gemini-cli'
-    ka_classifier_add 'Qwen'    '(^|[ /])qwen([ /]|$)|qwen-code|@qwen-code'
-    ka_classifier_add 'OpenCode' '(^|[ /])opencode([ /]|$)|opencode-ai'
-    ka_classifier_add 'Aider'   '(^|[ /])aider([ /]|$)|aider-chat'
-    ka_classifier_add 'Goose'   '(^|[ /])goose([ /]|$)|block.*goose'
-    ka_classifier_add 'GitHub Copilot' '(^|[ /])copilot([ /]|$)|github-copilot|copilot-cli'
-    ka_classifier_add 'Amp'     '(^|[ /])amp([ /]|$)|sourcegraph.*amp'
-    ka_classifier_add 'Crush'   '(^|[ /])crush([ /]|$)|charmbracelet.*crush'
-    ka_classifier_add 'Cody'    '(^|[ /])cody([ /]|$)|sourcegraph.*cody'
-    ka_classifier_add 'Plandex' '(^|[ /])plandex([ /]|$)'
-    ka_classifier_add 'Mentat'  '(^|[ /])mentat([ /]|$)'
-    ka_classifier_add 'Continue' 'continue-cli|continuedev|(^|[ /])continue([ /]|$)'
-    ka_classifier_add 'Cline'   'cline-cli|(^|[ /])cline([ /]|$)'
-    ka_classifier_add 'Roo'     'roo-code|roo-cli'
-    ka_classifier_add 'Amazon Q' 'amazon-q|qchat|amazon.*q.*cli'
-    ka_classifier_add 'Warp Agent' 'warp-agent|warp.*agent'
-    ka_classifier_add 'Cursor Agent' 'cursor-agent|cursor.*agent'
-    ka_classifier_add 'OpenHands' '(^|[ /])openhands([ /]|$)|open-hands'
-    ka_classifier_add 'SWE-agent' 'swe-agent|swe_agent'
-    ka_classifier_add 'GPT Engineer' 'gpt-engineer|gpt_engineer'
-    ka_classifier_add 'Factory Droid' '(^|[ /])droid([ /]|$)|factory.*droid'
-    ka_classifier_add 'Junie' '(^|[ /])junie([ /]|$)|junie-cli'
-    ka_classifier_add 'Kilo' '(^|[ /])kilo([ /]|$)|kilo-cli'
-    ka_classifier_add 'Grok CLI' 'grok-cli|grok.*build'
-    ka_classifier_add 'T3 Code' '(^|[ /])t3([ /]|$)|t3-code'
-    ka_classifier_add 'ForgeCode' '(^|[ /])forgecode([ /]|$)|forge-code'
-    ka_classifier_add 'Antigravity' 'antigravity-cli|(^|[ /])antigravity([ /]|$)'
-
+    # Built-ins are matched against command-identifying tokens assembled from /proc,
+    # never against arbitrary arguments. Package launchers add a normalized name for
+    # specs such as @anthropic-ai/claude-code@latest without widening path matching.
+    local boundary end package_suffix
+    boundary='(^|[ /])'
+    end='([ /]|$)'
+    package_suffix=''
+    ka_classifier_add_builtin 'Claude'  "${boundary}claude${package_suffix}${end}|${boundary}claude[-_]code${package_suffix}${end}|${boundary}@anthropic-ai/claude-code${package_suffix}${end}"
+    ka_classifier_add_builtin 'Codex'   "${boundary}codex${package_suffix}${end}|${boundary}codex[-_]cli${package_suffix}${end}|${boundary}@openai/codex${package_suffix}${end}|${boundary}openai[-_]codex${package_suffix}${end}"
+    ka_classifier_add_builtin 'Kimi'    "${boundary}kimi${package_suffix}${end}|${boundary}kimi[-_]cli${package_suffix}${end}|${boundary}kimi[-_]code${package_suffix}${end}|${boundary}moonshot[^[:space:]]*kimi${end}"
+    ka_classifier_add_builtin 'Gemini'  "${boundary}gemini${package_suffix}${end}|${boundary}gemini[-_]cli${package_suffix}${end}|${boundary}@google/gemini-cli${package_suffix}${end}"
+    ka_classifier_add_builtin 'Qwen'    "${boundary}qwen${package_suffix}${end}|${boundary}qwen[-_]code${package_suffix}${end}|${boundary}@qwen-code${package_suffix}${end}"
+    ka_classifier_add_builtin 'OpenCode' "${boundary}opencode${package_suffix}${end}|${boundary}opencode-ai${package_suffix}${end}"
+    ka_classifier_add_builtin 'Aider'   "${boundary}aider${package_suffix}${end}|${boundary}aider-chat${package_suffix}${end}"
+    ka_classifier_add_builtin 'Goose'   "${boundary}goose${package_suffix}${end}|${boundary}goose[-_](ai|cli)${package_suffix}${end}|${boundary}block[^[:space:]]*goose${end}"
+    ka_classifier_add_builtin 'GitHub Copilot' "${boundary}copilot${package_suffix}${end}|${boundary}github-copilot${package_suffix}${end}|${boundary}copilot-cli${package_suffix}${end}"
+    ka_classifier_add_builtin 'Amp'     "${boundary}amp${package_suffix}${end}|${boundary}sourcegraph[^[:space:]]*amp${end}"
+    ka_classifier_add_builtin 'Crush'   "${boundary}crush${package_suffix}${end}|${boundary}charmbracelet[^[:space:]]*crush${end}"
+    ka_classifier_add_builtin 'Cody'    "${boundary}cody${package_suffix}${end}|${boundary}sourcegraph[^[:space:]]*cody${end}"
+    ka_classifier_add_builtin 'Plandex' "${boundary}plandex${package_suffix}${end}"
+    ka_classifier_add_builtin 'Mentat'  "${boundary}mentat${package_suffix}${end}"
+    ka_classifier_add_builtin 'Continue' "${boundary}continue-cli${package_suffix}${end}|${boundary}continuedev${package_suffix}${end}|${boundary}continue${package_suffix}${end}"
+    ka_classifier_add_builtin 'Cline'   "${boundary}cline-cli${package_suffix}${end}|${boundary}cline${package_suffix}${end}"
+    ka_classifier_add_builtin 'Roo'     "${boundary}roo-code${package_suffix}${end}|${boundary}roo-cli${package_suffix}${end}"
+    ka_classifier_add_builtin 'Amazon Q' "${boundary}amazon-q${package_suffix}${end}|${boundary}qchat${package_suffix}${end}|${boundary}amazon[^[:space:]]*q[^[:space:]]*cli${end}"
+    ka_classifier_add_builtin 'Warp Agent' "${boundary}warp-agent${package_suffix}${end}|${boundary}warp[^[:space:]]*agent${end}"
+    ka_classifier_add_builtin 'Cursor Agent' "${boundary}cursor-agent${package_suffix}${end}|${boundary}cursor[^[:space:]]*agent${end}"
+    ka_classifier_add_builtin 'OpenHands' "${boundary}openhands${package_suffix}${end}|${boundary}open-hands${package_suffix}${end}"
+    ka_classifier_add_builtin 'SWE-agent' "${boundary}swe-agent${package_suffix}${end}|${boundary}swe_agent${package_suffix}${end}"
+    ka_classifier_add_builtin 'GPT Engineer' "${boundary}gpt-engineer${package_suffix}${end}|${boundary}gpt_engineer${package_suffix}${end}"
+    ka_classifier_add_builtin 'Factory Droid' "${boundary}droid${package_suffix}${end}|${boundary}factory[^[:space:]]*droid${end}"
+    ka_classifier_add_builtin 'Junie' "${boundary}junie${package_suffix}${end}|${boundary}junie-cli${package_suffix}${end}"
+    ka_classifier_add_builtin 'Kilo' "${boundary}kilo${package_suffix}${end}|${boundary}kilo-cli${package_suffix}${end}"
+    ka_classifier_add_builtin 'Grok CLI' "${boundary}grok-cli${package_suffix}${end}|${boundary}grok[^[:space:]]*build${end}"
+    ka_classifier_add_builtin 'T3 Code' "${boundary}t3${package_suffix}${end}|${boundary}t3-code${package_suffix}${end}"
+    ka_classifier_add_builtin 'ForgeCode' "${boundary}forgecode${package_suffix}${end}|${boundary}forge-code${package_suffix}${end}"
+    ka_classifier_add_builtin 'Antigravity' "${boundary}antigravity-cli${package_suffix}${end}|${boundary}antigravity${package_suffix}${end}"
 
     ka_classifier_load_user_registry
 }
 
-# Role: Add or replace one classifier entry while preserving deterministic ordering.
-ka_classifier_add() {
-    local name=$1 patterns=$2 key
-    ka_safe_id "${name,,}"; key=$REPLY
+# Role: Register a classifier entry with an explicit built-in or legacy matching mode.
+ka_classifier_register() {
+    local mode name patterns key
+    mode=$1
+    name=$2
+    patterns=$3
+    ka_safe_id "${name,,}"
+    key=$REPLY
     if [[ -z ${KA_CLASS_NAMES[$key]+x} ]]; then
         KA_CLASS_ORDER+=("$key")
     fi
     KA_CLASS_NAMES[$key]=$name
     KA_CLASS_PATTERNS[$key]=$patterns
+    KA_CLASS_MODES[$key]=$mode
+}
+
+# Role: Add or replace one user/legacy classifier entry while preserving deterministic ordering.
+ka_classifier_add() {
+    ka_classifier_register legacy "$1" "$2"
+}
+
+# Role: Add one built-in classifier entry matched against position-aware command tokens.
+ka_classifier_add_builtin() {
+    ka_classifier_register builtin "$1" "$2"
 }
 
 # Role: Load optional tab-separated "Name<TAB>regex" classifier additions from config.
@@ -84,6 +104,670 @@ ka_classifier_load_user_registry() {
         fi
         ka_classifier_add "$name" "$patterns"
     done <"$path"
+}
+
+declare -ga KA_PROC_ARGV=()
+declare -g KA_PROC_LEGACY_SIGNATURE=''
+declare -g KA_PROC_BUILTIN_SIGNATURE=''
+declare -g KA_PROC_POSITION_COMM=''
+declare -g KA_PROC_POSITION_EXE=''
+declare -g KA_PROC_POSITION_PID=''
+declare -ga KA_PROC_ENV_ARGV=()
+
+# Role: Append a command-identifying token; a path already ends with its basename.
+ka_classifier_append_token() {
+    local token lower
+    token=$1
+    lower=${token,,}
+    [[ -n $lower ]] || return 0
+    if [[ -n $KA_PROC_BUILTIN_SIGNATURE ]]; then
+        KA_PROC_BUILTIN_SIGNATURE+=" $lower"
+    else
+        KA_PROC_BUILTIN_SIGNATURE=$lower
+    fi
+}
+
+# Role: Append a package spec and its version-free name for simple built-in regexes.
+ka_classifier_append_package_token() {
+    local token lower scope rest normalized
+    token=$1
+    ka_classifier_append_token "$token"
+    lower=${token,,}
+    if [[ $lower == @*/* ]]; then
+        scope=${lower%%/*}
+        rest=${lower#*/}
+        if [[ $rest == *@* ]]; then
+            normalized=$scope/${rest%%@*}
+            ka_classifier_append_token "$normalized"
+        fi
+    elif [[ $lower == *@* ]]; then
+        normalized=${lower%%@*}
+        ka_classifier_append_token "$normalized"
+    fi
+}
+
+# Role: Map a command argv[0] basename to the launcher grammar used below.
+ka_classifier_launcher_kind_set() {
+    local path base
+    path=$1
+    base=${path##*/}
+    base=${base,,}
+    REPLY=''
+    case "$base" in
+        node|nodejs) REPLY=node ;;
+        python|python3|pypy|pypy3|pypy3.[0-9]*) REPLY=python ;;
+        uv) REPLY=uv ;;
+        uvx) REPLY=uvx ;;
+        pipx) REPLY=pipx ;;
+        npx) REPLY=npx ;;
+        bun) REPLY=bun ;;
+        bunx) REPLY=bunx ;;
+        pnpm) REPLY=pnpm ;;
+        pnpx) REPLY=pnpx ;;
+        yarn|yarnpkg) REPLY=yarn ;;
+        npm) REPLY=npm ;;
+        corepack) REPLY=corepack ;;
+        deno) REPLY=deno ;;
+        env) REPLY='env' ;;
+        bash|sh|zsh|dash) REPLY=shell ;;
+        tsx) REPLY=tsx ;;
+        ts-node|ts-node-esm) REPLY=ts-node ;;
+    esac
+    if [[ -z $REPLY && $base =~ ^python3\.[0-9]+$ ]]; then
+        REPLY=python
+    fi
+}
+
+# Role: Mark a script-launcher option as a payload, a one-word value, or neither.
+ka_classifier_script_option_value() {
+    local launcher arg
+    launcher=$1
+    arg=$2
+    REPLY=0
+    case "$launcher" in
+        shell)
+            case "$arg" in
+                -o|-O|--rcfile|--init-file) REPLY=1 ;;
+                --command|--command=*) REPLY=2 ;;
+                -c|-c*|-[^-]*c*|-s|-s*) REPLY=2 ;;
+            esac
+            ;;
+        python)
+            case "$arg" in
+                -c|--command|-c*|--command=*) REPLY=2 ;;
+                -W|--warn|-X|--context|-Q|--check-hash-based-pycs) REPLY=1 ;;
+            esac
+            ;;
+        node|tsx|ts-node)
+            case "$arg" in
+                -e|--eval|-p|--print|-e*|--eval=*|-p*|--print=*) REPLY=2 ;;
+                -r|--require|--loader|--import|--conditions|--title|--icu-data-dir|--openssl-config|--redirect-warnings|--test-name-pattern|--test-reporter|--test-reporter-destination|--experimental-loader|--experimental-policy|--input-type|--inspect-port|--watch-path|--tsconfig|--project|--compiler-options|--diagnostic-dir|--cpu-prof-dir|--cpu-prof-name|--heap-prof-dir|--heap-prof-name|--experimental-sea-config|--experimental-config-file|--env-file|--env-file-if-exists|--localstorage-file|--report-dir|--report-filename|--snapshot-blob) REPLY=1 ;;
+            esac
+            ;;
+        bun)
+            case "$arg" in
+                -e|--eval|-e*|--eval=*) REPLY=2 ;;
+                --preload|--define|--smol-file|--target|--jsx|--tsconfig|--env-file|--cwd|--external|--origin|--port|--fetch-preload|--main-fields|--conditions|--drop) REPLY=1 ;;
+            esac
+            ;;
+        deno)
+            case "$arg" in
+                --config|--import-map|--lock|--cert|--location|--seed|--v8-flags|--inspect|--inspect-brk|--ext|--cwd|--env-file|--watch-path|--filter|--junit-path|--coverage|--jobs) REPLY=1 ;;
+                eval|--eval|repl|jupyter) REPLY=2 ;;
+            esac
+            ;;
+    esac
+}
+
+# Role: Put file-awareness status for a possible interpreter script in REPLY: 1 is a
+# regular file, 2 is a readable process cwd with no regular file, and 3 means that the
+# process metadata needed for the check is unavailable, so the legacy positional rule is
+# the only safe fallback. The /proc path test does not fork or resolve cwd in the shell.
+ka_classifier_script_file_mode_set() {
+    local arg pid
+    arg=$1
+    pid=${KA_PROC_POSITION_PID-}
+    REPLY=3
+    [[ $pid =~ ^[0-9]+$ && -r /proc/$pid/cwd ]] || return 0
+    if [[ $arg == /* ]]; then
+        REPLY=2
+        [[ -f $arg ]] && REPLY=1
+        return 0
+    fi
+    REPLY=2
+    [[ -f /proc/$pid/cwd/$arg ]] && REPLY=1 && return 0
+    # A deleted working directory still passes every test above (it is a directory, just
+    # unlinked), so a relative script inside it can never be found. Only the link text
+    # tells; reading it costs a fork, paid on this miss path alone, never per process.
+    local cwd_link
+    cwd_link=$(readlink -- "/proc/$pid/cwd" 2>/dev/null) || return 0
+    [[ $cwd_link == *' (deleted)' ]] && REPLY=3
+    return 0
+}
+
+# Role: Mark a package-runner option whose following word is not the package command.
+ka_classifier_package_option_value() {
+    local arg
+    arg=$1
+    REPLY=0
+    case "$arg" in
+        --node-options|--shell|--workspace|--cwd|--directory|--python|--python-version|--with|--with-editable|--index|--index-url|--default-index|--extra-index-url|--find-links|--allow-insecure-host|--config-setting|--project|--env-file|--filter|--reporter|--network-concurrency|--registry|--resolution|--strategy|--cache|--cache-dir|--prefix|--pip-args|--pip-version|--inject|--suffix|-C|-p|-r|-f|-c|-w|-i)
+            REPLY=1
+            ;;
+    esac
+}
+
+# Role: Collect the first identifying script/module argument for an interpreter process.
+ka_classifier_collect_script_tokens() {
+    local launcher start n i arg skip module file_mode
+    launcher=$1
+    start=$2
+    n=${#KA_PROC_ARGV[@]}
+    i=$start
+    while ((i < n)); do
+        arg=${KA_PROC_ARGV[i]}
+        if [[ $arg == -- ]]; then
+            i=$((i + 1))
+            ((i < n)) && ka_classifier_append_token "${KA_PROC_ARGV[i]}"
+            return 0
+        fi
+        if [[ $launcher == python ]]; then
+            case "$arg" in
+                -m)
+                    i=$((i + 1))
+                    ((i < n)) && ka_classifier_append_token "${KA_PROC_ARGV[i]}"
+                    return 0
+                    ;;
+                -m?*)
+                    module=${arg#-m}
+                    ka_classifier_append_token "$module"
+                    return 0
+                    ;;
+                --module=*)
+                    module=${arg#--module=}
+                    ka_classifier_append_token "$module"
+                    return 0
+                    ;;
+            esac
+        fi
+        if [[ $arg == -* ]]; then
+            ka_classifier_script_option_value "$launcher" "$arg"
+            skip=$REPLY
+            ((skip == 2)) && return 0
+            if ((skip == 1)); then
+                i=$((i + 2))
+            else
+                i=$((i + 1))
+            fi
+            continue
+        fi
+        ka_classifier_script_file_mode_set "$arg"
+        file_mode=$REPLY
+        if ((file_mode == 1 || file_mode == 3)); then
+            # A readable cwd lets the file test reject option values and arbitrary names;
+            # an unreadable/mocked cwd falls back to the historical first-word behavior.
+            ka_classifier_append_token "$arg"
+            return 0
+        fi
+        # The process cwd is readable but this word is not a regular file. Keep looking;
+        # an option value such as a directory must not become the script identity.
+        i=$((i + 1))
+    done
+}
+
+# Role: Collect a package spec from npx/bunx/uvx and similar package launchers.
+ka_classifier_collect_package_tokens() {
+    local start n i arg value skip
+    start=$1
+    n=${#KA_PROC_ARGV[@]}
+    i=$start
+    while ((i < n)); do
+        arg=${KA_PROC_ARGV[i]}
+        if [[ $arg == -- ]]; then
+            i=$((i + 1))
+            ((i < n)) && ka_classifier_append_package_token "${KA_PROC_ARGV[i]}"
+            return 0
+        fi
+        case "$arg" in
+            --call|--call=*)
+                # npm/npx --call executes a shell payload, not a package command.
+                return 0
+                ;;
+            --package|--spec|--from)
+                i=$((i + 1))
+                if ((i < n)); then
+                    ka_classifier_append_package_token "${KA_PROC_ARGV[i]}"
+                    i=$((i + 1))
+                    continue
+                fi
+                return 0
+                ;;
+            --package=*|--spec=*|--from=*)
+                value=${arg#*=}
+                ka_classifier_append_package_token "$value"
+                i=$((i + 1))
+                continue
+                ;;
+        esac
+        if [[ $arg != -* ]]; then
+            ka_classifier_append_package_token "$arg"
+            return 0
+        fi
+        ka_classifier_package_option_value "$arg"
+        skip=$REPLY
+        if ((skip == 1)); then
+            i=$((i + 2))
+        else
+            i=$((i + 1))
+        fi
+    done
+}
+
+# Role: Find the script or package command following Bun's subcommand.
+ka_classifier_collect_bun_tokens() {
+    local start n i arg skip
+    start=$1
+    n=${#KA_PROC_ARGV[@]}
+    i=$((start + 1))
+    while ((i < n)); do
+        arg=${KA_PROC_ARGV[i]}
+        case "$arg" in
+            x|bunx)
+                ka_classifier_collect_package_tokens "$((i + 1))"
+                return 0
+                ;;
+            run|test|build|debug|dev)
+                ka_classifier_collect_script_tokens bun "$((i + 1))"
+                return 0
+                ;;
+            install|add|remove|create|pm)
+                return 0
+                ;;
+            --)
+                ka_classifier_collect_script_tokens bun "$((i + 1))"
+                return 0
+                ;;
+        esac
+        if [[ $arg == -* ]]; then
+            ka_classifier_script_option_value bun "$arg"
+            skip=$REPLY
+            ((skip == 2)) && return 0
+            if ((skip == 1)); then
+                i=$((i + 2))
+            else
+                i=$((i + 1))
+            fi
+        else
+            ka_classifier_collect_script_tokens bun "$i"
+            return 0
+        fi
+    done
+}
+
+# Role: Find Deno's run/test/compile script while excluding eval payloads and task names.
+ka_classifier_collect_deno_tokens() {
+    local start n i arg skip
+    start=$1
+    n=${#KA_PROC_ARGV[@]}
+    i=$((start + 1))
+    while ((i < n)); do
+        arg=${KA_PROC_ARGV[i]}
+        case "$arg" in
+            run|test|compile|bundle|install)
+                ka_classifier_collect_script_tokens deno "$((i + 1))"
+                return 0
+                ;;
+            eval|repl|jupyter|task|fmt|lint|doc|remove|upgrade)
+                return 0
+                ;;
+        esac
+        if [[ $arg == -* ]]; then
+            ka_classifier_script_option_value deno "$arg"
+            skip=$REPLY
+            ((skip == 2)) && return 0
+            if ((skip == 1)); then
+                i=$((i + 2))
+            else
+                i=$((i + 1))
+            fi
+        else
+            return 0
+        fi
+    done
+}
+
+# Role: Find uv run or uv tool run and collect only its script/package identifier.
+ka_classifier_collect_uv_tokens() {
+    local start n i arg skip
+    start=$1
+    n=${#KA_PROC_ARGV[@]}
+    i=$((start + 1))
+    while ((i < n)); do
+        arg=${KA_PROC_ARGV[i]}
+        case "$arg" in
+            run)
+                ka_classifier_collect_script_tokens python "$((i + 1))"
+                return 0
+                ;;
+            tool)
+                i=$((i + 1))
+                while ((i < n)); do
+                    arg=${KA_PROC_ARGV[i]}
+                    if [[ $arg == run ]]; then
+                        ka_classifier_collect_package_tokens "$((i + 1))"
+                        return 0
+                    fi
+                    if [[ $arg == -* ]]; then
+                        ka_classifier_package_option_value "$arg"
+                        skip=$REPLY
+                        if ((skip == 1)); then
+                            i=$((i + 2))
+                        else
+                            i=$((i + 1))
+                        fi
+                    else
+                        return 0
+                    fi
+                done
+                return 0
+                ;;
+        esac
+        if [[ $arg == -* ]]; then
+            ka_classifier_package_option_value "$arg"
+            skip=$REPLY
+            if ((skip == 1)); then
+                i=$((i + 2))
+            else
+                i=$((i + 1))
+            fi
+        else
+            return 0
+        fi
+    done
+}
+
+# Role: Find pipx run and collect its package spec without scanning later arguments.
+ka_classifier_collect_pipx_tokens() {
+    local start n i arg skip
+    start=$1
+    n=${#KA_PROC_ARGV[@]}
+    i=$((start + 1))
+    while ((i < n)); do
+        arg=${KA_PROC_ARGV[i]}
+        if [[ $arg == run ]]; then
+            ka_classifier_collect_package_tokens "$((i + 1))"
+            return 0
+        fi
+        if [[ $arg == -* ]]; then
+            ka_classifier_package_option_value "$arg"
+            skip=$REPLY
+            if ((skip == 1)); then
+                i=$((i + 2))
+            else
+                i=$((i + 1))
+            fi
+        else
+            return 0
+        fi
+    done
+}
+
+# Role: Find npm exec and collect its package spec while ignoring npm option values.
+ka_classifier_collect_npm_tokens() {
+    local start n i arg skip
+    start=$1
+    n=${#KA_PROC_ARGV[@]}
+    i=$((start + 1))
+    while ((i < n)); do
+        arg=${KA_PROC_ARGV[i]}
+        if [[ $arg == --call || $arg == --call=* ]]; then
+            return 0
+        fi
+        if [[ $arg == exec || $arg == x ]]; then
+            ka_classifier_collect_package_tokens "$((i + 1))"
+            return 0
+        fi
+        if [[ $arg == -* ]]; then
+            ka_classifier_package_option_value "$arg"
+            skip=$REPLY
+            if ((skip == 1)); then
+                i=$((i + 2))
+            else
+                i=$((i + 1))
+            fi
+        else
+            return 0
+        fi
+    done
+}
+
+# Role: Find pnpm dlx or pnpx's package argument while skipping filter values.
+ka_classifier_collect_pnpm_tokens() {
+    local start n i arg skip
+    start=$1
+    n=${#KA_PROC_ARGV[@]}
+    i=$((start + 1))
+    if [[ ${KA_PROC_ARGV[start]##*/} == pnpx ]]; then
+        ka_classifier_collect_package_tokens "$i"
+        return 0
+    fi
+    while ((i < n)); do
+        arg=${KA_PROC_ARGV[i]}
+        if [[ $arg == dlx ]]; then
+            ka_classifier_collect_package_tokens "$((i + 1))"
+            return 0
+        fi
+        if [[ $arg == -* ]]; then
+            ka_classifier_package_option_value "$arg"
+            skip=$REPLY
+            if ((skip == 1)); then
+                i=$((i + 2))
+            else
+                i=$((i + 1))
+            fi
+        else
+            return 0
+        fi
+    done
+}
+
+# Role: Find yarn dlx's package argument while skipping unrelated Yarn options.
+ka_classifier_collect_yarn_tokens() {
+    local start n i arg skip
+    start=$1
+    n=${#KA_PROC_ARGV[@]}
+    i=$((start + 1))
+    while ((i < n)); do
+        arg=${KA_PROC_ARGV[i]}
+        if [[ $arg == dlx ]]; then
+            ka_classifier_collect_package_tokens "$((i + 1))"
+            return 0
+        fi
+        if [[ $arg == -* ]]; then
+            ka_classifier_package_option_value "$arg"
+            skip=$REPLY
+            if ((skip == 1)); then
+                i=$((i + 2))
+            else
+                i=$((i + 1))
+            fi
+        else
+            return 0
+        fi
+    done
+}
+
+# Role: Split env's one-word -S command string without invoking a shell or external helper.
+ka_classifier_env_split_set() {
+    local text char quote='' escaped=0 token='' have=0 i backslash
+    text=$1
+    backslash=$'\\'
+    KA_PROC_ENV_ARGV=()
+    for ((i=0; i<${#text}; i++)); do
+        char=${text:i:1}
+        if ((escaped == 1)); then
+            token+=$char
+            escaped=0
+            have=1
+            continue
+        fi
+        if [[ $quote == "'" ]]; then
+            if [[ $char == "'" ]]; then
+                quote=''
+            else
+                token+=$char
+            fi
+            have=1
+            continue
+        fi
+        if [[ $quote == '"' ]]; then
+            if [[ $char == '"' ]]; then
+                quote=''
+            elif [[ $char == "$backslash" ]]; then
+                escaped=1
+            else
+                token+=$char
+            fi
+            have=1
+            continue
+        fi
+        if [[ $char == "$backslash" ]]; then
+            escaped=1
+            have=1
+            continue
+        fi
+        case "$char" in
+            "'") quote="'"; have=1 ;;
+            '"') quote='"'; have=1 ;;
+            [[:space:]])
+                if ((have == 1)); then
+                    KA_PROC_ENV_ARGV+=("$token")
+                    token=''
+                    have=0
+                fi
+                ;;
+            *) token+=$char; have=1 ;;
+        esac
+    done
+    ((escaped == 1)) && token+=$backslash
+    ((have == 1)) && KA_PROC_ENV_ARGV+=("$token")
+}
+
+# Role: Skip env assignments/options and reapply command parsing to the remaining argv.
+ka_classifier_collect_env_tokens() {
+    local start depth n i arg skip value
+    local -a saved_argv=()
+    start=$1
+    depth=$2
+    n=${#KA_PROC_ARGV[@]}
+    i=$((start + 1))
+    while ((i < n)); do
+        arg=${KA_PROC_ARGV[i]}
+        if [[ $arg == -- ]]; then
+            i=$((i + 1))
+            break
+        fi
+        if [[ $arg == -S || $arg == --split-string ]]; then
+            i=$((i + 1))
+            if ((i < n)); then
+                ka_classifier_env_split_set "${KA_PROC_ARGV[i]}"
+                saved_argv=("${KA_PROC_ARGV[@]}")
+                KA_PROC_ARGV=(env "${KA_PROC_ENV_ARGV[@]}")
+                ka_classifier_collect_env_tokens 0 "$depth"
+                KA_PROC_ARGV=("${saved_argv[@]}")
+            fi
+            return 0
+        fi
+        if [[ $arg == -S\ * ]]; then
+            value=${arg#-S }
+            ka_classifier_env_split_set "$value"
+            saved_argv=("${KA_PROC_ARGV[@]}")
+            KA_PROC_ARGV=(env "${KA_PROC_ENV_ARGV[@]}")
+            ka_classifier_collect_env_tokens 0 "$depth"
+            KA_PROC_ARGV=("${saved_argv[@]}")
+            return 0
+        fi
+        if [[ $arg == --split-string=* ]]; then
+            value=${arg#*=}
+            ka_classifier_env_split_set "$value"
+            saved_argv=("${KA_PROC_ARGV[@]}")
+            KA_PROC_ARGV=(env "${KA_PROC_ENV_ARGV[@]}")
+            ka_classifier_collect_env_tokens 0 "$depth"
+            KA_PROC_ARGV=("${saved_argv[@]}")
+            return 0
+        fi
+        if [[ $arg == -u || $arg == --unset || $arg == --chdir || $arg == -C || $arg == --argv0 ]]; then
+            i=$((i + 2))
+            continue
+        fi
+        if [[ $arg == --unset=* || $arg == --chdir=* || $arg == --argv0=* ]]; then
+            i=$((i + 1))
+            continue
+        fi
+        if [[ $arg == -* ]]; then
+            i=$((i + 1))
+            continue
+        fi
+        if [[ $arg =~ ^[a-zA-Z_][a-zA-Z0-9_]*= ]]; then
+            i=$((i + 1))
+            continue
+        fi
+        break
+    done
+    ((i < n)) && ka_classifier_collect_command_tokens "$i" "$depth"
+}
+
+# Role: Add an argv[0] token and parse only the identifying launcher argument positions.
+ka_classifier_collect_command_tokens() {
+    local index depth arg launcher
+    index=$1
+    depth=$2
+    launcher=${3-}
+    ((depth < 4 && index < ${#KA_PROC_ARGV[@]})) || return 0
+    arg=${KA_PROC_ARGV[index]}
+    if [[ $arg != "$KA_PROC_POSITION_COMM" && $arg != "$KA_PROC_POSITION_EXE" ]]; then
+        ka_classifier_append_token "$arg"
+    fi
+    if [[ -z $launcher ]]; then
+        ka_classifier_launcher_kind_set "$arg"
+        launcher=$REPLY
+    fi
+    case "$launcher" in
+        env) ka_classifier_collect_env_tokens "$index" "$((depth + 1))" ;;
+        node|nodejs|python|shell|tsx|ts-node) ka_classifier_collect_script_tokens "$launcher" "$((index + 1))" ;;
+        bun) ka_classifier_collect_bun_tokens "$index" ;;
+        bunx|npx|uvx) ka_classifier_collect_package_tokens "$((index + 1))" ;;
+        uv) ka_classifier_collect_uv_tokens "$index" ;;
+        pipx) ka_classifier_collect_pipx_tokens "$index" ;;
+        npm) ka_classifier_collect_npm_tokens "$index" ;;
+        pnpm|pnpx) ka_classifier_collect_pnpm_tokens "$index" ;;
+        yarn) ka_classifier_collect_yarn_tokens "$index" ;;
+        deno) ka_classifier_collect_deno_tokens "$index" ;;
+        corepack) ka_classifier_collect_env_tokens "$index" "$((depth + 1))" ;;
+    esac
+}
+
+# Role: Build the position-aware built-in signature from comm, exe, and selected argv fields.
+ka_classifier_position_signature_set() {
+    local comm path argv0 launcher
+    comm=$1
+    path=$2
+    KA_PROC_POSITION_COMM=$comm
+    KA_PROC_POSITION_EXE=$path
+    KA_PROC_BUILTIN_SIGNATURE=''
+    ka_classifier_append_token "$comm"
+    ka_classifier_append_token "$path"
+    if ((${#KA_PROC_ARGV[@]} > 0)); then
+        argv0=${KA_PROC_ARGV[0]}
+        ka_classifier_launcher_kind_set "$argv0"
+        launcher=$REPLY
+        if [[ -n $launcher ]]; then
+            ka_classifier_collect_command_tokens 0 0 "$launcher"
+        elif [[ $argv0 != "$comm" && $argv0 != "$path" ]]; then
+            ka_classifier_append_token "$argv0"
+        fi
+    fi
+    REPLY=$KA_PROC_BUILTIN_SIGNATURE
 }
 
 # Executable paths already resolved, so readlink - the one process the signature still
@@ -184,11 +868,31 @@ ka_proc_starttime() {
     printf '%s' "$REPLY"
 }
 
-# Role: Put a normalized searchable process signature from comm, exe, and cmdline in REPLY.
+# Role: Put a normalized legacy signature and a position-aware built-in signature in globals.
 ka_proc_signature_set() {
-    local pid=$1 comm='' path='' exe cmd='' key fingerprint cached
-    ka_proc_comm_set "$pid" && comm=$REPLY
-    ka_proc_cmdline_set "$pid" && cmd=$REPLY
+    local pid comm path exe cmd sep key fingerprint cached arg
+    local -a argv=()
+    pid=$1
+    REPLY=''
+    KA_PROC_ARGV=()
+    KA_PROC_LEGACY_SIGNATURE=''
+    KA_PROC_BUILTIN_SIGNATURE=''
+    KA_PROC_POSITION_PID=''
+    [[ $pid =~ ^[0-9]+$ && -r /proc/$pid/cmdline ]] || return 1
+    # Read argv once: the same array supplies the legacy display signature and the
+    # position-aware collector, avoiding one procfs read and all per-process forks.
+    mapfile -d '' -t argv 2>/dev/null <"/proc/$pid/cmdline" || return 1
+    KA_PROC_ARGV=("${argv[@]}")
+    comm=''
+    IFS= read -r comm <"/proc/$pid/comm" 2>/dev/null || true
+    cmd=''
+    sep=''
+    for arg in "${argv[@]}"; do
+        cmd+=$sep$arg
+        sep=' '
+    done
+    cmd=${cmd%"${cmd##*[![:space:]]}"}
+    path=''
     if ka_proc_starttime_set "$pid"; then
         key="$pid:$REPLY"
         fingerprint="$comm"$'\x1f'"$cmd"
@@ -210,7 +914,10 @@ ka_proc_signature_set() {
         path=$(ka_proc_exe_path "$pid" 2>/dev/null || true)
     fi
     exe=${path##*/}
-    REPLY="${comm,,} ${exe,,} ${cmd,,}"
+    KA_PROC_LEGACY_SIGNATURE="${comm,,} ${exe,,} ${cmd,,}"
+    KA_PROC_POSITION_PID=$pid
+    ka_classifier_position_signature_set "$comm" "$path"
+    REPLY=$KA_PROC_LEGACY_SIGNATURE
 }
 
 # Role: Build a normalized searchable process signature from comm, exe, and cmdline.
@@ -219,18 +926,25 @@ ka_proc_signature() {
     printf '%s' "$REPLY"
 }
 
-# Role: Put "Name<TAB>PID" for one recognized process in REPLY using the signature registry.
+# Role: Put "Name<TAB>PID" for one process using position-aware built-ins and legacy user regexes.
 ka_classifier_match_pid_set() {
-    local pid=$1 signature key pattern
+    local pid signature builtin_signature key
+    pid=$1
+    KA_PROC_LEGACY_SIGNATURE=''
+    KA_PROC_BUILTIN_SIGNATURE=''
     ka_proc_signature_set "$pid" || return 1
-    signature=$REPLY
+    signature=${KA_PROC_LEGACY_SIGNATURE:-$REPLY}
+    builtin_signature=${KA_PROC_BUILTIN_SIGNATURE-}
     for key in "${KA_CLASS_ORDER[@]}"; do
-        pattern=${KA_CLASS_PATTERNS[$key]}
-        if [[ $signature =~ $pattern ]]; then
-            REPLY="${KA_CLASS_NAMES[$key]}"$'\t'"$pid"
-            return 0
+        if [[ ${KA_CLASS_MODES[$key]-legacy} == builtin ]]; then
+            [[ $builtin_signature =~ ${KA_CLASS_PATTERNS[$key]} ]] || continue
+        else
+            [[ $signature =~ ${KA_CLASS_PATTERNS[$key]} ]] || continue
         fi
+        REPLY="${KA_CLASS_NAMES[$key]}"$'\t'"$pid"
+        return 0
     done
+    REPLY=''
     return 1
 }
 

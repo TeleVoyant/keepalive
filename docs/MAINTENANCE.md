@@ -126,15 +126,15 @@ Do not merge changes that weaken these rules:
 
 ## Extending AI recognition
 
-Prefer adding a conservative signature in `ka_classifier_init`, or use user config during experimentation:
+Prefer adding a conservative, position-aware signature in `ka_classifier_init`, or use user config during experimentation:
 
 ```text
 ${XDG_CONFIG_HOME:-$HOME/.config}/keepalive/classifiers.tsv
 ```
 
-Test exact executable/package boundaries. Avoid generic substrings such as plain `amp` without separators because they can match unrelated commands.
+Built-ins inspect only command-identifying positions: `comm`, resolved executable path/basename, `argv[0]` path/basename, and the first script/module/package identifier recognized for supported launchers. They deliberately exclude shell `-c` payloads, environment assignments, editor/pager/grep/git arguments, and option values. User `classifiers.tsv` rows retain the legacy full lower-case `comm exe cmdline` matching behavior, so user regexes must be treated as trusted, potentially broad rules. Test exact executable/package boundaries. Avoid generic substrings such as plain `amp` without separators because they can match unrelated commands.
 
-Add a regression case in `tests/test_classifier.sh` for both a positive and a plausible negative signature.
+Add a regression case in `tests/test_classifier.sh` for both a positive and a plausible negative signature, including one wrapper form and one argument-only false positive.
 
 ## Adding a daemon command
 
@@ -214,7 +214,7 @@ On a real systemd user session (and on KDE as well when validating Konsole):
 21. Resize the terminal from very wide down to 52 columns in each view; no line may wrap and no border may overrun.
 22. Compare the default, `--no-icons`, `NO_COLOR=1`, and `--ascii` renderings of the manager, target detail, and every wizard step.
 23. Create a keep-alive through the wizard using a **custom** message and a custom interval; both must be accepted and stored verbatim.
-24. Drive the full lifecycle from the CLI: `create`, `pause`, `resume`, `send`, `reset`, `mode`, `delete`, and `list --json`.
+24. Drive the full lifecycle from the CLI: `create`, `configure`, `pause`, `resume`, `send`, `reset`, `mode`, `delete`, and `list --json`.
 25. Confirm `systemctl --user stop keepalive.service` logs no `Failed with result`.
 26. Press `r` repeatedly in target detail and add a message in the wizard; no key-hint line may appear twice.
 27. Re-run the installer while the daemon is active with an ACTIVE and a PAUSED target and
@@ -256,20 +256,25 @@ On a real systemd user session (and on KDE as well when validating Konsole):
 
 Version lives in exactly one place, `KEEPALIVE_VERSION` in `keepalive`. Four documents
 repeat it, and `scripts/dev-check.sh` fails if any of them drifts, so the bump is
-mechanical rather than a thing to remember.
+mechanical rather than a thing to remember. Run the helper from the repository root:
 
-1. Update `KEEPALIVE_VERSION` in `keepalive`.
-2. Update the version line in `README.md`, `VALIDATION.md`, `docs/VALIDATION.md`, and
-   `.agents/README.md`.
-3. Add the released section to `CHANGELOG.md` as `## [x.y.z] - YYYY-MM-DD`, and add the
-   matching link reference at the bottom of the file. `dev-check.sh` requires this
-   section to exist, because a tag is cut from it.
-4. Run `./scripts/dev-check.sh`; it must end with `ALL VALIDATION CHECKS PASSED`.
-5. Work through the live integration checklist above in a non-KDE systemd user session,
+```bash
+./scripts/bump-version.sh X.Y.Z
+```
+
+It updates the executable and four document version lines, moves an existing
+`[Unreleased]` section (or creates a dated section), and adds the matching changelog link
+reference. Running it again for the same version is idempotent.
+
+1. Run `./scripts/bump-version.sh X.Y.Z` and review the generated changelog section.
+2. Run `./scripts/dev-check.sh`; it must end with `ALL VALIDATION CHECKS PASSED`.
+3. Work through the live integration checklist above in a non-KDE systemd user session,
    on a real KDE/Konsole workstation for that backend, and with a disposable Orca agent.
    Neither mocks nor container unit parsing can prove a live provider/user-manager contract.
-6. Refresh `VALIDATION.md` and `docs/VALIDATION.md` with the observed assertion count
+4. Refresh `VALIDATION.md` and `docs/VALIDATION.md` with the observed assertion count
    and the live evidence.
-7. Commit, then tag: `git tag -a vX.Y.Z -m 'Keep Alive Manager X.Y.Z'` and
+5. Commit, then tag: `git tag -a vX.Y.Z -m 'Keep Alive Manager X.Y.Z'` and
    `git push origin master --follow-tags`.
-8. Publish the GitHub release with the changelog section as its body.
+6. The `v*.*.*` push starts `.github/workflows/release.yml`, which validates the tag,
+   builds the archive/checksum, extracts the changelog section, and creates or updates
+   the GitHub Release.

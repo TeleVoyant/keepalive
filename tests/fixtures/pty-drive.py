@@ -4,7 +4,8 @@
 Usage: pty-drive.py <cols> <rows> <settle-seconds> <keys> -- <command> [args...]
 
 <keys> is a comma-separated list. Each item is either a literal string, one of the names
-below, or "@text", which waits until "text" has appeared in the output before continuing.
+below, "@text", which waits until "text" has appeared in the output before continuing,
+or CAPTURE/STOP, which kills and reaps the child after the preceding barrier.
 Waiting on expected output instead of guessing with sleeps is what makes these tests
 deterministic: a fixed settle races against however long the client takes to draw.
 
@@ -86,8 +87,24 @@ def drive(cols, rows, settle, keys, command, timeout=40.0):
     # Let the first frame settle before sending anything.
     pump(max(settle, 1.0))
     sent_any = False
+    status = None
     for key in keys:
         if isinstance(key, tuple):
+            if key[0] == 'stop':
+                # CAPTURE/STOP is only valid after its preceding output barrier. Kill and
+                # reap immediately so the capture cannot spend the normal 40 s timeout.
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    status = 'CAPTURE-FAILED'
+                else:
+                    try:
+                        os.waitpid(pid, 0)
+                    except ChildProcessError:
+                        status = 'CAPTURE-FAILED'
+                    else:
+                        status = 'CAPTURED'
+                break
             if not wait_for(key[1]):
                 # Report the missed synchronisation instead of sending the rest of the
                 # keys blind, which surfaces later as a confusing exit timeout.
@@ -97,27 +114,36 @@ def drive(cols, rows, settle, keys, command, timeout=40.0):
                 # rather than anything the keys did. Naming it separately lets a caller
                 # retry that case without also retrying a key that wrongly exited a view.
                 label = 'WAIT-TIMEOUT:' if sent_any else 'START-TIMEOUT:'
-                return label + key[1], bytes(captured)
+                status = label + key[1]
+                break
             continue
         sent_any = True
         scan['pos'] = len(captured)
         os.write(fd, key)
         if not pump(settle):
             break
-    pump(settle)
-
-    status = None
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        reaped, raw = os.waitpid(pid, os.WNOHANG)
-        if reaped:
-            status = os.waitstatus_to_exitcode(raw)
-            break
-        pump(0.1)
+    if status is not None and status != 'CAPTURED':
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            os.waitpid(pid, 0)
+        except ChildProcessError:
+            pass
     if status is None:
-        os.kill(pid, signal.SIGKILL)
-        os.waitpid(pid, 0)
-        status = 'TIMEOUT'
+        pump(settle)
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            reaped, raw = os.waitpid(pid, os.WNOHANG)
+            if reaped:
+                status = os.waitstatus_to_exitcode(raw)
+                break
+            pump(0.1)
+        if status is None:
+            os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+            status = 'TIMEOUT'
     try:
         os.close(fd)
     except OSError:
@@ -133,14 +159,16 @@ def main():
     command = sys.argv[separator + 1:]
     keys = []
     for item in (raw_keys.split(',') if raw_keys else []):
-        if item.startswith('@'):
+        if item in ('CAPTURE', 'STOP'):
+            keys.append(('stop', ''))
+        elif item.startswith('@'):
             keys.append(('wait', item[1:]))
         else:
             keys.append(NAMED_KEYS.get(item, item.encode()))
     status, output = drive(cols, rows, settle, keys, command)
     sys.stderr.write('exit=%s\n' % status)
     sys.stdout.buffer.write(output)
-    return 0
+    return 0 if status == 0 or status == 'CAPTURED' else 1
 
 
 if __name__ == '__main__':

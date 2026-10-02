@@ -5,16 +5,26 @@
 # Matching is done with builtin regexes: this runs for every Konsole service on every
 # discovery pass, and the grep pipelines it replaced cost two or three processes each.
 ka_konsole_session_paths() {
-    local service=$1 xml output line node_re='<node name="([0-9]+)"' path_re='(/Sessions/[0-9]+)$'
+    local service=$1 xml output line node_re='<node name="([0-9]+)"' path_re='(/Sessions/[0-9]+)$' rc
     if ka_dbus_use_send; then
-        xml=$(ka_dbus_send_scalar "$service" /Sessions org.freedesktop.DBus.Introspectable.Introspect 2>/dev/null) || return 0
+        if xml=$(ka_dbus_send_scalar "$service" /Sessions org.freedesktop.DBus.Introspectable.Introspect 2>/dev/null); then
+            :
+        else
+            rc=$?
+            return "$rc"
+        fi
         while [[ $xml =~ $node_re ]]; do
             printf '/Sessions/%s\n' "${BASH_REMATCH[1]}"
             xml=${xml#*"${BASH_REMATCH[0]}"}
         done
         return 0
     fi
-    output=$(ka_qdbus_call "$service") || true
+    if output=$(ka_qdbus_call "$service"); then
+        :
+    else
+        rc=$?
+        return "$rc"
+    fi
     while IFS= read -r line; do
         [[ $line =~ $path_re ]] && printf '%s\n' "${BASH_REMATCH[1]}"
     done <<<"$output"
@@ -64,6 +74,12 @@ ka_konsole_session_name() {
     printf '%s\t%s\n' "$safe_name" "$safe_cwd"
 }
 
+# Role: Put the discovery-deadline clock in REPLY: monotonic, so a wall-clock step during
+# a pass can neither hide an overrun nor reject a pass that stayed within its budget.
+ka_konsole_clock_ms() {
+    ka_now_monotonic_ms || ka_now_ms
+}
+
 # Role: Discover recognized AI CLI sessions across all live Konsole services into KA_DISCOVERY_ROWS.
 # Each element is one TSV row - UUID, AI type, display name, cwd, service, path, terminal
 # PID, foreground PID, AI PID, AI PID starttime, foreground command - and the last is the
@@ -72,51 +88,142 @@ ka_konsole_session_name() {
 # one discovery pass to the next; in a child shell every pass started it empty.
 ka_konsole_discover_rows() {
     local service path uuid term_pid fgpid class ai_type ai_pid ai_start name_info name cwd cmd row
-    local budget deadline s_uuid s_type s_service s_path s_cmd
+    local budget deadline s_uuid s_type s_service s_path s_cmd services_output paths_output rc
     KA_DISCOVERY_ROWS=()
     ka_tunable KEEPALIVE_DISCOVERY_BUDGET_MS 1000
     budget=$REPLY
-    ka_now_ms
+    ka_konsole_clock_ms
     deadline=$((REPLY + budget))
-    while IFS= read -r service; do
-        [[ -n $service ]] || continue
-        while IFS= read -r path; do
-            [[ -n $path ]] || continue
-            # Each session costs up to three bounded D-Bus calls. Without a pass budget a
-            # degraded bus blocks the whole daemon loop, which then exceeds the suspend
-            # gap and silently stops advancing every countdown.
-            ka_now_ms
+
+    # Process substitutions hide the producer's status, so an enumeration timeout used to
+    # look exactly like an empty bus. Capture each bounded enumeration before committing a
+    # marker; an actually empty successful output still reaches #COMPLETE below.
+    if services_output=$(ka_qdbus_konsole_services); then
+        :
+    else
+        rc=$?
+        KA_DISCOVERY_ROWS+=("#INCOMPLETE"$'\t'"command-$rc")
+        return 0
+    fi
+    ka_konsole_clock_ms
+    if ((REPLY > deadline)); then
+        KA_DISCOVERY_ROWS+=('#INCOMPLETE'$'\t''budget')
+        return 0
+    fi
+
+    if [[ -n $services_output ]]; then
+        while IFS= read -r service; do
+            [[ -n $service ]] || continue
+            ka_konsole_clock_ms
             if ((REPLY > deadline)); then
-                KA_DISCOVERY_ROWS+=('#INCOMPLETE')
+                KA_DISCOVERY_ROWS+=('#INCOMPLETE'$'\t''budget')
                 return 0
             fi
-            uuid=$(ka_konsole_get "$service" "$path" shellSessionId 2>/dev/null || true)
-            term_pid=$(ka_konsole_get "$service" "$path" processId 2>/dev/null || true)
-            fgpid=$(ka_konsole_get "$service" "$path" foregroundProcessId 2>/dev/null || true)
-            [[ -n $uuid && $term_pid =~ ^[0-9]+$ && $fgpid =~ ^[0-9]+$ ]] || continue
+            if paths_output=$(ka_konsole_session_paths "$service"); then
+                :
+            else
+                rc=$?
+                # Only a timeout leaves the pass unknowable. Any other error means this
+                # service is gone or unusable right now (a window closing mid-pass), and
+                # skipping it is what the pass reported before; one stuck service must
+                # not block discovery of every other session.
+                if ka_qdbus_status_is_timeout "$rc"; then
+                    KA_DISCOVERY_ROWS+=("#INCOMPLETE"$'\t'"command-$rc")
+                    return 0
+                fi
+                continue
+            fi
+            ka_konsole_clock_ms
+            if ((REPLY > deadline)); then
+                KA_DISCOVERY_ROWS+=('#INCOMPLETE'$'\t''budget')
+                return 0
+            fi
+            [[ -n $paths_output ]] || continue
+            while IFS= read -r path; do
+                [[ -n $path ]] || continue
+                # Each session costs up to three bounded D-Bus calls. Check the deadline
+                # after every one: a timed-out call must never be hidden by #COMPLETE.
+                ka_konsole_clock_ms
+                if ((REPLY > deadline)); then
+                    KA_DISCOVERY_ROWS+=('#INCOMPLETE'$'\t''budget')
+                    return 0
+                fi
+                if uuid=$(ka_konsole_get "$service" "$path" shellSessionId 2>/dev/null); then
+                    :
+                else
+                    rc=$?
+                    # A timeout is unknowable; any other error is this session closing
+                    # or not answering, which skips only this session.
+                    if ka_qdbus_status_is_timeout "$rc"; then
+                        KA_DISCOVERY_ROWS+=("#INCOMPLETE"$'\t'"command-$rc")
+                        return 0
+                    fi
+                    continue
+                fi
+                ka_konsole_clock_ms
+                if ((REPLY > deadline)); then
+                    KA_DISCOVERY_ROWS+=('#INCOMPLETE'$'\t''budget')
+                    return 0
+                fi
+                if term_pid=$(ka_konsole_get "$service" "$path" processId 2>/dev/null); then
+                    :
+                else
+                    rc=$?
+                    # A timeout is unknowable; any other error is this session closing
+                    # or not answering, which skips only this session.
+                    if ka_qdbus_status_is_timeout "$rc"; then
+                        KA_DISCOVERY_ROWS+=("#INCOMPLETE"$'\t'"command-$rc")
+                        return 0
+                    fi
+                    continue
+                fi
+                ka_konsole_clock_ms
+                if ((REPLY > deadline)); then
+                    KA_DISCOVERY_ROWS+=('#INCOMPLETE'$'\t''budget')
+                    return 0
+                fi
+                if fgpid=$(ka_konsole_get "$service" "$path" foregroundProcessId 2>/dev/null); then
+                    :
+                else
+                    rc=$?
+                    # A timeout is unknowable; any other error is this session closing
+                    # or not answering, which skips only this session.
+                    if ka_qdbus_status_is_timeout "$rc"; then
+                        KA_DISCOVERY_ROWS+=("#INCOMPLETE"$'\t'"command-$rc")
+                        return 0
+                    fi
+                    continue
+                fi
+                ka_konsole_clock_ms
+                if ((REPLY > deadline)); then
+                    KA_DISCOVERY_ROWS+=('#INCOMPLETE'$'\t''budget')
+                    return 0
+                fi
+                [[ -n $uuid && $term_pid =~ ^[0-9]+$ && $fgpid =~ ^[0-9]+$ ]] || continue
 
-            ka_classifier_from_process_tree_set "$fgpid" 2>/dev/null || continue
-            class=$REPLY
-            ai_type=${class%%$'\t'*}
-            ai_pid=${class#*$'\t'}
-            ka_proc_starttime_set "$ai_pid" || continue
-            ai_start=$REPLY
+                ka_classifier_from_process_tree_set "$fgpid" 2>/dev/null || continue
+                class=$REPLY
+                ai_type=${class%%$'\t'*}
+                ai_pid=${class#*$'\t'}
+                ka_proc_starttime_set "$ai_pid" || continue
+                ai_start=$REPLY
 
-            name_info=$(ka_konsole_session_name "$ai_pid" "$fgpid")
-            IFS=$'\t' read -r name cwd <<<"$name_info"
-            ka_konsole_process_label_set "$fgpid"
-            cmd=$REPLY
-            ka_single_line "$uuid";     s_uuid=$REPLY
-            ka_single_line "$ai_type";  s_type=$REPLY
-            ka_single_line "$service";  s_service=$REPLY
-            ka_single_line "$path";     s_path=$REPLY
-            ka_single_line "$cmd";      s_cmd=$REPLY
-            printf -v row '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
-                "$s_uuid" "$s_type" "$name" "$cwd" "$s_service" "$s_path" \
-                "$term_pid" "$fgpid" "$ai_pid" "$ai_start" "$s_cmd"
-            KA_DISCOVERY_ROWS+=("$row")
-        done < <(ka_konsole_session_paths "$service")
-    done < <(ka_qdbus_konsole_services)
+                name_info=$(ka_konsole_session_name "$ai_pid" "$fgpid")
+                IFS=$'\t' read -r name cwd <<<"$name_info"
+                ka_konsole_process_label_set "$fgpid"
+                cmd=$REPLY
+                ka_single_line "$uuid";     s_uuid=$REPLY
+                ka_single_line "$ai_type";  s_type=$REPLY
+                ka_single_line "$service";  s_service=$REPLY
+                ka_single_line "$path";     s_path=$REPLY
+                ka_single_line "$cmd";      s_cmd=$REPLY
+                printf -v row '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
+                    "$s_uuid" "$s_type" "$name" "$cwd" "$s_service" "$s_path" \
+                    "$term_pid" "$fgpid" "$ai_pid" "$ai_start" "$s_cmd"
+                KA_DISCOVERY_ROWS+=("$row")
+            done <<<"$paths_output"
+        done <<<"$services_output"
+    fi
     KA_DISCOVERY_ROWS+=('#COMPLETE')
 }
 

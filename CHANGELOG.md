@@ -5,6 +5,74 @@ All notable changes to Keep Alive Manager are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] - 2026-10-02
+
+
+A correctness, hardening, and visibility release on top of 1.1.0, from an eight-part audit
+and three proofreading rounds: event-scoped pending submits, position-aware AI detection,
+safer IPC/profile/log/installer paths, sanitized output, `keepalive configure`,
+read-only `keepalive status --json`, next-send and last-delivery visibility, and
+tag-driven releases.
+
+### Added
+
+- **CLI features:** add scriptable `configure UUID [options]`, read-only and
+  presence-free `status --json`, and published next-send/last-delivery data in list and
+  JSON output.
+- **Release tooling:** add tag-driven archive, checksum, release-note, and GitHub Release
+  automation, plus an idempotent version-bump helper and CI aggregate-summary checks.
+
+### Changed
+
+- **Scheduler correctness:** persist event-scoped pending-submit ownership (`MAIN`,
+  `SECONDARY_AUTO`, `SECONDARY_MANUAL`, or `STALE`), complete owed submits in order, and
+  commit a `STALE` owner before a CONFIGURE message swap; legacy persisted `1` loads as
+  `MAIN`.
+- **Discovery and classifier:** make built-in matching position-aware, bound Orca fields,
+  classify a complete shell transition as identity loss, and retain complete snapshots
+  when a backend pass or its budget fails.
+- **IPC/profile/logging hardening:** bound scalar reads in UTF-8 code points, protect
+  profile swaps and logs from unsafe paths, preserve successful command results when index
+  publication is deferred, warn on partial REFRESH results, and cancel timed-out requests
+  atomically (a rename-based claim, so a cancelled request is never executed late).
+- **Output and CLI strictness:** sanitize human output and notification markup, preserve
+  valid JSON/control semantics, reject empty UUIDs and extra/unknown arguments, and report
+  unknown logs with an actionable error.
+- **Performance:** keep hot-path sanitizer fronts and XDG safety checks fork-light while
+  retaining ownership, mode, and descriptor validation.
+
+### Fixed
+
+- **Installer/uninstaller safety:** canonicalize and validate managed roots and exact unit
+  entries, refuse unsafe symlink/world-writable paths, preserve rollback state, add opt-in
+  runtime purge, and keep installed documentation/package payloads consistent.
+- **CI and tests:** make PTY capture and aggregate summaries deterministic, add the final
+  IO/output/status/state-delivery regressions, and cover classifier option-value and
+  pending-submit compatibility cases. The suite grows from 1040 assertions in 27 files to
+  1519 assertions in 31 files.
+
+### Security
+
+- Human-facing terminal, log, profile, list, response, and notification text is sanitized
+  before display; malformed bytes, C0/C1 controls, bidi controls, and markup cannot become
+  terminal or notification control sequences.
+- Request, response, profile, state, log, runtime, and installer paths fail closed on
+  FIFOs, symlinks, unsafe ownership/modes, and unbounded values.
+
+### Performance
+
+- `keepalive list` sends one REFRESH instead of PING plus REFRESH (about 191 ms to 136 ms
+  median in an isolated benchmark), and the detail view caches its text and log tail
+  (about 5.7x less work per frame, now below the manager view).
+- The human-output sanitizer splits a tiny fast-path front from its byte scanner, because
+  Bash copies a function's whole body on every call: about 5x cheaper per call on the
+  TUI frame path.
+- The new installer-grade configuration path checks are memoized per operation and read
+  metadata with one `stat` per walk, so they add about 15 ms per CLI command instead of
+  the roughly 1.6 s an unmemoized version cost.
+- Measured on the development host after installing: daemon idle CPU 0.20% over 60 s
+  (1.1.0: 0.30%), 11 MB RSS.
+
 ## [1.1.0] - 2026-10-01
 
 Orca support, desktop-neutral systemd activation, a hardening pass, a resource pass that
@@ -204,3 +272,5 @@ consolidated here.
 
 [1.1.0]: https://github.com/TeleVoyant/keepalive/releases/tag/v1.1.0
 [1.0.0]: https://github.com/TeleVoyant/keepalive/releases/tag/v1.0.0
+
+[1.1.1]: https://github.com/TeleVoyant/keepalive/releases/tag/v1.1.1

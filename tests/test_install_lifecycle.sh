@@ -241,9 +241,9 @@ run_install_user "$TEST_ROOT/scripts/install.sh" >"$CASE_ROOT/rollback.out" \
     2>"$CASE_ROOT/rollback.err" || rc=$?
 assert_eq 55 "$rc" 'activation failure makes the transactional upgrade fail'
 assert_true 'failed upgrade restores the previous installed source bytes' \
-    cmp -s "$CASE_ROOT/expected-readme" "$installed_root/README.md"
+    files_equal "$CASE_ROOT/expected-readme" "$installed_root/README.md"
 assert_true 'failed upgrade restores the previous service unit bytes' \
-    cmp -s "$CASE_ROOT/expected-service" "$XDG_CONFIG_HOME/systemd/user/keepalive.service"
+    files_equal "$CASE_ROOT/expected-service" "$XDG_CONFIG_HOME/systemd/user/keepalive.service"
 assert_eq "$HOME/custom-old-command" "$(readlink "$HOME/.local/bin/keepalive")" \
     'failed upgrade restores the previous command symlink target'
 assert_eq enabled "$(<"$FAKE_SYSTEMD_STATE_DIR/enable-state.keepalive.socket")" \

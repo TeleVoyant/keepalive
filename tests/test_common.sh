@@ -116,6 +116,9 @@ PROBE_KNOB=abc; ka_tunable PROBE_KNOB 7 2>/dev/null; assert_eq 7 "$REPLY" 'a non
 PROBE_KNOB=2s;  ka_tunable PROBE_KNOB 7 2>/dev/null; assert_eq 7 "$REPLY" 'a numeric-looking knob falls back'
 PROBE_KNOB=0;   ka_tunable PROBE_KNOB 7 2>/dev/null; assert_eq 7 "$REPLY" 'zero falls back'
 PROBE_KNOB=-3;  ka_tunable PROBE_KNOB 7 2>/dev/null; assert_eq 7 "$REPLY" 'a negative knob falls back'
+PROBE_KNOB=999999999; ka_tunable PROBE_KNOB 7 2>/dev/null; assert_eq 999999999 "$REPLY" 'a nine-digit knob remains bounded and is accepted'
+PROBE_KNOB=1000000000; ka_tunable PROBE_KNOB 7 2>/dev/null; assert_eq 7 "$REPLY" 'a ten-digit knob falls back before arithmetic overflow'
+PROBE_KNOB=9223372036854775808; ka_tunable PROBE_KNOB 7 2>/dev/null; assert_eq 7 "$REPLY" 'a signed-64-bit overflow knob falls back'
 unset PROBE_KNOB; ka_tunable PROBE_KNOB 7 2>/dev/null; assert_eq 7 "$REPLY" 'an unset knob uses the default'
 
 # Captured through files, not command substitution: a subshell would discard the

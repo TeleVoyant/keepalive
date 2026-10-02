@@ -24,10 +24,38 @@ producing a degenerate loop - `KEEPALIVE_HEALTH_INTERVAL=2s` will not spin the d
 
 Two variables are deliberately outside that helper because they are not integers:
 `KEEPALIVE_SEND_GAP` is a decimal duration and is range-checked separately, and
-`KEEPALIVE_SUBMIT_SEQ` is an arbitrary string.
+`KEEPALIVE_SUBMIT_SEQ` is an arbitrary string. Per-target main and secondary intervals
+use a stricter schedule check: integer seconds from `1` through `999999999` inclusive.
 
 Backend switches accept exactly `auto`, `1`, or `0`. An invalid value warns and behaves
 as `auto`.
+
+## Read-only status polling
+
+`keepalive status --json` reads only the validated `service.state` and `index.tsv` snapshots;
+it does not send IPC, activate `keepalive.socket`, or write anything - not even the
+client-presence stamp, so a frequent status-bar poll leaves the daemon on its idle
+discovery cadence. Unattended, the daemon still republishes the index every
+`KEEPALIVE_STATUS_INTERVAL` (15 s), and each target carries absolute
+`next_main_at`/`next_secondary_at` times, so a poller can show accurate countdowns;
+`index.age_seconds` says how fresh the snapshot is. It needs no `HOME` or configuration
+directory. When no daemon is running it exits successfully with `service.online: false`
+and an empty (or last readable) target snapshot. `service.online` is true only when the
+recorded PID is still the same daemon process (its start time is recorded).
+
+For example, a tmux status bar can show active-target count and index staleness:
+
+```tmux
+set -g status-right '#(keepalive status --json 2>/dev/null | jq -r "\"KA \(.targets | map(select(.status == \\\"ACTIVE\\\")) | length) (\(.index.age_seconds // \"?\")s)\"")'
+```
+
+`configure UUID` is the noninteractive target editor. Repeat `--message` to replace the
+contiguous main-message rotation; pass `--main-interval`, `--secondary-enabled`,
+`--secondary-interval`, `--secondary-message`, `--notifications`, and
+`--delivery-mode` for individual settings. Intervals must be `1..999999999` seconds.
+Omitted fields are copied from the target checkpoint, timers reset as with the wizard, and
+the persistent default profile is updated unless `--no-profile` is supplied (`--profile`
+explicitly selects the default behavior).
 
 ## Terminal backends
 
@@ -142,9 +170,9 @@ These are not Keep Alive Manager variables, but they affect the client:
 | `TERM` | `dumb` or unset degrades to the plainest rendering path. |
 
 The equivalent flags are `--no-icons` (drop Nerd Font glyphs), `--no-color` (drop ANSI
-color), and `--ascii` (drop both, plus box-drawing characters). Each is a complete
-rendering path rather than a degraded one; see the Presentation modes section of the
-[README](../README.md).
+color), and `--ascii` (use ASCII glyphs, including the frame; color is retained unless
+`--no-color` or `NO_COLOR` is also set). Each is a complete rendering path rather than a
+degraded one; see the Presentation modes section of the [README](../README.md).
 
 ## Applying to the daemon
 

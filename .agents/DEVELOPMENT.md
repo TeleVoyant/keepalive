@@ -1,5 +1,28 @@
 # Development and Operations Memory
 
+## Uncommitted fix round on top of v1.1.0 — 2026-10-02
+
+This snapshot is the final documentation/fix round on top of the `v1.1.0` release; it is
+not a version bump. The aggregate suite currently passes **31 test files and 1519
+assertions** (`./tests/run.sh`), and `./scripts/dev-check.sh` is the final gate before
+shipping the patch.
+
+Engineering lessons from this round:
+
+- Bash copies a function's whole body on every call, so keep hot-path fronts tiny. Split
+  the printable wrapper from the scanner (for example, `ka_sanitize_human_set` should
+  fast-path ordinary values and delegate non-ASCII work to `ka_sanitize_human_scan_set`).
+- A `local LC_ALL=...` assignment pays `setlocale` cost on function entry and return;
+  keep locale changes out of the common ASCII front and measure them before moving them
+  into a loop.
+- Bash byte ordinals can be sign-extended by musl; mask byte values with `& 255` before
+  comparing or converting them.
+- Avoid `cmd | head` under `pipefail`: `head` can close the pipe early and turn a correct
+  producer into status 141. Capture all output, then select the first line in Bash.
+- When adding validation to a startup path, measure fork counts with `bash -x` and
+  `strace`, not just wall time. The XDG safety/memoization pass reduced the representative
+  CLI path from about 1677 ms to about 100 ms while retaining ownership/mode checks.
+
 ## Performance and update-reload pass on 2026-10-01
 
 Scope: resource optimization of the daemon, clients, and unit, plus keeping running
@@ -8,8 +31,9 @@ primary worktree; research, proofreading, test writing, and benchmarking were do
 Orca-supervised Pi workers (`pi --model openai-codex/gpt-5.6-luna --thinking max`; the
 `openai/` provider has no credentials on this host). Released as 1.1.0 (tag `v1.1.0`).
 
-Validation at the end: `./scripts/dev-check.sh` -> 27 test files, 1040 assertions, 0
-failures (one ownership case skips unless root). Four new suites:
+Release-baseline validation at the end of this pass: `./scripts/dev-check.sh` -> 27 test
+files, 1040 assertions, 0 failures (one ownership case skips unless root). The current
+2026-10-02 round is 31 files/1519 assertions. Four new suites:
 `test_loop_pacing.sh` (60), `test_atomic_io.sh` (108), `test_fork_free_helpers.sh` (95),
 `test_update_reload.sh` (83); `test_systemd_units.sh` grew to 16. ShellCheck (container,
 `koalaman/shellcheck-alpine`) showed no new findings versus the pre-change tree.
@@ -56,8 +80,9 @@ countdown carried over (1422 -> 1416 s).
 
 ## Final robustness pass on 2026-10-01
 
-At that pass the worktree had 23 test files and 683 assertions (now 27 and 1037; see the
-2026-10-01 performance section above). New invariant-focused suites
+At that pass the worktree had 23 test files and 683 assertions (the release baseline later
+reached 27 and 1040; the current 2026-10-02 snapshot is 31 and 1519). New
+invariant-focused suites
 cover runtime path ownership/symlinks, checkpoint and index failure propagation, installer
 and uninstaller transaction boundaries, versioned secondary prompts, client configuration
 seeding, and recovery ordering. ShellCheck 0.10.0 was run in a container because it is not
@@ -315,9 +340,13 @@ systemctl --user try-restart keepalive.service
 | Test | Actual focus |
 |---|---|
 | `test_common.sh` | Duration, safe IDs, literal metacharacters, no-newline scalar read, injectable monotonic clock. |
+| `test_io_hardening.sh` | Read-only profile/scalar handling, FIFO/type bounds, log symlink safety, and paced stale-index publication retries (63 assertions). |
+| `test_output_safety.sh` | Human/JSON sanitization, UTF-8 truncation, CLI arity/output safety, Orca bounds, and monotonic discovery deadlines (80 assertions). |
+| `test_cli_status.sh` | Read-only/presence-free status JSON, one-refresh list behavior, index compatibility, detail cache, release tooling, and runner checks (74 assertions). |
 | `test_classifier.sh` | Claude/Gemini/Aider signatures, shell negative, ancestry basics. |
 | `test_profile.sh` | Defaults, profile update, literal stored message, contiguous numbering. |
 | `test_state.sh` | Mutation-free malformed CREATE/CONFIGURE rejection, create, pause/resume, recorded refusal reasons, snapshot-backed health validation, transient-failure strike budget and recovery, unavailable, replacement UUID, cleanup. |
+| `test_state_delivery.sh` | CONFIGURE crash/rollback recovery, pending-submit ownership ordering, delivery metadata persistence/bounds, legacy owner compatibility, and bounded secondary companions (110 assertions). |
 | `test_scheduler.sh` | Main rotation, transport/validation timeout failures, enter-only preservation, timer independence, long/backward-gap preservation. |
 | `test_recovery.sh` | Valid same-login recovery with unchanged durations and transient validation deferral. |
 | `test_recovery_validation.sh` | Strict checkpoint validation, range/message/symlink rejection, quarantine reasons/log preservation. |
@@ -488,10 +517,10 @@ deliberately retains `${XDG_CONFIG_HOME:-$HOME/.config}/keepalive`.
 
 ## Packaging
 
-`./scripts/package.sh [OUT.zip]` deletes an existing output path, zips the project
-from its parent directory while excluding `.git`, ZIPs, Python caches, and
-`.DS_Store`, then prints `sha256sum`. The new `.agents/` directory is not excluded
-and will be included unless the packaging policy is changed.
+`./scripts/package.sh [OUT.zip]` deletes an existing output path, builds the allowlisted
+release payload from the project parent while excluding `.git`, `.agents/`, `.github/`,
+ZIPs, Python caches, and `.DS_Store`, then prints `sha256sum`. Tag releases additionally
+use the export-filtered archive workflow and reject forbidden private paths.
 
 ## Documentation relationships
 

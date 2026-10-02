@@ -5,8 +5,11 @@
 # Daemon-side validators are the only place that knows *why* an operation failed;
 # without this the reason reached the journal and clients got a fixed generic string.
 ka_error() {
-    KA_LAST_ERROR=$*
-    printf 'keepalive: ERROR: %s\n' "$*" >&2
+    local message=$* previous_reply=${REPLY-}
+    KA_LAST_ERROR=$message
+    ka_sanitize_human_set "$message"
+    printf 'keepalive: ERROR: %s\n' "$REPLY" >&2
+    REPLY=$previous_reply
 }
 
 # Role: Clear the recorded failure reason before starting a new operation.
@@ -16,17 +19,18 @@ ka_error_reset() {
 
 # Role: Print a warning message to stderr without terminating the caller.
 ka_warn() {
-    printf 'keepalive: warning: %s\n' "$*" >&2
+    local message=$* previous_reply=${REPLY-}
+    ka_sanitize_human_set "$message"
+    printf 'keepalive: warning: %s\n' "$REPLY" >&2
+    REPLY=$previous_reply
 }
 
 # Role: Print an informational message to stderr for maintenance/debug commands.
 ka_info() {
-    printf 'keepalive: %s\n' "$*" >&2
-}
-
-# Role: Test whether an executable command is available in PATH.
-ka_has_command() {
-    command -v "$1" >/dev/null 2>&1
+    local message=$* previous_reply=${REPLY-}
+    ka_sanitize_human_set "$message"
+    printf 'keepalive: %s\n' "$REPLY" >&2
+    REPLY=$previous_reply
 }
 
 # Role: Collapse a string to one TSV-safe line in REPLY.
@@ -131,14 +135,6 @@ ka_now_full() {
     printf '%(%F %T)T' -1
 }
 
-# Role: Clamp an integer value to an inclusive minimum and maximum.
-ka_clamp() {
-    local value=$1 min=$2 max=$3
-    ((value < min)) && value=$min
-    ((value > max)) && value=$max
-    printf '%d' "$value"
-}
-
 # Names already reported as misconfigured, so one bad value warns once rather than on
 # every loop iteration.
 declare -gA KA_TUNABLE_WARNED=()
@@ -153,13 +149,15 @@ declare -gA KA_TUNABLE_WARNED=()
 # log to say so. Every knob goes through here instead.
 ka_tunable() {
     local name=$1 fallback=$2 value=${!1:-}
-    if ka_is_positive_int "$value"; then
+    # Nine decimal digits keep second and millisecond knobs safely inside signed
+    # arithmetic even when callers add or scale them before the next loop wake.
+    if [[ $value =~ ^[1-9][0-9]{0,8}$ ]]; then
         REPLY=$value
         return 0
     fi
     if [[ -n $value && -z ${KA_TUNABLE_WARNED[$name]+x} ]]; then
         KA_TUNABLE_WARNED[$name]=1
-        ka_warn "$name=$value is not a positive integer; using the default of $fallback"
+        ka_warn "$name=$value is not a positive integer of at most 9 digits; using the default of $fallback"
     fi
     REPLY=$fallback
 }
@@ -172,6 +170,22 @@ ka_is_uint() {
 # Role: Validate that a value is a strictly positive base-10 integer.
 ka_is_positive_int() {
     [[ ${1-} =~ ^[1-9][0-9]*$ ]]
+}
+
+# Role: Validate a schedule interval in seconds: 1..999999999 (about 31 years).
+# A longer decimal wraps in Bash's 64-bit arithmetic once scaled or added to a clock, and a
+# wrapped interval fires immediately instead of never.
+ka_is_interval() {
+    [[ ${1-} =~ ^[1-9][0-9]{0,8}$ ]]
+}
+
+# Role: Put the number of UTF-8 code points in a value in REPLY, independent of the locale.
+# Continuation bytes (0x80-0xBF) are not counted, so a client and the daemon agree on a
+# message's length whatever locale each runs in; ${#value} counts bytes under LC_ALL=C.
+ka_utf8_length_set() {
+    local LC_ALL=C value=${1-}
+    value=${value//[$'\x80'-$'\xbf']/}
+    REPLY=${#value}
 }
 
 # Role: Format seconds as MM:SS or HH:MM:SS without external commands.
@@ -368,33 +382,327 @@ ka_read_first_line() {
     fi
 }
 
+# Role: Open one request/profile scalar without following a planted symlink or FIFO.
+# Opening read-write is deliberate: it cannot block on a FIFO, and the descriptor check
+# closes the check-then-open race before any bytes are consumed.
+ka_request_file_open() {
+    local path=$1 fd
+    KA_REQUEST_FD=''
+    [[ -f $path && ! -L $path && -O $path ]] || return 1
+    if ! { exec {fd}<>"$path"; } 2>/dev/null; then
+        # A read-only (0400) owned file refuses <>. Status 2 sends the caller to a bounded
+        # read instead of a plain < open, which would block forever if a FIFO were swapped
+        # in after the checks above.
+        [[ -f $path && ! -L $path && -O $path && -r $path && ! -w $path ]] && return 2
+        return 1
+    fi
+    if [[ ! -f /dev/fd/$fd || -L $path || ! -O $path || ! $path -ef /dev/fd/$fd ]]; then
+        { exec {fd}>&-; } 2>/dev/null || true
+        return 1
+    fi
+    KA_REQUEST_FD=$fd
+}
+
+# Role: Read one bounded logical-line request/profile scalar into REPLY.
+# Accept the conventional optional final newline but reject embedded/multiple lines and
+# oversized values before handing untrusted bytes to arithmetic or a transport. The limit
+# is in UTF-8 code points and the read is in bytes, so the result does not depend on the
+# caller's locale (a C-locale client must accept what a UTF-8 daemon accepts).
+ka_request_read_scalar() {
+    local path=$1 max=${2:-4096} fd raw='' extra='' value='' budget status rc
+    local LC_ALL=C
+    [[ $max =~ ^[1-9][0-9]{0,8}$ ]] || return 1
+    # A code point is at most four UTF-8 bytes; one more byte allows the final newline.
+    budget=$((max * 4 + 1))
+    if ka_request_file_open "$path"; then
+        fd=$KA_REQUEST_FD
+        IFS= read -r -N "$budget" raw <&"$fd" || true
+        IFS= read -r -N 1 extra <&"$fd" || true
+        { exec {fd}>&-; } 2>/dev/null || true
+    else
+        rc=$?
+        ((rc == 2)) || return 1
+        # A read-only file: read it in a deadline-bounded child, then re-check the path,
+        # so a FIFO swapped in after the checks costs a refusal, never a wedged daemon.
+        raw=$(timeout 2 head -c "$((budget + 1))" -- "$path" 2>/dev/null; printf '/%s' "$?")
+        status=${raw##*/}
+        raw=${raw%/*}
+        [[ $status == 0 && -f $path && ! -L $path && -O $path ]] || return 1
+        if ((${#raw} > budget)); then
+            extra=${raw:budget}
+            raw=${raw:0:budget}
+        fi
+    fi
+    [[ -z $extra ]] || return 1
+    if [[ $raw == *$'\n'* ]]; then
+        [[ ${raw##*$'\n'} == '' && ${raw%$'\n'} != *$'\n'* ]] || return 1
+        value=${raw%$'\n'}
+    else
+        value=$raw
+    fi
+    ka_utf8_length_set "$value"
+    ((REPLY <= max)) || return 1
+    REPLY=$value
+}
+
+# Role: Copy one bounded request/profile scalar through an atomic, descriptor-held write.
+ka_request_copy_file() {
+    local source=$1 destination=$2 max=${3:-4096}
+    ka_request_read_scalar "$source" "$max" || return 1
+    ka_atomic_write_value "$destination" "$REPLY"
+}
+
+# Role: Validate a private request/profile directory before traversing its children.
+ka_request_validate_dir() {
+    local path=$1 canonical
+    [[ -d $path && ! -L $path && -O $path ]] || return 1
+    canonical=$(readlink -f -- "$path") || return 1
+    [[ $canonical == "$path" ]]
+}
+
 # Role: Write one scalar value followed by a newline using atomic replacement.
 ka_write_scalar() {
     local path=$1 value=${2-}
     ka_atomic_write_value "$path" "$value"$'\n'
 }
 
-# Role: Escape one string for embedding in JSON output.
+# Sanitized results of non-ASCII inputs, so a redrawn row is not re-scanned every frame.
+declare -gA KA_SANITIZE_CACHE=()
+KA_SANITIZE_CACHE_MAX=256
+
+# Role: Sanitize untrusted human-facing text without damaging valid UTF-8.
+#
+# Bash's [[:cntrl:]] classification is locale-dependent: in a UTF-8 locale it misses
+# both raw C1 bytes and the UTF-8 encoding of U+0080..U+009F, while forcing LC_ALL=C
+# would mistake continuation bytes in valid UTF-8 for controls. Scan bytes here, retain
+# only structurally valid UTF-8 sequences, and remove C0, DEL, C1, and bidi overrides.
+# The overwhelmingly common printable-ASCII case avoids the scan entirely; this helper
+# returns through REPLY so TUI redraw paths do not fork through command substitution.
+ka_sanitize_human_set() {
+    # This front stays tiny on purpose: Bash copies a function's whole body on every
+    # call, so the common cases must not pay for the byte scanner below. Both run
+    # before any C locale is set (assigning LC_ALL re-runs setlocale on entry and
+    # return). Bash 5 matches the  -~ range by code point (globasciiranges), so the
+    # test means the same in any locale, and an associative lookup is locale-free.
+    if [[ ${1-} != *[!$' -~']* ]]; then
+        REPLY=${1-}
+        return 0
+    fi
+    # The TUI re-renders the same rows every second, and Orca titles routinely carry
+    # non-ASCII spinner glyphs: remember each distinct input's result.
+    if [[ -n ${KA_SANITIZE_CACHE[$1]+x} ]]; then
+        REPLY=${KA_SANITIZE_CACHE[$1]}
+        return 0
+    fi
+    ka_sanitize_human_scan_set "$1"
+}
+
+# Role: Byte-scan one non-ASCII value for ka_sanitize_human_set and cache the result.
+ka_sanitize_human_scan_set() {
+    local value=$1
+    local LC_ALL=C
+    local out='' index=0
+    local length=${#value}
+    local byte second third fourth lead second_ord third_ord fourth_ord
+    local valid consumed drop
+    # Every byte ordinal below is masked with 255: glibc reports a C-locale high byte as
+    # the byte itself, but musl reports 0xDF00 plus the byte, and only the low eight
+    # bits are the byte on both.
+    while ((index < length)); do
+        byte=${value:index:1}
+        printf -v lead '%d' "'$byte"
+        lead=$((lead & 255))
+        if ((lead == 9 || lead == 10 || lead == 13)); then
+            # Keep line-oriented human output readable while removing whitespace controls.
+            out+=' '
+            ((index += 1))
+            continue
+        fi
+        if ((lead <= 31 || lead == 127 || (lead >= 128 && lead <= 159))); then
+            ((index += 1))
+            continue
+        fi
+
+        valid=0
+        consumed=1
+        drop=0
+        if ((lead >= 194 && lead <= 223 && index + 1 < length)); then
+            second=${value:index + 1:1}
+            printf -v second_ord '%d' "'$second"
+            second_ord=$((second_ord & 255))
+            if ((second_ord >= 128 && second_ord <= 191)); then
+                valid=1
+                consumed=2
+                # C2 80..9F encodes U+0080..U+009F, not a continuation byte to keep.
+                ((lead == 194 && second_ord <= 159)) && drop=1
+            fi
+        elif ((lead >= 224 && lead <= 239 && index + 2 < length)); then
+            second=${value:index + 1:1}; third=${value:index + 2:1}
+            printf -v second_ord '%d' "'$second"
+            second_ord=$((second_ord & 255))
+            printf -v third_ord '%d' "'$third"
+            third_ord=$((third_ord & 255))
+            if (( ((lead == 224 && second_ord >= 160 && second_ord <= 191) \
+                || (lead == 237 && second_ord >= 128 && second_ord <= 159) \
+                || ((lead >= 225 && lead <= 236 || lead >= 238 && lead <= 239) \
+                    && second_ord >= 128 && second_ord <= 191)) \
+                && third_ord >= 128 && third_ord <= 191 )); then
+                valid=1
+                consumed=3
+                # U+202A..U+202E and U+2066..U+2069 are bidi overrides/isolate marks.
+                if ((lead == 226 && second_ord == 128 \
+                    && third_ord >= 170 && third_ord <= 174)) \
+                    || ((lead == 226 && second_ord == 129 \
+                    && third_ord >= 166 && third_ord <= 169)); then
+                    drop=1
+                fi
+            fi
+        elif ((lead >= 240 && lead <= 244 && index + 3 < length)); then
+            second=${value:index + 1:1}; third=${value:index + 2:1}; fourth=${value:index + 3:1}
+            printf -v second_ord '%d' "'$second"
+            second_ord=$((second_ord & 255))
+            printf -v third_ord '%d' "'$third"
+            third_ord=$((third_ord & 255))
+            printf -v fourth_ord '%d' "'$fourth"
+            fourth_ord=$((fourth_ord & 255))
+            if (( ((lead == 240 && second_ord >= 144 && second_ord <= 191) \
+                || (lead >= 241 && lead <= 243 && second_ord >= 128 && second_ord <= 191) \
+                || (lead == 244 && second_ord >= 128 && second_ord <= 143)) \
+                && third_ord >= 128 && third_ord <= 191 \
+                && fourth_ord >= 128 && fourth_ord <= 191 )); then
+                valid=1
+                consumed=4
+            fi
+        fi
+
+        if ((valid == 1)); then
+            ((drop == 0)) && out+=${value:index:consumed}
+            ((index += consumed))
+        else
+            # Replace malformed high bytes so a human sink never receives invalid UTF-8;
+            # any raw control byte was already removed above.
+            if ((lead >= 128)); then out+=$'\xef\xbf\xbd'; else out+=$byte; fi
+            ((index += 1))
+        fi
+    done
+    ((${#KA_SANITIZE_CACHE[@]} < KA_SANITIZE_CACHE_MAX)) || KA_SANITIZE_CACHE=()
+    KA_SANITIZE_CACHE[$value]=$out
+    REPLY=$out
+}
+
+# Role: Print sanitized untrusted human-facing text for one-off maintenance sinks.
+ka_sanitize_human() {
+    ka_sanitize_human_set "${1-}"
+    printf '%s' "$REPLY"
+}
+
+# Role: Escape one string for embedding in JSON output without silently dropping controls.
+# Valid UTF-8 stays intact; C0, DEL, C1, and malformed high bytes use JSON \u escapes so
+# the result remains valid JSON and faithfully represents otherwise unsafe input.
 ka_json_escape() {
-    local value=${1-}
-    value=${value//\\/\\\\}
-    value=${value//\"/\\\"}
-    value=${value//$'\n'/\\n}
-    value=${value//$'\r'/\\r}
-    value=${value//$'\t'/\\t}
-    value=${value//[[:cntrl:]]/}
-    printf '%s' "$value"
+    local LC_ALL=C
+    local value=${1-} out='' index=0
+    local length=${#value}
+    local byte second third fourth lead second_ord third_ord fourth_ord
+    local valid consumed escaped unicode
+    while ((index < length)); do
+        byte=${value:index:1}
+        printf -v lead '%d' "'$byte"
+        lead=$((lead & 255))
+        case $lead in
+            92) out+=$'\\\\'; ((index += 1)); continue ;;
+            34) out+='\"'; ((index += 1)); continue ;;
+            8) out+='\b'; ((index += 1)); continue ;;
+            9) out+='\t'; ((index += 1)); continue ;;
+            10) out+='\n'; ((index += 1)); continue ;;
+            12) out+='\f'; ((index += 1)); continue ;;
+            13) out+='\r'; ((index += 1)); continue ;;
+            0|1|2|3|4|5|6|7|11|14|15|16|17|18|19|20|21|22|23|24|25|26|27|28|29|30|31|127|128|129|130|131|132|133|134|135|136|137|138|139|140|141|142|143|144|145|146|147|148|149|150|151|152|153|154|155|156|157|158|159)
+                printf -v escaped '\\u%04x' "$lead"
+                out+=$escaped
+                ((index += 1))
+                continue
+                ;;
+        esac
+
+        valid=0
+        consumed=1
+        unicode=0
+        if ((lead >= 194 && lead <= 223 && index + 1 < length)); then
+            second=${value:index + 1:1}
+            printf -v second_ord '%d' "'$second"
+            second_ord=$((second_ord & 255))
+            if ((second_ord >= 128 && second_ord <= 191)); then
+                valid=1
+                consumed=2
+            fi
+        elif ((lead >= 224 && lead <= 239 && index + 2 < length)); then
+            second=${value:index + 1:1}; third=${value:index + 2:1}
+            printf -v second_ord '%d' "'$second"
+            second_ord=$((second_ord & 255))
+            printf -v third_ord '%d' "'$third"
+            third_ord=$((third_ord & 255))
+            if (( ((lead == 224 && second_ord >= 160 && second_ord <= 191) \
+                || (lead == 237 && second_ord >= 128 && second_ord <= 159) \
+                || ((lead >= 225 && lead <= 236 || lead >= 238 && lead <= 239) \
+                    && second_ord >= 128 && second_ord <= 191)) \
+                && third_ord >= 128 && third_ord <= 191 )); then
+                valid=1
+                consumed=3
+            fi
+        elif ((lead >= 240 && lead <= 244 && index + 3 < length)); then
+            second=${value:index + 1:1}; third=${value:index + 2:1}; fourth=${value:index + 3:1}
+            printf -v second_ord '%d' "'$second"
+            second_ord=$((second_ord & 255))
+            printf -v third_ord '%d' "'$third"
+            third_ord=$((third_ord & 255))
+            printf -v fourth_ord '%d' "'$fourth"
+            fourth_ord=$((fourth_ord & 255))
+            if (( ((lead == 240 && second_ord >= 144 && second_ord <= 191) \
+                || (lead >= 241 && lead <= 243 && second_ord >= 128 && second_ord <= 191) \
+                || (lead == 244 && second_ord >= 128 && second_ord <= 143)) \
+                && third_ord >= 128 && third_ord <= 191 \
+                && fourth_ord >= 128 && fourth_ord <= 191 )); then
+                valid=1
+                consumed=4
+            fi
+        fi
+        if ((valid == 1)); then
+            # C2 80..9F is U+0080..U+009F; escape the code point, not its UTF-8 bytes.
+            if ((lead == 194 && second_ord <= 159)); then
+                unicode=$second_ord
+            elif ((lead == 226 && second_ord == 128 && third_ord >= 170 && third_ord <= 174)); then
+                unicode=$((0x2000 + (second_ord - 128) * 64 + third_ord - 128))
+            elif ((lead == 226 && second_ord == 129 && third_ord >= 166 && third_ord <= 169)); then
+                unicode=$((0x2000 + (second_ord - 128) * 64 + third_ord - 128))
+            fi
+            if ((unicode > 0)); then
+                printf -v escaped '\\u%04x' "$unicode"
+                out+=$escaped
+            else
+                out+=${value:index:consumed}
+            fi
+            ((index += consumed))
+        else
+            # An invalid high byte cannot appear raw in JSON; retain its byte value as a
+            # four-digit escape instead of dropping it or emitting malformed UTF-8.
+            if ((lead >= 128)); then
+                printf -v escaped '\\u%04x' "$lead"
+                out+=$escaped
+            else
+                out+=$byte
+            fi
+            ((index += 1))
+        fi
+    done
+    printf '%s' "$out"
 }
 
 # Role: Put an untrusted process label with every control character removed in REPLY.
-# The previous version removed only a named handful, despite a comment claiming
-# otherwise; [[:cntrl:]] covers all of C0, DEL, and C1 in a UTF-8 locale.
+# This is the compatibility name used by backend discovery; the shared sanitizer also
+# handles raw and UTF-8-encoded C1 bytes without corrupting valid multibyte labels.
 ka_strip_controls_set() {
-    local value=${1-}
-    value=${value//$'\r'/ }
-    value=${value//$'\n'/ }
-    value=${value//$'\t'/ }
-    REPLY=${value//[[:cntrl:]]/}
+    ka_sanitize_human_set "${1-}"
 }
 
 # Role: Remove every control character from untrusted process labels before rendering.

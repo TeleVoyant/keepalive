@@ -3,7 +3,7 @@
 # This one command acts as the TUI client, maintenance CLI, and hidden systemd daemon.
 set -Eeuo pipefail
 
-KEEPALIVE_VERSION='1.1.0'
+KEEPALIVE_VERSION='1.1.1'
 export KEEPALIVE_VERSION
 
 # Resolve symlinks so an installed ~/.local/bin/keepalive can find its lib/ directory.
@@ -45,13 +45,14 @@ Usage:
   keepalive [--no-icons] [--no-color] [--ascii]   Open attachable TUI
   keepalive list [--json]                         List discovered/managed AI sessions
   keepalive create UUID                           Create a keep-alive using the saved profile
+  keepalive configure UUID [options]              Configure one existing keep-alive
   keepalive delete UUID                           Remove one keep-alive and its history
   keepalive pause UUID | resume UUID              Freeze or resume one keep-alive
   keepalive send UUID [secondary]                 Send a keep-alive immediately
   keepalive reset UUID                            Reset the main countdown
   keepalive enter UUID                            Send one Enter, then resume MESSAGE+ENTER
   keepalive mode UUID [message-enter|enter-only]  Set or toggle delivery mode
-  keepalive status                                Check user service availability
+  keepalive status [--json]                     Check service/index snapshots (JSON is read-only)
   keepalive refresh                               Force immediate terminal discovery
   keepalive profile                               Show the single persistent default profile
   keepalive logs UUID                             Print one target's runtime event log
@@ -63,9 +64,21 @@ Usage:
 Internal/systemd command:
   keepalive --service                             Run the persistent user daemon
 
+Configure options (intervals are seconds; repeat --message for a rotation):
+  --message TEXT  --main-interval SECONDS  --secondary-enabled 0|1
+  --secondary-interval SECONDS  --secondary-message TEXT  --notifications 0|1
+  --delivery-mode message-enter|enter-only  --profile | --no-profile
+Options not supplied keep the target's current values. The profile is updated by
+  default, like the TUI wizard; use --no-profile to change only this target.
+
 Presentation controls affect only the current TUI client. They never change daemon state.
 NO_COLOR=1 is also honored.
 HELP
+}
+
+# Role: Print a command-specific usage diagnostic before the CLI returns status 2.
+ka_cli_usage_error() {
+    ka_error "usage: $1"
 }
 
 # Role: Initialize presentation flags shared by normal TUI commands.
@@ -85,26 +98,76 @@ ka_cli_ensure_service() {
     [[ $response == OK$'\t'* ]] || { ka_error "service unavailable: ${response#*$'\t'}"; return 1; }
 }
 
+# Role: Submit exactly one discovery refresh for list output and preserve its error contract.
+ka_cli_refresh_for_list() {
+    local response
+    response=$(ka_ipc_call REFRESH '' 2>/dev/null || true)
+    [[ $response == OK$'\t'* ]] || {
+        ka_error "service unavailable: ${response#*$'\t'}"
+        return 1
+    }
+    # stderr, so list --json output stays a clean document.
+    [[ $response != *'(warning:'* ]] || ka_warn "${response#*$'\t'}"
+}
+
+# Role: Shorten one published wall-clock deadline for the compact text table.
+ka_cli_wall_short_set() {
+    local value=${1-}
+    if [[ -n $value ]]; then
+        value=${value#* }
+        REPLY=${value:0:5}
+    else
+        REPLY='—'
+    fi
+}
+
+# Role: Build the compact last-delivery summary used by the plain list.
+ka_cli_last_delivery_set() {
+    local time=${1-} event=${2-} result=${3-} detail=${4-} summary
+    if [[ -z $event ]]; then
+        REPLY='never'
+        return 0
+    fi
+    summary="$event $result ${time#* } $detail"
+    ka_tui_truncate_set "$summary" 24
+}
+
 # Role: Print a stable plain-text session list useful for scripts and maintenance.
 ka_cli_list() {
-    ka_cli_ensure_service || return
-    ka_ipc_call REFRESH '' >/dev/null 2>&1 || true
+    ka_cli_refresh_for_list || return
     ka_tui_load_index
-    printf '%-3s %-8s %-16s %-24s %-13s %-10s %-10s\n' '#' BACKEND TYPE SESSION STATE MAIN NUDGE
-    local i main nudge
+    printf '%-3s %-8s %-16s %-24s %-13s %-14s %-14s %-24s\n' \
+        '#' BACKEND TYPE SESSION STATE MAIN NUDGE 'LAST DELIVERY'
+    local i main nudge last
     for i in "${!KA_R_UUID[@]}"; do
-        if [[ ${KA_R_STATUS[$i]} == ACTIVE || ${KA_R_STATUS[$i]} == PAUSED ]]; then
-            main=$(ka_format_duration "${KA_R_MAIN_REMAIN[$i]}")
-            [[ ${KA_R_SEC_ENABLED[$i]} == 1 ]] && nudge=$(ka_format_duration "${KA_R_SEC_REMAIN[$i]}") || nudge='—'
-        else main='—'; nudge='—'; fi
-        printf '%-3d %-8s %-16s %-24s %-13s %-10s %-10s\n' "$((i + 1))" "${KA_R_BACKEND[$i]}" \
-            "${KA_R_TYPE[$i]}" "$(ka_tui_truncate "${KA_R_NAME[$i]}" 24)" \
-            "${KA_R_STATUS[$i]}" "$main" "$nudge"
+        if [[ ${KA_R_STATUS[$i]} == ACTIVE ]]; then
+            ka_format_duration_set "${KA_R_MAIN_REMAIN[$i]}"; main=$REPLY
+            ka_cli_wall_short_set "${KA_R_NEXT_MAIN[$i]-}"; [[ $REPLY != '—' ]] && main+="@$REPLY"
+            if [[ ${KA_R_SEC_ENABLED[$i]} == 1 && -n ${KA_R_NEXT_SECONDARY[$i]-} ]]; then
+                ka_format_duration_set "${KA_R_SEC_REMAIN[$i]}"; nudge=$REPLY
+                ka_cli_wall_short_set "${KA_R_NEXT_SECONDARY[$i]}"; nudge+="@$REPLY"
+            elif [[ ${KA_R_SEC_ENABLED[$i]} == 1 ]]; then
+                nudge='— (sent)'
+            else
+                nudge='—'
+            fi
+        elif [[ ${KA_R_STATUS[$i]} == PAUSED ]]; then
+            ka_format_duration_set "${KA_R_MAIN_REMAIN[$i]}"; main="$REPLY(paused)"
+            [[ ${KA_R_SEC_ENABLED[$i]} == 1 ]] && { ka_format_duration_set "${KA_R_SEC_REMAIN[$i]}"; nudge="$REPLY(paused)"; } || nudge='—'
+        else
+            main='—'; nudge='—'
+        fi
+        ka_cli_last_delivery_set "${KA_R_LAST_DELIVERY_TIME[$i]-}" "${KA_R_LAST_DELIVERY_EVENT[$i]-}" \
+            "${KA_R_LAST_DELIVERY_RESULT[$i]-}" "${KA_R_LAST_DELIVERY_DETAIL[$i]-}"
+        last=$REPLY
+        printf '%-3d %-8s %-16s %-24s %-13s %-14s %-14s %-24s\n' "$((i + 1))" "${KA_R_BACKEND[$i]}" \
+            "$(ka_tui_truncate "${KA_R_TYPE[$i]}" 16)" "$(ka_tui_truncate "${KA_R_NAME[$i]}" 24)" \
+            "${KA_R_STATUS[$i]}" "$main" "$nudge" "$last"
     done
 }
 
-# Role: Emit the current index as JSON so scripts do not have to parse the text table.
-ka_cli_list_json() {
+# Role: Emit target objects as JSON so list and read-only status share one schema.
+ka_cli_emit_targets_json() {
     local i first=1
     printf '[\n'
     for i in "${!KA_R_UUID[@]}"; do
@@ -118,12 +181,108 @@ ka_cli_list_json() {
         printf '"main_remaining":%d,"main_interval":%d,' "${KA_R_MAIN_REMAIN[$i]:-0}" "${KA_R_MAIN_INTERVAL[$i]:-0}"
         printf '"secondary_enabled":%d,"secondary_remaining":%d,"secondary_interval":%d,' \
             "${KA_R_SEC_ENABLED[$i]:-0}" "${KA_R_SEC_REMAIN[$i]:-0}" "${KA_R_SEC_INTERVAL[$i]:-0}"
-        printf '"mode":"%s","notifications":%d,"last_seen":"%s","reason":"%s"}' \
+        printf '"mode":"%s","notifications":%d,"last_seen":"%s","reason":"%s",' \
             "$(ka_json_escape "${KA_R_MODE[$i]}")" "${KA_R_NOTIFY[$i]:-0}" \
             "$(ka_json_escape "${KA_R_LAST[$i]}")" "$(ka_json_escape "${KA_R_REASON[$i]}")"
+        printf '"next_main_at":"%s","next_secondary_at":"%s",' \
+            "$(ka_json_escape "${KA_R_NEXT_MAIN[$i]-}")" "$(ka_json_escape "${KA_R_NEXT_SECONDARY[$i]-}")"
+        printf '"last_delivery":{"time":"%s","event":"%s","result":"%s","detail":"%s"}}' \
+            "$(ka_json_escape "${KA_R_LAST_DELIVERY_TIME[$i]-}")" \
+            "$(ka_json_escape "${KA_R_LAST_DELIVERY_EVENT[$i]-}")" \
+            "$(ka_json_escape "${KA_R_LAST_DELIVERY_RESULT[$i]-}")" \
+            "$(ka_json_escape "${KA_R_LAST_DELIVERY_DETAIL[$i]-}")"
     done
     ((first == 1)) || printf '\n'
-    printf ']\n'
+    printf ']'
+}
+
+# Role: Add the final newline expected by standalone list JSON output.
+ka_cli_list_json() {
+    ka_cli_emit_targets_json
+    printf '\n'
+}
+
+# Role: Accept an existing runtime directory for status reads without repairing or creating it.
+ka_cli_status_runtime_ready() {
+    local canonical
+    [[ -d $KA_RUNTIME_DIR && ! -L $KA_RUNTIME_DIR && -O $KA_RUNTIME_DIR ]] || return 1
+    canonical=$(readlink -f -- "$KA_RUNTIME_DIR") || return 1
+    [[ $canonical == "$KA_RUNTIME_DIR" ]]
+}
+
+# Role: Accept one existing runtime snapshot file without following a link or mutating it.
+ka_cli_status_file_ready() {
+    local path=$1 canonical
+    [[ -f $path && ! -L $path && -O $path && -r $path ]] || return 1
+    canonical=$(readlink -f -- "$path") || return 1
+    [[ $canonical == "$path" ]]
+}
+
+# Role: Publish validated service/index snapshots without IPC, activation, or target writes.
+ka_cli_status_json() {
+    local state='' pid='' version='unknown' updated_epoch='' pid_start='' key value extra
+    local now service_age index_age service_age_json index_age_json online=false service_pid=''
+    local index_mtime=''
+    if [[ -e $KA_RUNTIME_DIR || -L $KA_RUNTIME_DIR ]]; then
+        ka_cli_status_runtime_ready || { ka_error 'runtime directory is unsafe; refusing status read'; return 1; }
+        if [[ -e $KA_SERVICE_STATE_FILE || -L $KA_SERVICE_STATE_FILE ]]; then
+            ka_cli_status_file_ready "$KA_SERVICE_STATE_FILE" \
+                || { ka_error 'service state is unsafe; refusing status read'; return 1; }
+            while IFS=$'\t' read -r key value extra; do
+                [[ -z $extra ]] || continue
+                case $key in
+                    state) state=$value ;;
+                    pid) pid=$value ;;
+                    version) version=$value ;;
+                    updated_epoch) updated_epoch=$value ;;
+                    pid_start) pid_start=$value ;;
+                esac
+            done <"$KA_SERVICE_STATE_FILE"
+            [[ $pid =~ ^[1-9][0-9]*$ ]] && service_pid=$pid
+            # A live /proc entry alone could be any later process reusing the PID: match
+            # the recorded start time, or (from a daemon too old to record one) require the
+            # daemon's exact argv shape - interpreter, absolute .../keepalive, --service -
+            # read with its argument boundaries intact, not a substring of the joined line.
+            if [[ $state == online && -n $service_pid && -d /proc/$service_pid ]]; then
+                if [[ $pid_start =~ ^[0-9]+$ ]]; then
+                    ka_proc_starttime_set "$service_pid" && [[ $REPLY == "$pid_start" ]] && online=true
+                else
+                    local -a service_argv=()
+                    mapfile -d '' -t service_argv 2>/dev/null <"/proc/$service_pid/cmdline" || service_argv=()
+                    [[ ${service_argv[1]-} == /*/keepalive && ${service_argv[2]-} == --service \
+                        && ${#service_argv[@]} == 3 ]] && online=true
+                fi
+            fi
+            [[ $updated_epoch =~ ^[0-9]+$ ]] || updated_epoch=''
+            if [[ -z $updated_epoch ]]; then
+                updated_epoch=$(stat -Lc '%Y' -- "$KA_SERVICE_STATE_FILE" 2>/dev/null || true)
+            fi
+        fi
+        if [[ -e $KA_INDEX_FILE || -L $KA_INDEX_FILE ]]; then
+            ka_cli_status_file_ready "$KA_INDEX_FILE" \
+                || { ka_error 'runtime index is unsafe; refusing status read'; return 1; }
+            index_mtime=$(stat -Lc '%Y' -- "$KA_INDEX_FILE" 2>/dev/null || true)
+        fi
+    fi
+    printf -v now '%(%s)T' -1
+    service_age_json=null
+    if [[ $updated_epoch =~ ^[0-9]+$ ]]; then
+        service_age=$((now - updated_epoch)); ((service_age < 0)) && service_age=0
+        service_age_json=$service_age
+    fi
+    index_age_json=null
+    if [[ $index_mtime =~ ^[0-9]+$ ]]; then
+        index_age=$((now - index_mtime)); ((index_age < 0)) && index_age=0
+        index_age_json=$index_age
+    fi
+    ka_tui_load_index
+    printf '{\n  "service":{"online":%s,"pid":' "$online"
+    if [[ -n $service_pid ]]; then printf '%s' "$service_pid"; else printf 'null'; fi
+    printf ',"version":"%s","status_age_seconds":%s},\n' \
+        "$(ka_json_escape "$version")" "$service_age_json"
+    printf '  "index":{"age_seconds":%s},\n  "targets":' "$index_age_json"
+    ka_cli_emit_targets_json
+    printf '\n}\n'
 }
 
 # Role: Look up one session's current state in the published index.
@@ -135,6 +294,30 @@ ka_cli_status_of() {
     return 1
 }
 
+# Role: Validate a requested target before exposing its event history to a CLI reader.
+ka_cli_logs() {
+    local uuid=$1 target_dir safe_uuid stored_uuid=''
+    ka_state_target_dir "$uuid"
+    target_dir=$REPLY
+    # The directory name is derived from the UUID, so it proves nothing on its own; the
+    # owned checkpoint inside must name this exact target.
+    stored_uuid=$(ka_state_read_field "$uuid" uuid 2>/dev/null) || stored_uuid=''
+    if [[ ! -d $target_dir || -L $target_dir || $stored_uuid != "$uuid" ]]; then
+        ka_sanitize_human_set "$uuid"
+        safe_uuid=$REPLY
+        ka_error "no such keep-alive: $safe_uuid"
+        return 1
+    fi
+    ka_log_all "$uuid"
+}
+
+# Role: Print the message part of one daemon response through the human-output sanitizer.
+# Responses carry target names and reasons that originate in terminal titles and paths.
+ka_cli_print_response() {
+    ka_sanitize_human_set "${1#*$'\t'}"
+    printf '%s\n' "$REPLY"
+}
+
 # Role: Submit one daemon operation from the CLI and report its response verbatim.
 # The daemon now returns the specific refusal reason, so scripts get an actionable
 # message rather than a fixed generic string.
@@ -142,7 +325,7 @@ ka_cli_request() {
     local command=$1 uuid=${2-} value=${3-} response
     ka_cli_ensure_service || return 1
     response=$(ka_ipc_call "$command" "$uuid" "$value") || true
-    printf '%s\n' "${response#*$'\t'}"
+    ka_cli_print_response "$response"
     [[ $response == OK$'\t'* ]]
 }
 
@@ -170,7 +353,223 @@ ka_cli_create() {
     ka_profile_copy_to_request "$req/config" || { rm -rf -- "$req"; return 1; }
     ka_ipc_signal_request "$id" || { rm -rf -- "$req"; return 1; }
     response=$(ka_ipc_wait_response "$id") || rc=$?
-    printf '%s\n' "${response#*$'\t'}"
+    ka_cli_print_response "$response"
+    ((rc == 0)) && [[ $response == OK$'\t'* ]]
+}
+
+# Role: Print configure's detailed usage after a parser or local validator rejects arguments.
+ka_cli_configure_usage_error() {
+    local message=${1-}
+    [[ -z $message ]] || ka_error "$message"
+    ka_cli_usage_error 'keepalive configure UUID [options]'
+}
+
+# Role: Submit a validated partial configuration while preserving omitted target values.
+# The request starts from the daemon's checkpoint, which is also the TUI wizard's prefill
+# path; the daemon then applies the same CONFIGURE transaction and profile policy.
+ka_cli_configure() {
+    # Configure's traps are scoped to this call: saved here, and the previous ones are
+    # restored on every return, so no caller (or later command) inherits them.
+    local saved_traps rc=0
+    saved_traps=$(trap -p EXIT INT TERM)
+    KA_CLI_SCRATCH=''
+    trap 'rm -rf -- "${KA_CLI_SCRATCH:-}"' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    ka_cli_configure_run "$@" || rc=$?
+    [[ -z ${KA_CLI_SCRATCH:-} ]] || rm -rf -- "$KA_CLI_SCRATCH"
+    KA_CLI_SCRATCH=''
+    trap - EXIT INT TERM
+    [[ -z $saved_traps ]] || eval "$saved_traps"
+    return "$rc"
+}
+
+# Role: Parse, validate, stage, and submit one configure request (see ka_cli_configure).
+ka_cli_configure_run() {
+    local uuid=${1-} option value tmp id req response status rc=0
+    local max_len max_messages text
+    local main_interval='' secondary_enabled='' secondary_interval='' secondary_message=''
+    local notifications='' delivery_mode='' profile_update=1 profile_seen=0 messages_seen=0
+    local main_interval_seen=0 secondary_enabled_seen=0 secondary_interval_seen=0
+    local secondary_message_seen=0 notifications_seen=0 delivery_mode_seen=0
+    local -a messages=()
+    # Every token after "configure" is passed through verbatim, so an option-looking first
+    # token (configure --json) is a missing UUID, not a target named "--json".
+    [[ -n $uuid && $uuid != -* ]] || { ka_cli_configure_usage_error; return 2; }
+    shift
+    while (($#)); do
+        option=$1
+        case $option in
+            --message|--main-interval|--secondary-enabled|--secondary-interval|--secondary-message|--notifications|--delivery-mode)
+                if (($# < 2)); then
+                    ka_cli_configure_usage_error "missing value for $option"
+                    return 2
+                fi
+                value=$2
+                case $option in
+                    --message) messages+=("$value"); messages_seen=1 ;;
+                    --main-interval) main_interval=$value; main_interval_seen=1 ;;
+                    --secondary-enabled) secondary_enabled=$value; secondary_enabled_seen=1 ;;
+                    --secondary-interval) secondary_interval=$value; secondary_interval_seen=1 ;;
+                    --secondary-message) secondary_message=$value; secondary_message_seen=1 ;;
+                    --notifications) notifications=$value; notifications_seen=1 ;;
+                    --delivery-mode) delivery_mode=$value; delivery_mode_seen=1 ;;
+                esac
+                shift 2
+                ;;
+            --profile|--no-profile)
+                ((profile_seen == 0)) || {
+                    ka_cli_configure_usage_error 'choose --profile or --no-profile once'
+                    return 2
+                }
+                profile_seen=1
+                if [[ $option == --profile ]]; then profile_update=1; else profile_update=0; fi
+                shift
+                ;;
+            *)
+                ka_cli_configure_usage_error "unknown configure option: $option"
+                return 2
+                ;;
+        esac
+    done
+
+    if ((main_interval_seen == 1)); then
+        ka_is_interval "$main_interval" || {
+            ka_cli_configure_usage_error '--main-interval must be 1 to 999999999 seconds'
+            return 2
+        }
+    fi
+    if ((secondary_interval_seen == 1)); then
+        ka_is_interval "$secondary_interval" || {
+            ka_cli_configure_usage_error '--secondary-interval must be 1 to 999999999 seconds'
+            return 2
+        }
+    fi
+    if ((secondary_enabled_seen == 1)) && [[ $secondary_enabled != 0 && $secondary_enabled != 1 ]]; then
+        ka_cli_configure_usage_error '--secondary-enabled must be 0 or 1'
+        return 2
+    fi
+    if ((notifications_seen == 1)) && [[ $notifications != 0 && $notifications != 1 ]]; then
+        ka_cli_configure_usage_error '--notifications must be 0 or 1'
+        return 2
+    fi
+    if ((delivery_mode_seen == 1)) && [[ $delivery_mode != message-enter && $delivery_mode != enter-only ]]; then
+        ka_cli_configure_usage_error '--delivery-mode must be message-enter or enter-only'
+        return 2
+    fi
+    if [[ $delivery_mode == message-enter ]]; then delivery_mode=MESSAGE_ENTER; fi
+    if [[ $delivery_mode == enter-only ]]; then delivery_mode=ENTER_ONLY; fi
+    ka_tunable KEEPALIVE_MAX_MESSAGE_LENGTH 2000; max_len=$REPLY
+    ka_tunable KEEPALIVE_MAX_MESSAGES 64; max_messages=$REPLY
+    if ((messages_seen == 1)); then
+        (( ${#messages[@]} > 0 && ${#messages[@]} <= max_messages )) || {
+            ka_cli_configure_usage_error "main message rotation must contain 1-$max_messages messages"
+            return 2
+        }
+        for text in "${messages[@]}"; do
+            # Code points, not ${#text}: the daemon counts the same way in any locale.
+            ka_utf8_length_set "$text"
+            if [[ -z $text || $text == *$'\n'* ]] || ((REPLY > max_len)); then
+                ka_cli_configure_usage_error "main messages must be non-empty, one-line, and at most $max_len characters"
+                return 2
+            fi
+        done
+    fi
+    if ((secondary_message_seen == 1)) \
+        && { [[ $secondary_message == *$'\n'* ]] || { ka_utf8_length_set "$secondary_message"; ((REPLY > max_len)); }; }; then
+        ka_cli_configure_usage_error "secondary message must be one line of at most $max_len characters"
+        return 2
+    fi
+
+    ka_cli_ensure_service || return 1
+    ka_ipc_call REFRESH '' >/dev/null 2>&1 || true
+    ka_tui_load_index
+    if ! status=$(ka_cli_status_of "$uuid"); then
+        ka_error 'no such keep-alive'
+        return 1
+    fi
+    case $status in
+        ACTIVE|PAUSED|UNAVAILABLE) ;;
+        *) ka_error 'no such keep-alive'; return 1 ;;
+    esac
+
+    tmp=$(mktemp -d "$KA_RUNTIME_DIR/configure.XXXXXX") \
+        || { ka_error 'could not create configure request'; return 1; }
+    # Published for the scoped EXIT/INT/TERM cleanup in ka_cli_configure.
+    KA_CLI_SCRATCH=$tmp
+    if ! ka_state_copy_target_to_request "$uuid" "$tmp/config"; then
+        rm -rf -- "$tmp"
+        ka_error 'could not read current target configuration'
+        return 1
+    fi
+    if ((messages_seen == 1)); then
+        KA_WIZ_MESSAGES=("${messages[@]}")
+        if ! ka_wizard_messages_save "$tmp/config"; then
+            rm -rf -- "$tmp"
+            ka_error 'could not write main message rotation'
+            return 1
+        fi
+    fi
+    if ((main_interval_seen == 1)) && ! ka_write_scalar "$tmp/config/main_interval" "$main_interval"; then
+        rm -rf -- "$tmp"
+        ka_error 'could not write main interval'
+        return 1
+    fi
+    if ((secondary_enabled_seen == 1)) && ! ka_write_scalar "$tmp/config/secondary_enabled" "$secondary_enabled"; then
+        rm -rf -- "$tmp"
+        ka_error 'could not write secondary setting'
+        return 1
+    fi
+    if ((secondary_interval_seen == 1)) && ! ka_write_scalar "$tmp/config/secondary_interval" "$secondary_interval"; then
+        rm -rf -- "$tmp"
+        ka_error 'could not write secondary interval'
+        return 1
+    fi
+    if ((secondary_message_seen == 1)) && ! ka_write_scalar "$tmp/config/secondary_message" "$secondary_message"; then
+        rm -rf -- "$tmp"
+        ka_error 'could not write secondary message'
+        return 1
+    fi
+    if ((notifications_seen == 1)) && ! ka_write_scalar "$tmp/config/notifications" "$notifications"; then
+        rm -rf -- "$tmp"
+        ka_error 'could not write notification setting'
+        return 1
+    fi
+    if ((delivery_mode_seen == 1)) && ! ka_write_scalar "$tmp/config/delivery_mode" "$delivery_mode"; then
+        rm -rf -- "$tmp"
+        ka_error 'could not write delivery mode'
+        return 1
+    fi
+    if ! ka_write_scalar "$tmp/config/profile_update" "$profile_update"; then
+        rm -rf -- "$tmp"
+        ka_error 'could not write profile policy'
+        return 1
+    fi
+    if ! ka_profile_validate_request "$tmp/config"; then
+        rm -rf -- "$tmp"
+        ka_cli_configure_usage_error
+        return 2
+    fi
+
+    if ! ka_ipc_new_request CONFIGURE "$uuid" >/dev/null; then
+        rm -rf -- "$tmp"
+        return 1
+    fi
+    id=$KA_IPC_REQUEST_ID
+    req=$(ka_ipc_request_dir "$id")
+    if ! cp -a -- "$tmp/config" "$req/config"; then
+        rm -rf -- "$tmp" "$req"
+        ka_error 'could not create request configuration'
+        return 1
+    fi
+    rm -rf -- "$tmp"
+    KA_CLI_SCRATCH=''
+    if ! ka_ipc_signal_request "$id"; then
+        rm -rf -- "$req"
+        return 1
+    fi
+    response=$(ka_ipc_wait_response "$id") || rc=$?
+    ka_cli_print_response "$response"
     ((rc == 0)) && [[ $response == OK$'\t'* ]]
 }
 
@@ -191,7 +590,9 @@ ka_cli_set_paused() {
 
 # Role: Run deterministic diagnostics for core dependencies and every terminal backend.
 ka_cli_doctor() {
-    local failures=0 services=0 backends=0 output konsole_setting orca_setting
+    local failures=0 services=0 backends=0 output konsole_setting orca_setting line
+    local qdbus_present=0 dbus_send_present=0 bus_state='NOT PROBED' service_output=''
+    local orca_cli='' orca_jq='' candidate
     printf 'Keep Alive doctor %s\n\n' "$KEEPALIVE_VERSION"
     printf '%-30s %s\n' 'Bash >= 5' "$([[ ${BASH_VERSINFO[0]} -ge 5 ]] && printf OK || printf FAIL)"
     [[ ${BASH_VERSINFO[0]} -ge 5 ]] || ((failures += 1))
@@ -217,37 +618,83 @@ ka_cli_doctor() {
     ka_service_backend_setting KEEPALIVE_ORCA_ENABLED; orca_setting=$REPLY
     if [[ $konsole_setting == 0 ]]; then
         printf '%-30s DISABLED\n' 'Konsole backend'
-    elif ka_qdbus_find; then
-        ((backends += 1))
-        printf '%-30s OK (%s)\n' 'Konsole backend / qdbus' "$KA_QDBUS"
-        ka_dbus_send_find || true
-        services=$(ka_qdbus_konsole_services | grep -c . || true)
-        printf '%-30s %s\n' 'Konsole D-Bus services' "$services"
     else
-        printf '%-30s unavailable (qdbus missing)\n' 'Konsole backend'
+        if ka_qdbus_find; then
+            qdbus_present=1
+            printf '%-30s PRESENT (%s)\n' 'Konsole qdbus' "$KA_QDBUS"
+        else
+            KA_QDBUS=''
+            printf '%-30s MISSING\n' 'Konsole qdbus'
+        fi
+        if ka_dbus_send_find; then
+            dbus_send_present=1
+            printf '%-30s PRESENT (%s)\n' 'Konsole dbus-send' "$KA_DBUS_SEND"
+        else
+            KA_DBUS_SEND=''
+            printf '%-30s MISSING\n' 'Konsole dbus-send'
+        fi
+        if ((qdbus_present == 1 || dbus_send_present == 1)); then
+            if service_output=$(ka_qdbus_konsole_services 2>/dev/null); then
+                bus_state=REACHABLE
+                ((backends += 1))
+                while IFS= read -r line; do
+                    [[ -n $line ]] && ((services += 1))
+                done <<<"$service_output"
+            else
+                bus_state=UNREACHABLE
+            fi
+        fi
+        printf '%-30s %s\n' 'Konsole D-Bus bus' "$bus_state"
+        if [[ $bus_state == REACHABLE ]]; then
+            printf '%-30s %d\n' 'Konsole D-Bus services' "$services"
+        else
+            printf '%-30s not available (bus unreachable)\n' 'Konsole D-Bus services'
+        fi
     fi
 
     if [[ $orca_setting == 0 ]]; then
         printf '%-30s DISABLED\n' 'Orca backend'
-    elif ka_orca_find; then
-        ((backends += 1))
-        printf '%-30s OK (%s)\n' 'Orca backend / CLI' "$KA_ORCA_CLI"
-        printf '%-30s OK (%s)\n' 'Orca JSON parser' "$KA_ORCA_JQ"
-        if output=$(ka_orca_exec status --json 2>/dev/null) \
-            && "$KA_ORCA_JQ" -e '.ok == true and .result.runtime.reachable == true' \
-                >/dev/null 2>&1 <<<"$output"; then
-            printf '%-30s READY\n' 'Orca runtime'
-        else
-            printf '%-30s offline (agents appear when Orca runs)\n' 'Orca runtime'
-        fi
     else
-        printf '%-30s unavailable (needs orca-ide + jq)\n' 'Orca backend'
+        KA_ORCA_CLI=''
+        KA_ORCA_JQ=''
+        if [[ -n ${KEEPALIVE_ORCA_CLI:-} ]]; then
+            [[ -f $KEEPALIVE_ORCA_CLI && -x $KEEPALIVE_ORCA_CLI ]] && orca_cli=$KEEPALIVE_ORCA_CLI || orca_cli=''
+        else
+            for candidate in orca-ide "${HOME:+$HOME/.local/bin/orca-ide}" /usr/local/bin/orca-ide; do
+                [[ -n $candidate ]] || continue
+                if command -v "$candidate" >/dev/null 2>&1; then
+                    orca_cli=$(command -v "$candidate")
+                    break
+                fi
+            done
+        fi
+        if [[ -n ${KEEPALIVE_JQ:-} ]]; then
+            [[ -f $KEEPALIVE_JQ && -x $KEEPALIVE_JQ ]] && orca_jq=$KEEPALIVE_JQ || orca_jq=''
+        elif command -v jq >/dev/null 2>&1; then
+            orca_jq=$(command -v jq)
+        fi
+        if [[ -n $orca_cli ]]; then printf '%-30s PRESENT (%s)\n' 'Orca orca-ide' "$orca_cli"; else printf '%-30s MISSING\n' 'Orca orca-ide'; fi
+        if [[ -n $orca_jq ]]; then printf '%-30s PRESENT (%s)\n' 'Orca jq' "$orca_jq"; else printf '%-30s MISSING\n' 'Orca jq'; fi
+        if [[ -n $orca_cli && -n $orca_jq ]]; then
+            KA_ORCA_CLI=$orca_cli
+            KA_ORCA_JQ=$orca_jq
+            if output=$(ka_orca_exec status --json 2>/dev/null) \
+                && "$orca_jq" -e '.ok == true and .result.runtime.reachable == true' \
+                    >/dev/null 2>&1 <<<"$output"; then
+                printf '%-30s REACHABLE\n' 'Orca runtime'
+                ((backends += 1))
+            else
+                printf '%-30s OFFLINE (agents appear when Orca runs)\n' 'Orca runtime'
+            fi
+        else
+            printf '%-30s not probed (orca-ide and jq are both required)\n' 'Orca runtime'
+        fi
     fi
     if ((backends == 0)); then
         printf '%-30s FAIL\n' 'usable terminal backends'
         ((failures += 1))
     else
-        printf '%-30s %d\n' 'usable terminal backends' "$backends"
+        printf '%-30s %d (reachable)\n' 'usable terminal backends' "$backends"
     fi
     printf '%-30s %s\n' 'notify-send' "$([[ $(command -v notify-send 2>/dev/null || true) ]] && printf OK || printf 'optional/missing')"
     printf '%-30s %s\n' 'control FIFO' "$([[ -p $KA_CONTROL_FIFO ]] && printf READY || printf 'not active yet')"
@@ -314,9 +761,6 @@ ka_cli_main() {
         esac
     fi
 
-    ka_xdg_init || return 1
-    ka_dbus_prepare_session_address
-
     KA_ICONS_ENABLED=1
     KA_COLOR_ENABLED=1
     KA_ASCII_MODE=0
@@ -324,6 +768,13 @@ ka_cli_main() {
     [[ -n ${NO_COLOR:-} ]] && KA_COLOR_ENABLED=0
     local -a args=()
     while (($#)); do
+        # configure takes option VALUES that may look like presentation flags
+        # (--message --no-color); after its command word every token is configure's.
+        if [[ ${args[0]-} == configure ]]; then
+            args+=("$1")
+            shift
+            continue
+        fi
         case $1 in
             --json) KA_CLI_JSON=1 ;;
             --no-icons) KA_ICONS_ENABLED=0 ;;
@@ -334,52 +785,137 @@ ka_cli_main() {
         shift
     done
     ka_cli_init_presentation
+
+    if ((KA_CLI_JSON == 1)) && [[ ${args[0]-} != list && ${args[0]-} != status ]]; then
+        ka_cli_usage_error 'keepalive list [--json] | keepalive status --json'
+        return 2
+    fi
+    # Read-only status must not create runtime/configuration directories or initialize a
+    # profile; it only resolves runtime paths and reads snapshots, writing nothing (not
+    # even the client-presence stamp) - so it also needs no HOME or configuration directory.
+    if [[ ${args[0]-} == status && $KA_CLI_JSON == 1 ]]; then
+        ((${#args[@]} == 1)) || { ka_cli_usage_error 'keepalive status --json'; return 2; }
+        ka_xdg_init runtime-only || return 1
+        ka_cli_status_json
+        return
+    fi
+    ka_xdg_init || return 1
+    ka_dbus_prepare_session_address
+
     ka_ensure_runtime_dirs || return 1
     ka_profile_init_defaults || return 1
-
+    # The exact-arity checks below count arguments; an empty UUID still counts as one, and
+    # must not reach the daemon as a request for target "".
     case ${args[0]-} in
-        '') ka_tui_main ;;
+        create|configure|delete|pause|resume|send|reset|mode|enter|logs)
+            if ((${#args[@]} >= 2)) && [[ -z ${args[1]} ]]; then
+                ka_cli_usage_error "keepalive ${args[0]} UUID: the UUID cannot be empty"
+                return 2
+            fi
+            ;;
+    esac
+    case ${args[0]-} in
+        '')
+            ((${#args[@]} == 0)) || { ka_cli_usage_error 'keepalive [--no-icons] [--no-color] [--ascii]'; return 2; }
+            ka_tui_main
+            ;;
         list)
+            ((${#args[@]} == 1)) || { ka_cli_usage_error 'keepalive list [--json]'; return 2; }
             if ((KA_CLI_JSON == 1)); then
-                ka_cli_ensure_service || return 1
-                ka_ipc_call REFRESH '' >/dev/null 2>&1 || true
+                ka_cli_refresh_for_list || return 1
                 ka_tui_load_index
                 ka_cli_list_json
             else
                 ka_cli_list
             fi
             ;;
-        create) ka_cli_create "${args[1]-}" ;;
-        delete) [[ -n ${args[1]-} ]] || { ka_error 'usage: keepalive delete UUID'; return 2; }
-                ka_cli_request DELETE "${args[1]}" ;;
-        pause) ka_cli_set_paused "${args[1]-}" PAUSED ;;
-        resume) ka_cli_set_paused "${args[1]-}" ACTIVE ;;
-        send) [[ -n ${args[1]-} ]] || { ka_error 'usage: keepalive send UUID [secondary]'; return 2; }
-              if [[ ${args[2]-} == secondary ]]; then ka_cli_request SEND_SECONDARY "${args[1]}"
-              else ka_cli_request SEND_MAIN "${args[1]}"; fi ;;
-        reset) [[ -n ${args[1]-} ]] || { ka_error 'usage: keepalive reset UUID'; return 2; }
-               ka_cli_request RESET_MAIN "${args[1]}" ;;
+        create)
+            ((${#args[@]} == 2)) || { ka_cli_usage_error 'keepalive create UUID'; return 2; }
+            ka_cli_create "${args[1]}"
+            ;;
+        configure)
+            ((${#args[@]} >= 2)) || { ka_cli_usage_error 'keepalive configure UUID [options]'; return 2; }
+            ka_cli_configure "${args[@]:1}"
+            ;;
+        delete)
+            ((${#args[@]} == 2)) || { ka_cli_usage_error 'keepalive delete UUID'; return 2; }
+            ka_cli_request DELETE "${args[1]}"
+            ;;
+        pause)
+            ((${#args[@]} == 2)) || { ka_cli_usage_error 'keepalive pause UUID'; return 2; }
+            ka_cli_set_paused "${args[1]}" PAUSED
+            ;;
+        resume)
+            ((${#args[@]} == 2)) || { ka_cli_usage_error 'keepalive resume UUID'; return 2; }
+            ka_cli_set_paused "${args[1]}" ACTIVE
+            ;;
+        send)
+            if ((${#args[@]} == 2)); then
+                ka_cli_request SEND_MAIN "${args[1]}"
+            elif ((${#args[@]} == 3)) && [[ ${args[2]} == secondary ]]; then
+                ka_cli_request SEND_SECONDARY "${args[1]}"
+            else
+                ka_cli_usage_error 'keepalive send UUID [secondary]'
+                return 2
+            fi
+            ;;
+        reset)
+            ((${#args[@]} == 2)) || { ka_cli_usage_error 'keepalive reset UUID'; return 2; }
+            ka_cli_request RESET_MAIN "${args[1]}"
+            ;;
         mode)
-            [[ -n ${args[1]-} ]] || { ka_error 'usage: keepalive mode UUID [message-enter|enter-only]'; return 2; }
-            case ${args[2]-} in
-                '') ka_cli_request TOGGLE_MODE "${args[1]}" ;;
-                message-enter) ka_cli_request SET_MODE "${args[1]}" MESSAGE_ENTER ;;
-                enter-only) ka_cli_request SET_MODE "${args[1]}" ENTER_ONLY ;;
-                *) ka_error 'mode must be message-enter or enter-only'; return 2 ;;
-            esac
+            if ((${#args[@]} == 2)); then
+                ka_cli_request TOGGLE_MODE "${args[1]}"
+            elif ((${#args[@]} == 3)); then
+                case ${args[2]} in
+                    message-enter) ka_cli_request SET_MODE "${args[1]}" MESSAGE_ENTER ;;
+                    enter-only) ka_cli_request SET_MODE "${args[1]}" ENTER_ONLY ;;
+                    *) ka_cli_usage_error 'keepalive mode UUID [message-enter|enter-only]'; return 2 ;;
+                esac
+            else
+                ka_cli_usage_error 'keepalive mode UUID [message-enter|enter-only]'
+                return 2
+            fi
             ;;
-        enter) [[ -n ${args[1]-} ]] || { ka_error 'usage: keepalive enter UUID'; return 2; }
-               ka_cli_request SEND_ENTER "${args[1]}" ;;
-        status) ka_cli_ensure_service && printf 'Keep Alive service: online\n' ;;
-        refresh) ka_cli_ensure_service && ka_ipc_call REFRESH '' ;;
-        profile) ka_profile_print ;;
+        enter)
+            ((${#args[@]} == 2)) || { ka_cli_usage_error 'keepalive enter UUID'; return 2; }
+            ka_cli_request SEND_ENTER "${args[1]}"
+            ;;
+        status)
+            ((${#args[@]} == 1)) || { ka_cli_usage_error 'keepalive status'; return 2; }
+            ka_cli_ensure_service && printf 'Keep Alive service: online\n'
+            ;;
+        refresh)
+            ((${#args[@]} == 1)) || { ka_cli_usage_error 'keepalive refresh'; return 2; }
+            ka_cli_ensure_service || return 1
+            local refresh_response refresh_rc=0
+            refresh_response=$(ka_ipc_call REFRESH '') || refresh_rc=$?
+            ka_sanitize_human_set "${refresh_response#*$'\t'}"
+            printf '%s\t%s\n' "${refresh_response%%$'\t'*}" "$REPLY"
+            return "$refresh_rc"
+            ;;
+        profile)
+            ((${#args[@]} == 1)) || { ka_cli_usage_error 'keepalive profile'; return 2; }
+            ka_profile_print
+            ;;
         logs)
-            [[ -n ${args[1]-} ]] || { ka_error 'usage: keepalive logs UUID'; return 2; }
-            ka_log_all "${args[1]}"
+            ((${#args[@]} == 2)) || { ka_cli_usage_error 'keepalive logs UUID'; return 2; }
+            ka_cli_logs "${args[1]}"
             ;;
-        doctor) ka_cli_doctor ;;
-        help) ka_cli_help ;;
-        *) ka_error "unknown command: ${args[*]}"; ka_cli_help >&2; return 2 ;;
+        doctor)
+            ((${#args[@]} == 1)) || { ka_cli_usage_error 'keepalive doctor'; return 2; }
+            ka_cli_doctor
+            ;;
+        help)
+            ((${#args[@]} == 1)) || { ka_cli_usage_error 'keepalive help'; return 2; }
+            ka_cli_help
+            ;;
+        *)
+            ka_sanitize_human_set "${args[*]}"
+            ka_error "unknown command: $REPLY"
+            ka_cli_help >&2
+            return 2
+            ;;
     esac
 }
 

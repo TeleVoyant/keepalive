@@ -66,20 +66,85 @@ jobs:
               KEEPALIVE_SKIP_SHELLCHECK=1 ./scripts/dev-check.sh
             '
 
-  lint:
-    name: ShellCheck
+  non-root-test:
+    name: Debian 12 / non-root suite
     runs-on: ubuntu-latest
-    # Blocking as of 1.0.0. The findings were cleared, and the codes that remain disabled
-    # are listed with their justification in .shellcheckrc - one of them, SC2004, would
-    # actively corrupt associative-array lookups if followed.
     steps:
       - uses: actions/checkout@v4
 
-      - name: Run ShellCheck over every shell file
+      - name: Run the aggregate check as nobody
+        # The distro matrix intentionally remains root-heavy; this lane exercises the
+        # real per-user ownership and permission contract instead of root's bypasses.
         run: |
-          mapfile -d '' -t files < <(
-            find . -path ./.git -prune -o -type f \( -name '*.sh' -o -name keepalive \) -print0
-          )
-          shellcheck --version | sed -n '2p'
-          printf 'checking %d files\n' "${#files[@]}"
-          shellcheck -x "${files[@]}"
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/src:ro" \
+            --workdir /src \
+            --env LANG=C.UTF-8 \
+            --env LC_ALL=C.UTF-8 \
+            debian:12 \
+            bash -lc '
+              set -Eeuo pipefail
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update
+              apt-get install -y --no-install-recommends \
+                bash coreutils findutils grep sed gawk procps util-linux jq python3
+              runuser -u nobody -- env LANG=C.UTF-8 LC_ALL=C.UTF-8 \
+                bash -c "cd /src && KEEPALIVE_SKIP_SHELLCHECK=1 ./scripts/dev-check.sh"
+            '
+
+  bash-floor:
+    name: ${{ matrix.name }} / suite
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Bash 5.0 (Alpine)
+            image: docker.io/library/bash:5.0
+          - name: Bash 5.1 (Alpine)
+            image: docker.io/library/bash:5.1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run the suite with the Bash floor image
+        # These official images use Alpine/musl and do not ship systemd; install the
+        # GNU/core utilities the suite needs, while dev-check reports the systemd unit
+        # stage as skipped. The Debian/Fedora/Arch matrix supplies that static check.
+        env:
+          BASH_IMAGE: ${{ matrix.image }}
+        run: |
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/src:ro" \
+            --workdir /src \
+            --env LANG=C.UTF-8 \
+            --env LC_ALL=C.UTF-8 \
+            "$BASH_IMAGE" \
+            sh -ec '
+              set -Eeuo pipefail
+              apk add --no-cache \
+                bash coreutils findutils grep sed gawk procps util-linux jq python3 shadow \
+                musl-locales musl-locales-lang
+              bash --version | head -1
+              KEEPALIVE_SKIP_SHELLCHECK=1 ./scripts/dev-check.sh
+            '
+
+  lint:
+    name: ShellCheck v0.10.0
+    runs-on: ubuntu-latest
+    # Blocking as of 1.0.0. Pin the analyzer image so hosted-runner package updates cannot
+    # silently change the gate; the codes disabled project-wide remain documented in .shellcheckrc.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run pinned ShellCheck over every shell file
+        run: |
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/mnt:ro" \
+            --workdir /mnt \
+            docker.io/koalaman/shellcheck-alpine:v0.10.0 \
+            sh -c '
+              set -Eeuo pipefail
+              shellcheck --version | sed -n "2p"
+              find . -path ./.git -prune -o -type f \( -name "*.sh" -o -name keepalive \) -print0 \
+                | xargs -0 shellcheck -x
+            '

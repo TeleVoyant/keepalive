@@ -37,6 +37,7 @@ The supported public commands are:
 keepalive                                  TUI
 keepalive list [--json]                    plain session table or machine-readable rows
 keepalive create UUID                      create from the saved profile, no wizard
+keepalive configure UUID [options]         edit one target; omitted values stay unchanged
 keepalive delete UUID                      remove one keep-alive and its history
 keepalive pause UUID | resume UUID         idempotent freeze/resume
 keepalive send UUID [secondary]            immediate delivery
@@ -44,6 +45,7 @@ keepalive reset UUID                       reset the main countdown
 keepalive enter UUID                       one Enter now, then resume MESSAGE+ENTER
 keepalive mode UUID [message-enter|enter-only]   set or toggle delivery mode
 keepalive status                           daemon ping
+keepalive status --json                    read-only, presence-free service/index snapshot
 keepalive refresh                          immediate discovery/validation
 keepalive profile                          print persistent defaults
 keepalive logs UUID                        print one runtime event log
@@ -59,7 +61,11 @@ keepalive --service                        internal daemon entrypoint
 
 There is exactly one persistent default profile. A create or configure operation
 applies the submitted values to the selected target and then updates that global
-profile. Other already-monitored targets do not change.
+profile. CLI configure accepts `--no-profile` to keep the persistent profile unchanged
+(and `--profile` to state the default explicitly). Other already-monitored targets do not change.
+
+CLI-configured intervals are integer seconds in the inclusive range `1..999999999`;
+message scalar limits count UTF-8 code points, independent of the caller's locale.
 
 Defaults:
 
@@ -90,7 +96,9 @@ reset the main timer; manual secondary sends reset only the secondary timer.
   arming, and re-arms only when the target is reconfigured. Manual secondary sends always
   work and do not consume the one-shot.
 - Detail-view `e` sends a single Enter now and returns the target to `MESSAGE_ENTER`; it
-  never consumes a queued message and completes a pending submit if one is owed.
+  never sends a new queued message. When a pending MAIN submit is owed, completing it
+  advances that already-delivered message so it is not repeated.
+- Delivery logs use `ENTER` for the one-shot Enter and automatic `ENTER_ONLY` main events.
 - Detail-view `E` pins `ENTER_ONLY` from then on.
 - A target is identity-validated immediately before every manual or automatic
   send.
@@ -186,7 +194,6 @@ Session-scoped state:
 ├── manager.lock
 ├── index.tsv
 ├── service.state
-├── discovery/                  currently unused as on-disk cache
 ├── targets/<safe UUID>/
 │   ├── state.tsv
 │   ├── secondary_message.<pid>.<random>  version named by state.tsv
@@ -202,9 +209,9 @@ Session-scoped state:
 └── responses/<request ID>/
 ```
 
-`KA_STATE_HOME` is resolved from `XDG_STATE_HOME` but is not otherwise used.
-Target bindings and logs deliberately live in the runtime directory, not the
-persistent config directory. The selected runtime is a safe, private
+Discovery snapshots are ephemeral in-memory data; no `discovery/` runtime
+directory is created. Target bindings and logs deliberately live in the runtime
+directory, not the persistent config directory. The selected runtime is a safe, private
 `$XDG_RUNTIME_DIR`, then a safe, private `/run/user/$UID`, then the hardened
 `/tmp/keepalive-$UID` fallback.
 

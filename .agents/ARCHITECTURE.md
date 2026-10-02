@@ -65,8 +65,9 @@ These supersede the older cadence notes below wherever they disagree.
   `messages.trash.*` before loading/quarantining targets and only then sweeps stale stages.
 - `manager.lock` is created with noclobber semantics, reopened without truncation, and
   verified through `/proc/$$/fd` before `flock`.
-- Index publication is part of IPC success: a completed command cannot return `OK` when its
-  client-visible index failed to commit.
+- A completed successful command remains `OK` if its later index publication fails; the
+  response carries a deferred-publication warning and the service retries at a paced rate,
+  avoiding a client retry that could duplicate a send.
 - Install refuses an unrecognized pre-existing application tree. Uninstall snapshots all
   current and legacy enablement links before `disable --now`, restores their exact literal
   targets if shutdown probes abort, always attempts `daemon-reload` after cleanup, and
@@ -180,9 +181,10 @@ request from profile/target files client-side; the daemon validates and applies 
 14. Publish the merged index and service status.
 15. Enter the permanent loop.
 
-The service status checkpoint contains four TSV rows: `state`, `pid`, `version`,
-and `updated`. Normal/signaled exit writes `state=stopped`. Target checkpoints are
-left in place for same-login recovery.
+The service status checkpoint contains six TSV rows: `state`, `pid`, `version`,
+`updated`, `updated_epoch`, and `pid_start`. `pid_start` pairs the published PID with
+its `/proc` start-time generation, so status readers can reject PID reuse. Normal/signaled
+exit writes `state=stopped`. Target checkpoints are left in place for same-login recovery.
 
 ## Discovery pipeline
 
@@ -208,8 +210,19 @@ UUID  AI_TYPE  NAME  CWD  DBUS_SERVICE  SESSION_PATH  TERM_PID
 FG_PID  AI_PID  AI_STARTTIME  FG_COMMAND
 ```
 
-String fields are converted to one line before output. Discovery is ephemeral;
-the `discovery/` runtime directory is created but currently not populated.
+String fields are converted to one line before output. Discovery is ephemeral
+in-memory data; no `discovery/` runtime directory is created.
+
+### Position-aware classifier matching
+
+Built-in signatures inspect only command-identifying positions: process `comm`, the
+resolved `/proc/PID/exe` path, `argv[0]`, and a recognized launcher's identifying
+script/module/package position. Launcher option values, shell `-c` payloads, assignments,
+editor/pager/grep/git arguments, and arbitrary non-file option values are excluded, so a
+plain shell containing `codex` or `claude` in an argument cannot become an AI row. The
+user `classifiers.tsv` registry is intentionally a legacy escape hatch: its entries match
+the complete lower-case `comm exe cmdline` signature and therefore remain fully
+position-independent.
 
 ## Runtime directory resolution
 
@@ -312,9 +325,26 @@ default to not-yet-sent. Adding it as required would have quarantined every live
 on upgrade.
 
 `ka_scheduler_send_enter_once` backs the detail view's `e`: it delivers a bare submit,
-clears any pending submit, resets the main countdown, leaves the rotation index alone,
-and sets the mode back to `MESSAGE_ENTER`. `E` maps to `SET_MODE ENTER_ONLY`, which is an
-explicit set rather than a toggle so each key reaches a known state.
+resets the main countdown, and sets the mode back to `MESSAGE_ENTER`. With no pending
+owner it leaves the queued message untouched; when a pending owner exists, the Enter
+completes that owner first (including advancing a pending MAIN rotation) so the text is
+not repeated. `E` maps to `SET_MODE ENTER_ONLY`, which is an explicit set rather than a
+toggle so each key reaches a known state.
+
+### Pending-submit owner
+
+`pending_submit` is persisted in `state.tsv` as one of `0`, `MAIN`, `SECONDARY_AUTO`,
+`SECONDARY_MANUAL`, or `STALE`. The enum identifies which event owns the next Enter:
+MAIN completion advances `main_index`, automatic secondary completion sets
+`secondary_done`, manual secondary completion has no one-shot side effect, and STALE
+completion never advances a replacement rotation. A missing field means `0`; a legacy
+persisted numeric `1` is accepted as `MAIN` for compatibility.
+
+CONFIGURE marks a nonzero owner `STALE`, resets `main_index=0`, and commits that state
+before swapping the staged `messages/` directory. This state-first ordering means a
+restart between commits sees the new zero-based checkpoint and a STALE Enter that cannot
+advance its replacement messages, rather than pairing the old owner/index with the new
+rotation. Rollback restores the old owner and old message set.
 
 ## Adaptive discovery cadence
 
@@ -381,6 +411,9 @@ KA_T_MAIN_REMAIN          KA_T_MAIN_INDEX
 KA_T_SECONDARY_ENABLED    KA_T_SECONDARY_INTERVAL
 KA_T_SECONDARY_REMAIN     KA_T_SECONDARY_MESSAGE
 KA_T_LAST_SEEN            KA_T_REASON
+KA_T_PENDING_SUBMIT       KA_T_LAST_DELIVERY_TIME
+KA_T_LAST_DELIVERY_EVENT  KA_T_LAST_DELIVERY_RESULT
+KA_T_LAST_DELIVERY_DETAIL
 ```
 
 Discovery order:
@@ -426,8 +459,15 @@ main_index
 secondary_enabled
 secondary_interval
 secondary_remaining
+secondary_done
+secondary_message_file
 last_seen
 reason
+pending_submit
+last_delivery_time
+last_delivery_event
+last_delivery_result
+last_delivery_detail
 ```
 
 The secondary prompt is a literal versioned companion named by the
@@ -441,7 +481,11 @@ identity/display fields, service/path shape, positive PID/start-time/interval
 values, exact enums/booleans, remaining-time bounds, and `main_index`; binds the
 stored UUID to the target-directory basename; and requires non-symlink state,
 versioned secondary-message payload, message-directory, and canonical contiguous message files. Unknown
-field names remain ignorable for forward compatibility.
+field names remain ignorable for forward compatibility. Interval fields are bounded to
+`1..999999999` seconds. Scalar readers count UTF-8 code points with a locale-independent
+bounded read, not bytes; this keeps message limits consistent under `LC_ALL=C` and UTF-8
+locales. Delivery metadata is display-only and malformed values are cleared rather than
+quarantining an otherwise valid target.
 
 Any rejected top-level target entry is moved into a uniquely created
 `quarantine/<safe basename>.<suffix>/record` wrapper before the daemon loop starts.
@@ -461,14 +505,21 @@ is attached, and every `KEEPALIVE_STATUS_INTERVAL` otherwise; an identical paylo
 rewritten. It first contains every monitored target, then every currently discovered
 UUID that has no monitored record.
 
-Its 14 positional columns are:
+Its 21 positional columns are:
 
 ```text
-UUID  TYPE  NAME  DIRECTORY  STATUS
-MAIN_REMAIN  MAIN_INTERVAL
-SECONDARY_ENABLED  SECONDARY_REMAIN  SECONDARY_INTERVAL
-MODE  NOTIFICATIONS  LAST_SEEN  REASON
+1  UUID                 2  TYPE                 3  NAME
+4  DIRECTORY            5  STATUS               6  MAIN_REMAIN
+7  MAIN_INTERVAL        8  SECONDARY_ENABLED   9  SECONDARY_REMAIN
+10 SECONDARY_INTERVAL   11 MODE                12 NOTIFICATIONS
+13 LAST_SEEN             14 REASON              15 BACKEND
+16 NEXT_MAIN             17 NEXT_SECONDARY      18 LAST_DELIVERY_TIME
+19 LAST_DELIVERY_EVENT   20 LAST_DELIVERY_RESULT 21 LAST_DELIVERY_DETAIL
 ```
+
+Columns 16-21 are appended compatibility extensions; readers of the original first 15
+columns remain valid, while missing extension fields mean no deadline or no delivery
+metadata.
 
 An unmonitored discovery row uses `AVAILABLE`, zero timer fields, blank mode/last
 seen/reason, and notifications `0`. This merge is what permits an old
@@ -518,12 +569,18 @@ request is:
 3. Client writes `command`, optional `uuid`, and optional `config/` payload files.
 4. Client writes one short `REQUEST <id>\n` line to `control.fifo`.
 5. Daemon accepts only `REQUEST`, one safe identifier, and no extra token.
-6. Daemon reads request fields, dispatches, republishes the index, and creates
-   `responses/<id>/`.
-7. Daemon writes `message` first and `status` (`OK`/`ERROR`) last.
-8. Client polls every 50 ms for `status`, prints `STATUS<TAB>message`, removes the
-   response directory, and times out after 8 seconds by default.
-9. Daemon removes the consumed request directory.
+6. Daemon reads request fields, dispatches, and creates `responses/<id>/`.
+7. Daemon writes `message` first and `status` (`OK`/`ERROR`) last. A successful completed
+   command remains `OK` if index publication fails afterward; its message carries a
+   deferred-publication warning and the service retries at most once per second.
+8. `REFRESH` remains `OK` when discovery or target validation fails, but appends a warning
+   naming the failed pass and retains each backend's last complete snapshot.
+9. Client polls for `status`, prints `STATUS<TAB>message`, removes the response directory,
+   and times out after 8 seconds by default. On a timeout the client renames the request
+   to `<id>.cancelled`; the daemon renames it to `<id>.claimed` before reading any of it.
+   `rename(2)` succeeds for exactly one side, so a cancelled request is never executed,
+   and a client that lost the race reports that the daemon may still complete it.
+10. Daemon removes the consumed request directory after responding.
 
 The daemon opens the FIFO read/write to avoid EOF busy-spinning. If the FIFO is
 absent, a client asks `systemctl --user start keepalive.socket`; the service can
@@ -535,7 +592,7 @@ Operations:
 | Operation | Effect |
 |---|---|
 | `PING` | Liveness response only. |
-| `REFRESH` | Rediscover, validate monitored targets, publish. |
+| `REFRESH` | Rediscover and validate monitored targets; answer `OK` with a warning and keep the last good snapshot if either pass fails. |
 | `CREATE` | Create `ACTIVE` target from discovery and update profile. |
 | `CONFIGURE` | Replace selected target settings/reset timers and update profile. |
 | `DELETE` | Remove selected target directory, arrays, and log. |
@@ -546,6 +603,12 @@ Operations:
 | `SEND_SECONDARY` | Manual secondary delivery and secondary timer reset; transport failure returns `ERROR`. Does not consume the one-shot. |
 | `SEND_ENTER` | Deliver one submit sequence now, reset the main timer, and return the target to `MESSAGE_ENTER`. |
 | `SET_MODE` | Set delivery mode to the `value` file's contents rather than toggling. |
+
+`status --json` is not an IPC operation. It is a read-only, presence-free snapshot reader:
+it validates existing `service.state` and `index.tsv`, never activates the socket, never
+creates configuration/runtime state, and never writes `clients.seen`. It matches
+`pid_start` to the recorded PID (or uses the legacy daemon command-line fallback) before
+reporting `service.online`.
 
 All product mutations are delegated to state/scheduler functions rather than
 implemented in the IPC switch.
@@ -617,8 +680,8 @@ timer due or SEND_* IPC
   -> log SENT or FAILED; optional notification
   -> rotate main only after successful MESSAGE_ENTER
   -> reset the relevant timer
-  -> save target and publish index
-  -> return IPC ERROR if transport failed
+  -> save target and publish index (or mark publication stale and warn without changing a successful command to ERROR)
+  -> return IPC ERROR only for a failed command or transport operation
 ```
 
 The message and carriage return are two D-Bus calls, not one atomic operation.
@@ -776,5 +839,7 @@ HH:MM:SS<TAB>EVENT<TAB>DETAIL<TAB>RESULT
 ```
 
 Events include `CREATED`, `CONFIG`, `STATE`, `MODE`, `TIMER`, `TARGET`, `SERVICE`,
-`MAIN`, and `SECONDARY`. Text is collapsed to one line. Logs are appended by the
-daemon and read with `tail`/`cat` by clients. Deleting a target deletes its log.
+`MAIN`, `SECONDARY`, and `ENTER`. `ENTER` records the one-shot `e` delivery and an
+automatic `ENTER_ONLY` main delivery; its detail is `[ENTER]`. Text is collapsed to one
+line. Logs are appended by the daemon and read with `tail`/`cat` by clients. Deleting a
+target deletes its log.

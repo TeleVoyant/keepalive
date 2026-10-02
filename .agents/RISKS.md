@@ -1,28 +1,81 @@
 # Observed Risks, Gaps, and Open Questions
 
-## Open after 2026-10-01 (performance and update-reload pass)
+## Resolved on 2026-10-02: final hardening and documentation round
 
-- **One-second charge on activation (pre-existing, accepted).** A target created or
-  resumed mid-wait while another target is ACTIVE is charged the whole elapsed second at
-  the next tick, so its first send can be up to 1 s early. The 1.0.0 loop did the same;
-  moving the error the other way would only make the first send late. Documented, not
-  changed.
-- **Downgrade quarantines current checkpoints.** A release older than versioned
-  secondary-message files reads only the fixed `secondary_message` and quarantines
-  current records. Update forward; documented in `docs/TROUBLESHOOTING.md`.
-- **`pending_submit` is still not a checkpoint field.** The graceful stop removes the
-  update/stop path to a half-delivered message, but a SIGKILL (or stop-timeout kill)
-  between text and Enter still loses it; the next send then repeats the text.
-- **`ka_sleep`'s private pipe is inherited by child processes** of a client (no
-  close-on-exec in Bash). Harmless - nothing writes to it - but it is one extra fd per
-  child until it exits.
-- **Konsole live session never measured.** No Konsole instance was running during this
-  pass; Konsole costs were measured against the qdbus mock and the installed binary's
-  adaptor XML. Konsole session values are D-Bus *methods*, so `Properties.GetAll` cannot
-  batch them.
-- **TUI reload needs the daemon to restart.** A TUI re-execs only when its entrypoint
-  changed *and* a new daemon pid is online, so an update that does not restart the daemon
-  (socket-only, or a hand-started daemon) leaves open TUIs on old code until they exit.
+The eight 2026-10-01 audits and the follow-up proofreading/fix rounds were rechecked in
+an isolated copy. The current suite is 31 test files and 1519 assertions; each item below
+names the regression file that pins the behavior.
+
+- **Scheduler correctness:** pending-submit ownership is now the persisted enum `0` /
+  `MAIN` / `SECONDARY_AUTO` / `SECONDARY_MANUAL` / `STALE`; legacy `1` loads as `MAIN`,
+  vanished messages become configuration failures, successful validation clears strikes,
+  and checkpoint-save failures remain visible (`tests/test_scheduler.sh`,
+  `tests/test_state.sh`, `tests/test_state_hardening.sh`).
+- **Discovery and classifier:** position-aware launcher matching excludes shell payloads and
+  option values; Orca shell transitions, field/title bounds, duplicate IDs, and
+  monotonic Konsole discovery deadlines fail closed; incomplete passes retain prior rows
+  (`tests/test_classifier.sh`, `tests/test_fork_free_helpers.sh`,
+  `tests/test_orca_mock.sh`, `tests/test_konsole_mock.sh`, `tests/test_loop_pacing.sh`).
+- **IPC/profile/logging/state:** scalar reads are bounded and no-follow, read-only files
+  remain readable, profile swaps serialize, logs reject unsafe paths, disabled oversized
+  secondary data is discarded safely, timed-out requests are cancelled by an atomic
+  rename claim (never executed late), and a successful
+  command remains `OK` when index publication is deferred (`tests/test_io_hardening.sh`,
+  `tests/test_failure_propagation.sh`, `tests/test_state_hardening.sh`,
+  `tests/test_state_delivery.sh`).
+- **Output and CLI:** human/JSON/notification output is sanitized without corrupting valid
+  UTF-8, C-locale truncation keeps code-point boundaries, empty/extra CLI arguments are
+  rejected, unknown logs are diagnosed, and `ENTER` is recorded distinctly
+  (`tests/test_output_safety.sh`, `tests/test_cli_status.sh`).
+- **New operator paths:** `configure`, `status --json`, one-refresh list behavior,
+  next-send/last-delivery fields, profile policy, and read-only/presence-free status are
+  covered by cross-process and fixture tests (`tests/test_service_integration.sh`,
+  `tests/test_cli_status.sh`).
+- **Installer, release, and CI safety:** managed roots and units are canonicalized and
+  fail closed, runtime purge is opt-in, release archives exclude private memory, version
+  headings are strict, and PTY/aggregate-runner failures are reported deterministically
+  (`tests/test_install_layout.sh`, `tests/test_install_lifecycle.sh`,
+  `tests/test_install_safety.sh`, `tests/test_cli_status.sh`, `tests/test_tui_pty.sh`).
+- **Performance:** XDG permission checks and sanitizer/scalar hot paths avoid redundant
+  forks while retaining revalidation; the representative startup path measured about
+  1677 ms before and 100 ms after (`tests/test_fork_free_helpers.sh`,
+  `tests/test_io_hardening.sh`).
+
+## Open
+
+### Accepted residuals
+
+- **RS7-CONFIGURE-WINDOW:** CONFIGURE is state-first and marks an owed owner `STALE`,
+  but a kill after the state commit and before message-directory copy can leave a
+  half-applied configuration. The checkpoint remains valid, the replacement rotation
+  starts at index zero, and retrying the stale Enter cannot advance it; completing a
+  cross-directory journal is deferred because the current behavior is safe and retryable.
+- **STATUS-MODE-001:** `status --json` refuses unsafe runtime/snapshot paths but does not
+  repair or reject every world-readable mode combination beyond its owned real-path
+  contract. The daemon's runtime is created `0700`; refusing a read-only diagnostic solely
+  because a same-user snapshot is readable to others would not reduce exposure.
+- **CLI-LOGS-UNKNOWN:** a same-user process can still plant a safe-ID directory/checkpoint
+  between validation and log reading. Stored UUID validation prevents the reviewed false
+  target, but eliminating every same-UID race needs descriptor-held log readers and is
+  deferred.
+- **Unknown file-valued launcher options:** an unlisted classifier option whose value is
+  itself an existing regular file remains intrinsically ambiguous; common file-valued
+  options are covered and the parser deliberately treats the first such file as the
+  script/package position.
+- **Node programs that rewrite `process.title`:** a program that hides its script path and
+  uses a generic title can remain a classifier false negative; no installed AI CLI showed
+  this form in the read-only process scan.
+
+### Deferred items and feature candidates
+
+- Konsole health/snapshot reuse still needs a live Konsole measurement; current CPU results
+  use the mock and session-method calls cannot be batched through `Properties.GetAll`.
+- Busy-aware sending remains deferred: Orca's `agentWait` was null even on busy terminals,
+  so no positive idle/busy signal is safe yet.
+- Jitter/backoff for provider-aware sending and named profiles/templates are feature
+  candidates, not current correctness promises.
+- The unexplained 1.0.0 daemon `SIGABRT` (core dump, 250.8 MiB peak, no retained core)
+  remains an investigation item if it recurs.
 
 ## Resolved on 2026-10-01: daemon, client, and update resource pass
 

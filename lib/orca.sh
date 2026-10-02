@@ -160,35 +160,66 @@ ka_orca_discover() {
     # of several - raises a jq error, so the exit status alone fails the pass closed even
     # when an earlier document already printed rows.
     if ! rows=$("$KA_ORCA_JQ" -r '
-        def valid:
+        # Keep these limits in step with ka_orca_checkpoint_binding_valid: discovery is
+        # the first place untrusted provider fields enter the manager arrays.
+        def text_ok($maximum; $required):
+            (type == "string") and
+            (if $required then length > 0 else true end) and
+            (length <= $maximum) and
+            ((test("[[:cntrl:]]") | not));
+        def optional_text($maximum):
+            (type == "null") or
+            ((type == "string") and length <= $maximum and (test("[[:cntrl:]]") | not));
+        def eligible:
+            .connected == true and .writable == true and .orphaned != true and
+            ((.agentIdentity | type) == "string" and (.agentIdentity | length) > 0);
+        def eligible_binding_valid:
+            (.handle | text_ok(512; true)) and
+            (.ptyId | text_ok(4096; true)) and
+            (.incarnationId | text_ok(256; true)) and
+            (.worktreeId | text_ok(4096; true)) and
+            (.worktreePath | text_ok(4096; true)) and
+            (.executionHostId | text_ok(256; true)) and
+            (.tabId | text_ok(256; true)) and
+            (.leafId | text_ok(256; true)) and
+            (.agentIdentity | text_ok(128; true)) and
+            # The title is display text set by the program in the terminal, so an ordinary
+            # odd one is cleaned and truncated below rather than failing every Orca row; only
+            # a pathological size fails the pass closed, like any other unbounded field.
+            ((.title | type) == "null" or ((.title | type) == "string" and (.title | length) <= 65536));
+        def valid($runtime):
             .ok == true and
             (.result.terminals | type == "array") and
             (.result.truncated | type == "boolean") and
             (.result.truncated == false) and
-            (._meta.runtimeId | type == "string" and length > 0) and
+            (._meta.runtimeId | text_ok(256; true)) and
             all(.result.terminals[];
                 (.handle | type == "string") and
                 (.connected | type == "boolean") and
                 (.writable | type == "boolean") and
                 (.orphaned | type == "boolean") and
                 ((.agentIdentity | type) == "null" or (.agentIdentity | type) == "string") and
-                ((.connected != true or .writable != true or .orphaned == true or
-                  (.agentIdentity | type) != "string" or (.agentIdentity | length) == 0) or
-                    ((.ptyId | type == "string" and length > 0) and
-                     (.incarnationId | type == "string" and length > 0) and
-                     (.worktreeId | type == "string" and length > 0) and
-                     (.worktreePath | type == "string" and length > 0) and
-                     (.executionHostId | type == "string" and length > 0) and
-                     (.tabId | type == "string" and length > 0) and
-                     (.leafId | type == "string" and length > 0))));
-        if (try valid catch false) then
-            ._meta.runtimeId as $runtime |
+                (if eligible then eligible_binding_valid else true end)) and
+            # The legacy manager ID is intentionally unchanged for checkpoint compatibility.
+            # Reject duplicate IDs before state projection: otherwise the later row would
+            # silently overwrite an earlier binding (including an ambiguous identity pair).
+            ([.result.terminals[] | select(eligible) |
+                {id: ("orca-" + $runtime + "-" + .incarnationId)}] |
+                group_by(.id) |
+                all(.[]; length == 1));
+        ._meta.runtimeId as $runtime |
+        if (try valid($runtime) catch false) then
             .result.terminals[] |
-            select(.connected == true and .writable == true and .orphaned != true) |
-            select(.agentIdentity | type == "string" and length > 0) |
+            select(eligible) |
             [
                 .agentIdentity,
-                (if (.title | type == "string" and length > 0) then .title else (.worktreePath | split("/") | last) end),
+                ((if (.title | type) == "string" then .title else "" end)
+                    | gsub("[[:cntrl:]]"; "") | .[0:256]) as $title |
+                # Never emit an empty field: the shell reads these rows with IFS=tab, which
+                # collapses adjacent tabs and would shift every later field (including the
+                # ID). A trailing-slash path has an empty last segment, so skip empty ones.
+                (if ($title | length) > 0 then $title
+                 else (([.worktreePath | split("/")[] | select(length > 0)] | last) // "orca") end),
                 .worktreePath,
                 .handle,
                 .ptyId,
@@ -244,35 +275,43 @@ ka_orca_validate_target() {
     fi
 
     # One jq run validates and extracts; it used to take two, before every send and every
-    # live health check. Any unfamiliar response - unparseable, not an object, or missing
-    # a field - is the schema result: a successful command with an unfamiliar response
-    # proves no identity change, so it stays transient and an Orca 0.x schema drift
-    # cannot make targets sticky.
+    # live health check. Ordinary shell terminals deliberately omit agentIdentity, so that
+    # one field is optional here; a complete binding without it is handled as agent loss
+    # below. Any other unfamiliar response - unparseable, not an object, or missing a
+    # binding field - is the schema result and stays transient. The field bounds are the
+    # ones discovery and the checkpoint loader use: a value outside them (or carrying a
+    # control character, which would also shift the tab-separated fields) violates the
+    # adapter contract, so it must not be mistaken for a definitive identity change.
     if ! row=$("$KA_ORCA_JQ" -r '
+        def text_ok($maximum):
+            (type == "string") and length > 0 and length <= $maximum and
+            (test("[[:cntrl:]]") | not);
         def valid:
             .ok == true and
-            (._meta.runtimeId | type == "string" and length > 0) and
+            (._meta.runtimeId | text_ok(256)) and
             (.result.terminal | type == "object") and
             (.result.terminal |
-                (.handle | type == "string" and length > 0) and
-                (.ptyId | type == "string" and length > 0) and
-                (.incarnationId | type == "string" and length > 0) and
-                (.worktreeId | type == "string" and length > 0) and
-                (.executionHostId | type == "string" and length > 0) and
-                (.tabId | type == "string" and length > 0) and
-                (.leafId | type == "string" and length > 0) and
+                (.handle | text_ok(512)) and
+                (.ptyId | text_ok(4096)) and
+                (.incarnationId | text_ok(256)) and
+                (.worktreeId | text_ok(4096)) and
+                (.executionHostId | text_ok(256)) and
+                (.tabId | text_ok(256)) and
+                (.leafId | text_ok(256)) and
                 (.connected | type == "boolean") and
                 (.writable | type == "boolean") and
                 (.orphaned | type == "boolean") and
-                has("agentIdentity") and
-                ((.agentIdentity | type) == "string" or (.agentIdentity | type) == "null"));
+                ((.agentIdentity | type) == "null" or .agentIdentity == "" or
+                 (.agentIdentity | text_ok(128))));
         if (try valid catch false) then
             ._meta.runtimeId as $runtime |
             .result.terminal |
             [
                 .handle, .ptyId, .incarnationId, .worktreeId, $runtime,
                 .executionHostId, .tabId, .leafId,
-                (if (.agentIdentity | type) == "string" then .agentIdentity else "-" end),
+                # Absent, null, or empty is the plain-shell form discovery treats as no agent.
+                (if (.agentIdentity | type) == "string" and (.agentIdentity | length) > 0
+                 then .agentIdentity else "-" end),
                 (.connected | tostring), (.writable | tostring), (.orphaned | tostring)
             ] | @tsv
         else

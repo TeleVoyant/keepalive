@@ -28,7 +28,9 @@ ka_tui_load_index() {
     declare -ga KA_R_UUID=() KA_R_TYPE=() KA_R_NAME=() KA_R_DIR=() KA_R_STATUS=()
     declare -ga KA_R_MAIN_REMAIN=() KA_R_MAIN_INTERVAL=() KA_R_SEC_ENABLED=() KA_R_SEC_REMAIN=()
     declare -ga KA_R_SEC_INTERVAL=() KA_R_MODE=() KA_R_NOTIFY=() KA_R_LAST=() KA_R_REASON=()
-    declare -ga KA_R_BACKEND=()
+    declare -ga KA_R_BACKEND=() KA_R_NEXT_MAIN=() KA_R_NEXT_SECONDARY=()
+    declare -ga KA_R_LAST_DELIVERY_TIME=() KA_R_LAST_DELIVERY_EVENT=()
+    declare -ga KA_R_LAST_DELIVERY_RESULT=() KA_R_LAST_DELIVERY_DETAIL=()
     [[ -r $KA_INDEX_FILE ]] || return 0
 
     # The row order depends only on each row's UUID, type, name, and status. A watched
@@ -80,6 +82,9 @@ ka_tui_load_index() {
         KA_R_SEC_INTERVAL+=("${KA_TSV[9]:-0}") KA_R_MODE+=("${KA_TSV[10]-}")
         KA_R_NOTIFY+=("${KA_TSV[11]:-0}") KA_R_LAST+=("${KA_TSV[12]-}") KA_R_REASON+=("${KA_TSV[13]-}")
         KA_R_BACKEND+=("${KA_TSV[14]:-konsole}")
+        KA_R_NEXT_MAIN+=("${KA_TSV[15]-}") KA_R_NEXT_SECONDARY+=("${KA_TSV[16]-}")
+        KA_R_LAST_DELIVERY_TIME+=("${KA_TSV[17]-}") KA_R_LAST_DELIVERY_EVENT+=("${KA_TSV[18]-}")
+        KA_R_LAST_DELIVERY_RESULT+=("${KA_TSV[19]-}") KA_R_LAST_DELIVERY_DETAIL+=("${KA_TSV[20]-}")
     done
 }
 
@@ -108,6 +113,9 @@ ka_tui_load_target_fields() {
     KA_F_SEC_ENABLED=0 KA_F_SEC_REMAIN=0 KA_F_SEC_INTERVAL=0 KA_F_SEC_DONE=0
     KA_F_SEC_MESSAGE_FILE='secondary_message'
     KA_F_LAST='' KA_F_REASON=''
+    KA_F_LAST_DELIVERY_TIME='' KA_F_LAST_DELIVERY_EVENT=''
+    KA_F_LAST_DELIVERY_RESULT='' KA_F_LAST_DELIVERY_DETAIL=''
+    KA_F_NEXT_MAIN='' KA_F_NEXT_SECONDARY=''
     ka_state_target_dir "$uuid"
     file="$REPLY/state.tsv"
     [[ -r $file ]] || return 1
@@ -143,6 +151,10 @@ ka_tui_load_target_fields() {
                 ;;
             last_seen) KA_F_LAST=$value ;;
             reason) KA_F_REASON=$value ;;
+            last_delivery_time) KA_F_LAST_DELIVERY_TIME=$value ;;
+            last_delivery_event) KA_F_LAST_DELIVERY_EVENT=$value ;;
+            last_delivery_result) KA_F_LAST_DELIVERY_RESULT=$value ;;
+            last_delivery_detail) KA_F_LAST_DELIVERY_DETAIL=$value ;;
         esac
     done <"$file"
 }
@@ -332,8 +344,13 @@ ka_tui_render_manager() {
 ka_tui_action() {
     local command=$1 uuid=$2 value=${3-} response
     response=$(ka_ipc_call "$command" "$uuid" "$value" 2>/dev/null || true)
-    if [[ $response == OK$'\t'* ]]; then ka_tui_toast "${response#*$'\t'}"; return 0; fi
+    if [[ $response == OK$'\t'* ]]; then
+        ka_tui_toast "${response#*$'\t'}"
+        ka_tui_detail_cache_invalidate
+        return 0
+    fi
     ka_tui_toast "${response#*$'\t'}"
+    ka_tui_detail_cache_invalidate
     return 1
 }
 
@@ -356,30 +373,150 @@ ka_tui_confirm_delete() {
     done
 }
 
+declare -ga KA_TUI_DETAIL_MESSAGES=() KA_TUI_DETAIL_EVENTS=()
+declare -g KA_TUI_DETAIL_UUID='' KA_TUI_DETAIL_CACHE_MARKER=''
+declare -g KA_TUI_DETAIL_CACHE_VALID=0 KA_TUI_DETAIL_SECONDARY=''
+
+# Role: Invalidate detail data after an action so the next frame reloads durable text/log data.
+ka_tui_detail_cache_invalidate() {
+    KA_TUI_DETAIL_CACHE_VALID=0
+}
+
+# Role: Create a private client-only marker used for fork-free state-generation checks.
+ka_tui_detail_cache_begin() {
+    local uuid=$1 marker
+    KA_TUI_DETAIL_UUID=$uuid
+    KA_TUI_DETAIL_CACHE_VALID=0
+    KA_TUI_DETAIL_CACHE_MARKER=''
+    while :; do
+        marker="$KA_RUNTIME_DIR/.detail-cache.$$.${RANDOM}"
+        [[ ! -e $marker && ! -L $marker ]] || continue
+        if { : >"$marker"; } 2>/dev/null; then
+            KA_TUI_DETAIL_CACHE_MARKER=$marker
+            return 0
+        fi
+        return 1
+    done
+}
+
+# Role: Remove the detail marker when leaving the session without touching daemon state.
+ka_tui_detail_cache_end() {
+    if [[ -n ${KA_TUI_DETAIL_CACHE_MARKER:-} ]]; then
+        rm -f -- "$KA_TUI_DETAIL_CACHE_MARKER" 2>/dev/null || true
+    fi
+    KA_TUI_DETAIL_CACHE_MARKER=''
+    KA_TUI_DETAIL_CACHE_VALID=0
+}
+
+# Role: Report whether persisted target state changed since the cached detail data was read.
+ka_tui_detail_cache_needs_reload() {
+    local uuid=$1 state_file log_file
+    [[ ${KA_TUI_DETAIL_CACHE_VALID:-0} == 1 ]] || return 0
+    ka_state_target_dir "$uuid"
+    state_file="$REPLY/state.tsv"
+    [[ -r $state_file && -n ${KA_TUI_DETAIL_CACHE_MARKER:-} \
+        && $state_file -nt $KA_TUI_DETAIL_CACHE_MARKER ]] && return 0
+    # Some events (suspend and clock-gap TIMER entries) reach only the log, never the
+    # checkpoint; the cached recent-event tail must follow the log too.
+    ka_safe_id "$uuid"
+    log_file="$KA_LOGS_DIR/$REPLY.log"
+    [[ -r $log_file && -n ${KA_TUI_DETAIL_CACHE_MARKER:-} \
+        && $log_file -nt $KA_TUI_DETAIL_CACHE_MARKER ]] && return 0
+    return 1
+}
+
+# Role: Load durable detail text/log data once and refresh it only after an action or save.
+ka_tui_detail_cache_load() {
+    local uuid=$1 target_dir file line text log_file safe_uuid
+    local -a trimmed=()
+    ka_tui_detail_cache_needs_reload "$uuid" || return 0
+    ka_tui_load_target_fields "$uuid" || return 1
+    ka_state_target_dir "$uuid"
+    target_dir=$REPLY
+    KA_TUI_DETAIL_SECONDARY=''
+    if [[ -n $KA_F_SEC_MESSAGE_FILE && -r $target_dir/$KA_F_SEC_MESSAGE_FILE ]]; then
+        IFS= read -r KA_TUI_DETAIL_SECONDARY <"$target_dir/$KA_F_SEC_MESSAGE_FILE" || true
+    fi
+    KA_TUI_DETAIL_MESSAGES=()
+    shopt -s nullglob
+    local -a message_files=("$target_dir/messages"/[0-9][0-9][0-9])
+    shopt -u nullglob
+    for file in "${message_files[@]}"; do
+        [[ -f $file && ! -L $file && -O $file && -r $file ]] || continue
+        text=''
+        IFS= read -r text <"$file" || true
+        KA_TUI_DETAIL_MESSAGES+=("$text")
+    done
+    KA_TUI_DETAIL_EVENTS=()
+    ka_safe_id "$uuid"; safe_uuid=$REPLY
+    log_file="$KA_LOGS_DIR/$safe_uuid.log"
+    if [[ -f $log_file && ! -L $log_file && -O $log_file && -r $log_file ]]; then
+        while IFS= read -r line || [[ -n $line ]]; do
+            KA_TUI_DETAIL_EVENTS+=("$line")
+            if ((${#KA_TUI_DETAIL_EVENTS[@]} > 5)); then
+                trimmed=("${KA_TUI_DETAIL_EVENTS[@]:1}")
+                KA_TUI_DETAIL_EVENTS=("${trimmed[@]}")
+            fi
+        done <"$log_file"
+    fi
+    printf '%s\n' "$uuid" >"$KA_TUI_DETAIL_CACHE_MARKER"
+    KA_TUI_DETAIL_CACHE_VALID=1
+}
+
+# Role: Overlay live countdown/index fields while cached message text remains untouched.
+ka_tui_detail_overlay_index() {
+    local uuid=$1 i
+    for i in "${!KA_R_UUID[@]}"; do
+        [[ ${KA_R_UUID[$i]} == "$uuid" ]] || continue
+        KA_F_STATUS=${KA_R_STATUS[$i]}
+        KA_F_MAIN_REMAIN=${KA_R_MAIN_REMAIN[$i]}; KA_F_MAIN_INTERVAL=${KA_R_MAIN_INTERVAL[$i]}
+        KA_F_SEC_ENABLED=${KA_R_SEC_ENABLED[$i]}; KA_F_SEC_REMAIN=${KA_R_SEC_REMAIN[$i]}
+        KA_F_SEC_INTERVAL=${KA_R_SEC_INTERVAL[$i]}
+        KA_F_LAST=${KA_R_LAST[$i]}; KA_F_REASON=${KA_R_REASON[$i]}
+        KA_F_LAST_DELIVERY_TIME=${KA_R_LAST_DELIVERY_TIME[$i]-}
+        KA_F_LAST_DELIVERY_EVENT=${KA_R_LAST_DELIVERY_EVENT[$i]-}
+        KA_F_LAST_DELIVERY_RESULT=${KA_R_LAST_DELIVERY_RESULT[$i]-}
+        KA_F_LAST_DELIVERY_DETAIL=${KA_R_LAST_DELIVERY_DETAIL[$i]-}
+        KA_F_NEXT_MAIN=${KA_R_NEXT_MAIN[$i]-}; KA_F_NEXT_SECONDARY=${KA_R_NEXT_SECONDARY[$i]-}
+        return 0
+    done
+    return 1
+}
+
 # Role: Render recent per-target events in the detailed keep-alive screen.
 ka_tui_render_recent_events() {
-    local uuid=$1 max=${2:-6} time event detail result detail_w
+    local max=${2:-6} time event detail result detail_w i start
     ka_tui_box_mid "$KA_I_LOG" 'Recent events'
-    detail_w=$(ka_tui_field_width 38 12)
-    while IFS=$'\t' read -r time event detail result; do
+    ka_tui_field_width_set 38 12; detail_w=$REPLY
+    start=0
+    ((${#KA_TUI_DETAIL_EVENTS[@]} > max)) && start=$(( ${#KA_TUI_DETAIL_EVENTS[@]} - max ))
+    for ((i=start; i<${#KA_TUI_DETAIL_EVENTS[@]}; i++)); do
+        IFS=$'\t' read -r time event detail result <<<"${KA_TUI_DETAIL_EVENTS[$i]}"
+        ka_tui_truncate_set "$detail" "$detail_w"; detail=$REPLY
+        ka_tui_truncate_set "$result" 12; result=$REPLY
         printf '%s  %-8s %-11s %-*s %s\033[K\n' "$KA_G_V" "$time" "$event" \
-            "$detail_w" "$(ka_tui_truncate "$detail" "$detail_w")" "$(ka_tui_truncate "$result" 12)"
-    done < <(ka_log_tail "$uuid" "$max")
+            "$detail_w" "$detail" "$result"
+    done
 }
 
 # Role: Draw the detail header as a colored segment bar, falling back to the plain box.
 # Reads the KA_F_* fields loaded by the caller; adds no extra checkpoint parse.
 ka_tui_render_detail_header() {
-    local title now
-    title=$(ka_icon_label "$KA_I_AI" "$(ka_tui_truncate "$KA_F_TYPE / $KA_F_NAME" 32)")
-    now=$(ka_now_hms)
+    local title now duration label
+    ka_tui_truncate_set "$KA_F_TYPE / $KA_F_NAME" 32; label=$REPLY
+    ka_icon_label_set "$KA_I_AI" "$label"; title=$REPLY
+    printf -v now '%(%H:%M:%S)T' -1
     if ka_tui_bar_supported; then
         ka_tui_status_colors "$KA_F_STATUS"
         ka_tui_bar_begin
         ka_tui_bar_add 4 7 "$title" 1
         ka_tui_bar_add "$KA_SEG_BG" "$KA_SEG_FG" "$KA_F_STATUS" 1
-        ka_tui_bar_add 0 7 "main $(ka_format_duration "$KA_F_MAIN_REMAIN")"
-        [[ $KA_F_SEC_ENABLED == 1 ]] && ka_tui_bar_add 0 7 "sec $(ka_format_duration "$KA_F_SEC_REMAIN")"
+        ka_format_duration_set "$KA_F_MAIN_REMAIN"; duration=$REPLY
+        ka_tui_bar_add 0 7 "main $duration"
+        if [[ $KA_F_SEC_ENABLED == 1 ]]; then
+            ka_format_duration_set "$KA_F_SEC_REMAIN"; duration=$REPLY
+            ka_tui_bar_add 0 7 "sec $duration"
+        fi
         ka_tui_bar_add 0 7 "$now"
         ka_tui_bar_end
         if ka_tui_bar_flush; then
@@ -387,19 +524,28 @@ ka_tui_render_detail_header() {
             return 0
         fi
     fi
-    ka_tui_box_top "$KA_I_AI" "Keep Alive $(ka_tui_truncate "$KA_F_TYPE / $KA_F_NAME" 32)" "$now"
+    ka_tui_box_top "$KA_I_AI" "Keep Alive $label" "$now"
     printf '%s\033[K\n%s  Status          ' "$KA_G_V" "$KA_G_V"; ka_tui_status "$KA_F_STATUS"; printf '\n'
+}
+
+# Role: Render one metadata field without per-frame command substitutions.
+ka_tui_detail_field() {
+    local icon=$1 label=$2 value=$3 padding=$4 width=$5 rendered
+    ka_icon_label_set "$icon" "$label"; rendered=$REPLY
+    ka_tui_truncate_set "$value" "$width"; value=$REPLY
+    printf '%s  %s%*s%s\033[K\n' "$KA_G_V" "$rendered" "$padding" '' "$value"
 }
 
 # Role: Render one existing keep-alive target detail view from atomic persisted state.
 ka_tui_render_detail() {
-    local uuid=$1 secondary='' target_dir cols frozen value_w bar_w
-    ka_tui_load_target_fields "$uuid" || return 1
-    ka_state_target_dir "$uuid"
-    target_dir=$REPLY
-    if [[ -n $KA_F_SEC_MESSAGE_FILE ]]; then
-        secondary=$(cat -- "$target_dir/$KA_F_SEC_MESSAGE_FILE" 2>/dev/null || true)
+    local uuid=$1 secondary='' cols frozen value_w bar_w label delivery notify last next_main next_secondary
+    local prompt_w now_epoch
+    if [[ ${KA_TUI_DETAIL_UUID:-} != "$uuid" || -z ${KA_TUI_DETAIL_CACHE_MARKER:-} ]]; then
+        ka_tui_detail_cache_begin "$uuid" || return 1
     fi
+    ka_tui_detail_cache_load "$uuid" || return 1
+    ka_tui_detail_overlay_index "$uuid" || true
+    secondary=$KA_TUI_DETAIL_SECONDARY
 
     ka_tui_frame_begin
     if ka_tui_too_small 52 16; then
@@ -408,30 +554,32 @@ ka_tui_render_detail() {
         return
     fi
     cols=${KA_TUI_COLS}
-    value_w=$(ka_tui_field_width 22 12)
+    ka_tui_field_width_set 22 12; value_w=$REPLY
     bar_w=16; ((cols < 76)) && bar_w=10
     frozen=''
     [[ $KA_F_STATUS == PAUSED || $KA_F_STATUS == UNAVAILABLE ]] && frozen=' · frozen'
     [[ ${KA_ASCII_MODE:-0} == 1 && -n $frozen ]] && frozen=' (frozen)'
 
     ka_tui_render_detail_header
-    printf '%s  ' "$KA_G_V"; ka_icon_label "$KA_I_TERM" 'Target'; printf '          %s\n' "$(ka_tui_truncate "$KA_F_TYPE" "$value_w")"
-    printf '%s  ' "$KA_G_V"; ka_icon_label "$KA_I_SERVICE" 'Backend'; printf '         %s\n' "$(ka_tui_truncate "$KA_F_BACKEND" "$value_w")"
-    # shellcheck disable=SC2153  # KA_I_DIR is the icon set from lib/icons.sh, not KA_F_DIR.
-    printf '%s  ' "$KA_G_V"; ka_icon_label "$KA_I_DIR" 'Directory'; printf '       %s\n' "$(ka_tui_truncate "$KA_F_DIR" "$value_w")"
-    printf '%s  ' "$KA_G_V"; ka_icon_label "$KA_I_SESSION" 'Session'; printf '         %s\n' "$(ka_tui_truncate "$uuid" "$value_w")"
-    printf '%s\033[K\n%s  ' "$KA_G_V" "$KA_G_V"; ka_icon_label "$KA_I_ENTER" 'Delivery'
-    printf '        %s\033[K\n' "$([[ $KA_F_MODE == MESSAGE_ENTER ]] && printf 'MESSAGE + ENTER' || printf 'ENTER ONLY')"
-    # shellcheck disable=SC2153  # KA_I_NOTIFY is the icon set, not KA_F_NOTIFY.
-    printf '%s  ' "$KA_G_V"; ka_icon_label "$KA_I_NOTIFY" 'Notification'
-    printf '    %s\033[K\n' "$([[ $KA_F_NOTIFY == 1 ]] && printf ON || printf OFF)"
+    ka_tui_detail_field "$KA_I_TERM" 'Target' "$KA_F_TYPE" 10 "$value_w"
+    ka_tui_detail_field "$KA_I_SERVICE" 'Backend' "$KA_F_BACKEND" 9 "$value_w"
+    ka_tui_detail_field "$KA_I_DIR" 'Directory' "$KA_F_DIR" 7 "$value_w"
+    ka_tui_detail_field "$KA_I_SESSION" 'Session' "$uuid" 9 "$value_w"
+    ka_icon_label_set "$KA_I_ENTER" 'Delivery'; label=$REPLY
+    [[ $KA_F_MODE == MESSAGE_ENTER ]] && delivery='MESSAGE + ENTER' || delivery='ENTER ONLY'
+    printf '%s\033[K\n%s  %s        %s\033[K\n' "$KA_G_V" "$KA_G_V" "$label" "$delivery"
+    ka_icon_label_set "$KA_I_NOTIFY" 'Notification'; label=$REPLY
+    [[ $KA_F_NOTIFY == 1 ]] && notify=ON || notify=OFF
+    printf '%s  %s    %s\033[K\n' "$KA_G_V" "$label" "$notify"
 
     if [[ $KA_F_STATUS == UNAVAILABLE ]]; then
+        ka_tui_truncate_set "$KA_F_LAST" "$value_w"; label=$REPLY
+        ka_tui_truncate_set "$KA_F_REASON" "$value_w"; last=$REPLY
         printf '%s\033[K\n%s  Last seen        %s\033[K\n%s  Reason           %s\033[K\n' "$KA_G_V" \
-            "$KA_G_V" "$(ka_tui_truncate "$KA_F_LAST" "$value_w")" \
-            "$KA_G_V" "$(ka_tui_truncate "$KA_F_REASON" "$value_w")"
-        printf '%s\033[K\n%s  %s\033[K\n' "$KA_G_V" "$KA_G_V" \
-            "$(ka_tui_truncate 'Timers are frozen. This record remains until you delete it.' "$(ka_tui_field_width 3)")"
+            "$KA_G_V" "$label" "$KA_G_V" "$last"
+        ka_tui_field_width_set 3; prompt_w=$REPLY
+        ka_tui_truncate_set 'Timers are frozen. This record remains until you delete it.' "$prompt_w"
+        printf '%s\033[K\n%s  %s\033[K\n' "$KA_G_V" "$KA_G_V" "$REPLY"
     fi
 
     ka_tui_box_mid "$KA_I_TIMER" 'Timers'
@@ -442,10 +590,46 @@ ka_tui_render_detail() {
         # The secondary is a one-shot nudge; say so once it has fired.
         [[ ${KA_F_SEC_DONE:-0} == 1 ]] && sec_note=' · sent (one-shot)'
         ka_tui_render_timer_row SECONDARY "$KA_F_SEC_REMAIN" "$KA_F_SEC_INTERVAL" "$bar_w" "$sec_note"
-        printf '%s  Prompt     %s\033[K\n' "$KA_G_V" "$(ka_tui_truncate "$secondary" "$(ka_tui_field_width 15 12)")"
+        ka_tui_field_width_set 15 12; prompt_w=$REPLY
+        ka_tui_truncate_set "$secondary" "$prompt_w"
+        printf '%s  Prompt     %s\033[K\n' "$KA_G_V" "$REPLY"
     else
         printf '%s  SECONDARY  disabled\033[K\n' "$KA_G_V"
     fi
+
+    next_main=${KA_F_NEXT_MAIN:-}
+    if [[ $KA_F_STATUS == ACTIVE ]]; then
+        if [[ -z $next_main ]]; then
+            printf -v now_epoch '%(%s)T' -1
+            printf -v next_main '%(%F %T)T' "$((now_epoch + KA_F_MAIN_REMAIN))"
+        fi
+    elif [[ $KA_F_STATUS == PAUSED ]]; then
+        next_main='paused'
+    else
+        next_main='unavailable'
+    fi
+    if [[ $KA_F_SEC_ENABLED != 1 ]]; then
+        next_secondary='disabled'
+    elif [[ $KA_F_STATUS == ACTIVE && -n ${KA_F_NEXT_SECONDARY:-} ]]; then
+        next_secondary=$KA_F_NEXT_SECONDARY
+    elif [[ $KA_F_STATUS == ACTIVE ]]; then
+        next_secondary='sent'
+    elif [[ $KA_F_STATUS == PAUSED ]]; then
+        next_secondary='paused'
+    else
+        next_secondary='unavailable'
+    fi
+    ka_tui_truncate_set "$next_main" "$value_w"; next_main=$REPLY
+    ka_tui_truncate_set "$next_secondary" "$value_w"; next_secondary=$REPLY
+    if [[ -z ${KA_F_LAST_DELIVERY_EVENT:-} ]]; then
+        last='never'
+    else
+        last="${KA_F_LAST_DELIVERY_TIME#* } $KA_F_LAST_DELIVERY_EVENT $KA_F_LAST_DELIVERY_RESULT — $KA_F_LAST_DELIVERY_DETAIL"
+    fi
+    ka_tui_truncate_set "$last" "$value_w"; last=$REPLY
+    printf '%s  Next main      %s\033[K\n' "$KA_G_V" "$next_main"
+    printf '%s  Next secondary %s\033[K\n' "$KA_G_V" "$next_secondary"
+    printf '%s  Last delivery  %s\033[K\n' "$KA_G_V" "$last"
 
     ka_tui_box_mid "$KA_I_MESSAGE" 'Message rotation'
     ka_tui_render_message_rotation "$uuid" "$KA_F_MAIN_INDEX"
@@ -471,31 +655,29 @@ ka_tui_render_detail() {
 # Role: Render one labeled countdown row, dropping the interval suffix on narrow terminals.
 # The fixed-width form was the last line in the detail view that could still overrun 52 columns.
 ka_tui_render_timer_row() {
-    local label=$1 remain=$2 interval=$3 bar_w=$4 frozen=$5
+    local label=$1 remain=$2 interval=$3 bar_w=$4 frozen=$5 remain_text interval_text
     printf '%s  %-11s' "$KA_G_V" "$label"
     ka_tui_progress "$remain" "$interval" "$bar_w"
+    ka_format_duration_set "$remain"; remain_text=$REPLY
     if ((${KA_TUI_COLS:-80} >= 62)); then
-        printf '  %-10s   interval %s%s\033[K\n' "$(ka_format_duration "$remain")" \
-            "$(ka_format_duration "$interval")" "$frozen"
+        ka_format_duration_set "$interval"; interval_text=$REPLY
+        printf '  %-10s   interval %s%s\033[K\n' "$remain_text" "$interval_text" "$frozen"
     else
-        printf '  %s%s\033[K\n' "$(ka_format_duration "$remain")" "$frozen"
+        printf '  %s%s\033[K\n' "$remain_text" "$frozen"
     fi
 }
 
 # Role: List a target's stored message rotation and mark the entry that fires next.
 # Kept separate so the glob-option change stays local instead of leaking to the caller.
 ka_tui_render_message_rotation() {
-    local uuid=$1 index=$2 dir file number=0 marker text_w had_nullglob=0
-    ka_state_target_dir "$uuid"; dir=$REPLY
-    text_w=$(ka_tui_field_width 12 12)
-    shopt -q nullglob && had_nullglob=1
-    shopt -s nullglob
-    for file in "$dir/messages"/[0-9][0-9][0-9]; do
+    local index=$2 number=0 marker text_w text
+    ka_tui_field_width_set 12 12; text_w=$REPLY
+    for text in "${KA_TUI_DETAIL_MESSAGES[@]}"; do
         ((number += 1)); marker=' '
         ((number - 1 == index)) && marker=$KA_G_CUR
-        printf '%s   %s %2d. %s\033[K\n' "$KA_G_V" "$marker" "$number" "$(ka_tui_truncate "$(cat -- "$file")" "$text_w")"
+        ka_tui_truncate_set "$text" "$text_w"; text=$REPLY
+        printf '%s   %s %2d. %s\033[K\n' "$KA_G_V" "$marker" "$number" "$text"
     done
-    ((had_nullglob == 1)) || shopt -u nullglob
 }
 
 # Role: Provide a scrollable full per-target event-log viewer with vim-like navigation.
@@ -543,20 +725,23 @@ ka_tui_logs() {
 # Role: Run the detail control loop for one existing keep-alive until the user returns/deletes it.
 ka_tui_detail() {
     local uuid=$1 key status type name
+    ka_tui_detail_cache_begin "$uuid" || return 0
     ka_state_target_dir "$uuid"
     local state_file="$REPLY/state.tsv"
     while [[ -r $state_file ]]; do
-        ka_tui_render_detail "$uuid" || return 0
+        ka_tui_index_changed && ka_tui_load_index
+        ka_tui_render_detail "$uuid" || { ka_tui_detail_cache_end; return 0; }
         ka_tui_read_key 1 || continue
         key=$KA_KEY
         # KA_F_* were populated by the render above; no second parse of state.tsv.
         status=${KA_F_STATUS:-UNAVAILABLE}; type=${KA_F_TYPE-}; name=${KA_F_NAME-}
         case $key in
-            ESC|q) return 0 ;;
+            ESC|q) ka_tui_detail_cache_end; return 0 ;;
             l|L) ka_tui_logs "$uuid" || true ;;
             d|D)
                 if ka_tui_confirm_delete "$type / $name"; then
                     ka_tui_action DELETE "$uuid" || true
+                    ka_tui_detail_cache_end
                     return 0
                 fi
                 ;;
@@ -569,10 +754,12 @@ ka_tui_detail() {
             c|C)
                 if [[ $status != UNAVAILABLE ]]; then
                     ka_tui_run_wizard "$uuid" "$status" "$type" "$name" || true
+                    ka_tui_detail_cache_invalidate
                 fi
                 ;;
         esac
     done
+    ka_tui_detail_cache_end
 }
 
 # Role: Open the correct screen for the highlighted row, wizard for AVAILABLE and detail otherwise.
@@ -667,6 +854,9 @@ ka_tui_reexec() {
     KA_TUI_SELF_FD=''
     export KEEPALIVE_TUI_SELECT=$uuid
     shopt -s execfail
+    # With execfail, a failed replacement returns here so the old TUI can restore its
+    # terminal; a successful replacement must replace this process rather than fork.
+    # shellcheck disable=SC2093
     exec "$KA_INVOKED_AS" ${KA_CLI_ARGS[@]+"${KA_CLI_ARGS[@]}"}
     shopt -u execfail
     unset KEEPALIVE_TUI_SELECT

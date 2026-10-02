@@ -18,6 +18,7 @@ INSTALL_OLD_SOCKET_ACTIVE=0
 INSTALL_OLD_SERVICE_ENABLE_STATE=''
 INSTALL_OLD_SERVICE_ACTIVE=0
 INSTALL_ROLLBACK_ARMED=0
+INSTALL_ALLOW_DOWNGRADE=0
 INSTALL_MANAGED_LINKS=(
     sockets.target.wants/keepalive.socket
     sockets.target.wants/keepalive.service
@@ -39,7 +40,9 @@ project_root() {
 canonical_path() {
     local path=$1 canonical
     [[ $path == /* ]] || return 1
-    canonical=$(readlink -m -- "$path") || return 1
+    canonical=$(readlink -f -- "$path" 2>/dev/null) \
+        || canonical=$(readlink -m -- "$path") \
+        || return 1
     [[ $canonical == /* ]] || return 1
     REPLY=$canonical
 }
@@ -48,6 +51,155 @@ canonical_path() {
 path_is_within() {
     local path=$1 parent=$2
     [[ $path == "$parent" || $path == "$parent/"* ]]
+}
+
+# Role: Accept group write only for the current user's private primary group.
+directory_group_is_private() {
+    local gid=$1 user_name primary_gid group_record group_name group_gid group_members passwd_records
+    local passwd_name passwd_password passwd_uid passwd_gid passwd_gecos passwd_home passwd_shell
+    user_name=$(id -un) || return 1
+    primary_gid=$(id -g) || return 1
+    [[ $gid == "$primary_gid" ]] || return 1
+    group_record=$(getent group "$gid") || return 1
+    IFS=: read -r group_name _ group_gid group_members <<<"$group_record"
+    [[ $group_name == "$user_name" && $group_gid == "$gid" && -z $group_members ]] || return 1
+    passwd_records=$(getent passwd) || return 1
+    while IFS=: read -r passwd_name passwd_password passwd_uid passwd_gid passwd_gecos passwd_home passwd_shell; do
+        [[ $passwd_gid == "$gid" && $passwd_name != "$user_name" ]] && return 1
+    done <<<"$passwd_records"
+    return 0
+}
+
+# Role: Validate canonical directory components and the permitted private-group policy.
+# Symlinked configured roots are canonicalized before this call; a symlink seen here is
+# therefore a newly planted component below a trusted root and is rejected.
+directory_components_are_safe() {
+    local path=${1:-} allow_sticky_final=${2:-0} normalized current component mode mode_bits owner group remaining sticky_exception
+    [[ $path == /* ]] || return 1
+    normalized=$path
+    while [[ $normalized != / && $normalized == */ ]]; do normalized=${normalized%/}; done
+    remaining=${normalized#/}
+    current=/
+    while [[ -n $remaining ]]; do
+        component=${remaining%%/*}
+        if [[ $remaining == */* ]]; then remaining=${remaining#*/}; else remaining=''; fi
+        [[ -n $component && $component != . && $component != .. ]] || return 1
+        if [[ $current == / ]]; then current="/$component"; else current="$current/$component"; fi
+        [[ -L $current ]] && return 1
+        [[ -e $current ]] || break
+        [[ -d $current ]] || return 1
+        owner=$(stat -Lc '%u' -- "$current") || return 1
+        [[ $owner == "$EUID" || $owner == 0 ]] || return 1
+        mode=$(stat -Lc '%a' -- "$current") || return 1
+        group=$(stat -Lc '%g' -- "$current") || return 1
+        [[ $mode =~ ^[0-7]{3,4}$ ]] || return 1
+        mode_bits=$((8#$mode))
+        sticky_exception=0
+        if (( owner == 0 && (mode_bits & 01000) != 0 )) \
+            && [[ $current != "$normalized" || $allow_sticky_final == 1 ]]; then
+            sticky_exception=1
+        fi
+        (( (mode_bits & 0002) == 0 || sticky_exception == 1 )) || return 1
+        if (( (mode_bits & 0020) != 0 && sticky_exception == 0 )) \
+            && ! directory_group_is_private "$group"; then
+            return 1
+        fi
+        if [[ $current == "$normalized" && $owner != "$EUID" && $allow_sticky_final != 1 ]]; then return 1; fi
+    done
+}
+
+# Role: Create a directory tree one component at a time without following a symlink.
+ensure_directory_tree() {
+    local path=$1 normalized current component remaining
+    [[ $path == /* ]] || return 1
+    normalized=$path
+    while [[ $normalized != / && $normalized == */ ]]; do normalized=${normalized%/}; done
+    remaining=${normalized#/}
+    current=/
+    while [[ -n $remaining ]]; do
+        component=${remaining%%/*}
+        if [[ $remaining == */* ]]; then remaining=${remaining#*/}; else remaining=''; fi
+        [[ -n $component && $component != . && $component != .. ]] || return 1
+        if [[ $current == / ]]; then current="/$component"; else current="$current/$component"; fi
+        if [[ -L $current || (-e $current && ! -d $current) ]]; then return 1; fi
+        if [[ ! -e $current ]]; then mkdir -- "$current" || return 1; fi
+        directory_components_are_safe "$current" 1 || return 1
+    done
+    directory_components_are_safe "$normalized"
+}
+
+# Role: Validate one managed unit entry and every parent before removing or replacing it.
+unit_entry_is_safe() {
+    local path=$1 parent
+    parent=${path%/*}
+    [[ $parent != "$path" ]] || parent=/
+    directory_components_are_safe "$parent" || return 1
+    [[ ! -d $path || -L $path ]] || return 1
+    if [[ -L $path ]]; then
+        [[ $(stat -c '%u' -- "$path") == "$EUID" ]] || return 1
+    elif [[ -e $path ]]; then
+        [[ -f $path && -O $path ]] || return 1
+    fi
+}
+
+# Role: Compare two strict semantic versions and put -1, 0, or 1 in REPLY.
+semver_compare() {
+    local left=$1 right=$2 lpart rpart i
+    local -a left_parts=() right_parts=()
+    [[ $left =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && $right =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+    IFS=. read -r -a left_parts <<<"$left"
+    IFS=. read -r -a right_parts <<<"$right"
+    for ((i = 0; i < 3; i += 1)); do
+        lpart=${left_parts[$i]}
+        rpart=${right_parts[$i]}
+        while [[ ${#lpart} -gt 1 && ${lpart:0:1} == 0 ]]; do lpart=${lpart:1}; done
+        while [[ ${#rpart} -gt 1 && ${rpart:0:1} == 0 ]]; do rpart=${rpart:1}; done
+        if ((${#lpart} < ${#rpart})); then REPLY=-1; return 0; fi
+        if ((${#lpart} > ${#rpart})); then REPLY=1; return 0; fi
+        if [[ $lpart != "$rpart" ]]; then
+            if [[ $lpart < $rpart ]]; then REPLY=-1; else REPLY=1; fi
+            return 0
+        fi
+    done
+    REPLY=0
+}
+
+# Role: Read a release version declaration without sourcing an installed tree.
+read_declared_version() {
+    local file=$1 line pattern
+    pattern="^KEEPALIVE_VERSION='([0-9]+\\.[0-9]+\\.[0-9]+)'$"
+    [[ -r $file ]] || return 1
+    while IFS= read -r line; do
+        if [[ $line =~ $pattern ]]; then
+            REPLY=${BASH_REMATCH[1]}
+            return 0
+        fi
+    done <"$file"
+    return 1
+}
+
+# Role: Return true only for a previously managed and validated unit-root marker.
+read_validated_persisted_unit_root() {
+    local share=$1 persisted normalized recorded_fingerprint current_fingerprint
+    local recorded_device recorded_inode recorded_owner recorded_mode
+    REPLY=''
+    installed_share_is_managed "$share" || return 1
+    [[ -f $share/.installed-unit-root && ! -L $share/.installed-unit-root \
+        && -r $share/.installed-unit-root && -O $share/.installed-unit-root ]] || return 1
+    [[ -f $share/.installed-unit-root.validation && ! -L $share/.installed-unit-root.validation \
+        && -r $share/.installed-unit-root.validation && -O $share/.installed-unit-root.validation ]] || return 1
+    IFS= read -r persisted <"$share/.installed-unit-root" || return 1
+    IFS= read -r recorded_fingerprint <"$share/.installed-unit-root.validation" || return 1
+    [[ $persisted == /*/systemd/user ]] || return 1
+    canonical_path "$persisted" || return 1
+    normalized=$REPLY
+    [[ $normalized == "$persisted" ]] || return 1
+    directory_components_are_safe "$normalized" || return 1
+    IFS=: read -r recorded_device recorded_inode recorded_owner recorded_mode <<<"$recorded_fingerprint"
+    recorded_fingerprint="$recorded_device:$recorded_inode:$recorded_owner"
+    current_fingerprint=$(stat -Lc '%d:%i:%u' -- "$normalized") || return 1
+    [[ $recorded_fingerprint == "$current_fingerprint" ]] || return 1
+    REPLY=$normalized
 }
 
 # Role: Return true when either canonical path contains the other.
@@ -245,18 +397,32 @@ prepare_user_manager_environment() {
 # Role: Reject directory-shaped reserved link paths before any link cleanup begins.
 validate_managed_unit_links() {
     local unit_root=$1 relative path
+    directory_components_are_safe "$unit_root" || return 1
     for relative in "${INSTALL_MANAGED_LINKS[@]}"; do
         path="$unit_root/$relative"
-        [[ ! -d $path || -L $path ]] || return 1
+        unit_entry_is_safe "$path" || return 1
     done
 }
 
 # Role: Remove every enablement link created by current or legacy Keep Alive releases.
 remove_managed_unit_links() {
-    local unit_root=$1 relative
+    local unit_root=$1 relative path
     validate_managed_unit_links "$unit_root" || return 1
     for relative in "${INSTALL_MANAGED_LINKS[@]}"; do
-        rm -f -- "$unit_root/$relative" || return 1
+        path="$unit_root/$relative"
+        unit_entry_is_safe "$path" || return 1
+        rm -f -- "$path" || return 1
+    done
+}
+
+# Role: Remove only the two exact unit files belonging to a validated unit root.
+remove_managed_unit_files() {
+    local unit_root=$1 unit path
+    directory_components_are_safe "$unit_root" || return 1
+    for unit in keepalive.socket keepalive.service; do
+        path="$unit_root/$unit"
+        unit_entry_is_safe "$path" || return 1
+        rm -f -- "$path" || return 1
     done
 }
 
@@ -291,6 +457,7 @@ restore_managed_unit_links() {
         backup="$INSTALL_UNIT_BACKUP/links/$relative"
         [[ -e $backup || -L $backup ]] || continue
         destination="$INSTALL_UNITS/$relative"
+        unit_entry_is_safe "$destination" || return 1
         mkdir -p -- "${destination%/*}" || return 1
         cp -a -- "$backup" "$destination" || return 1
     done
@@ -300,6 +467,7 @@ restore_managed_unit_links() {
 install_unit_file() {
     local source=$1 destination=$2
     local temporary
+    unit_entry_is_safe "$destination" || return 1
     temporary=$(mktemp "${destination}.new.XXXXXX") || return 1
     cp -f -- "$source" "$temporary" || { rm -f -- "$temporary"; return 1; }
     chmod 0644 "$temporary" || { rm -f -- "$temporary"; return 1; }
@@ -309,7 +477,7 @@ install_unit_file() {
 # Role: Restore one pre-install unit file, or its prior absence, during rollback.
 restore_unit_file() {
     local name=$1 destination="$INSTALL_UNITS/$1"
-    [[ ! -d $destination || -L $destination ]] || return 1
+    unit_entry_is_safe "$destination" || return 1
     rm -f -- "$destination" || return 1
     if [[ -e $INSTALL_UNIT_BACKUP/$name || -L $INSTALL_UNIT_BACKUP/$name ]]; then
         cp -a -- "$INSTALL_UNIT_BACKUP/$name" "$destination" || return 1
@@ -369,6 +537,14 @@ finish_install() {
 # Role: Install source, symlink, and user systemd units without requiring sudo.
 main() {
     ((EUID != 0)) || die 'do not run this installer with sudo/root'
+    local option
+    while (($#)); do
+        case $1 in
+            --allow-downgrade) INSTALL_ALLOW_DOWNGRADE=1 ;;
+            *) die "usage: ${0##*/} [--allow-downgrade]" ;;
+        esac
+        shift
+    done
     [[ ${HOME:-} == /* ]] || die 'HOME must be an absolute path for a per-user installation'
     command -v systemctl >/dev/null 2>&1 || die 'systemctl is required for user-service installation'
     prepare_user_manager_environment
@@ -427,17 +603,26 @@ main() {
         || die 'could not canonicalize the systemd user manager configuration path'
     manager_effective_config_home=$REPLY
 
-    local root root_canonical share share_canonical share_parent bin config_home caller_config_home units legacy_units unit
-    local previous_unit_root='' persisted_unit_root=''
+    local root root_canonical share share_canonical share_parent bin config_home caller_config_home units legacy_units legacy_config_home unit
+    local source_version installed_version raw_share
+    local previous_unit_root=''
     local -a legacy_unit_roots=()
     root=$(project_root)
     canonical_path "$root" || die 'could not canonicalize the installer source tree'
     root_canonical=$REPLY
-    share="$install_home/.local/share/keepalive-manager"
-    canonical_path "$share" || die 'could not canonicalize the installation path'
-    share_canonical=$REPLY
+    raw_share="$install_home/.local/share/keepalive-manager"
+    [[ ! -L $raw_share ]] || die "$raw_share is a symlink; refusing to replace it"
+    canonical_path "$raw_share" || die 'could not canonicalize the installation path'
+    share=$REPLY
+    share_canonical=$share
     share_parent=${share%/*}
-    bin="$install_home/.local/bin"
+    canonical_path "$install_home/.local/bin" || die 'could not canonicalize the command directory'
+    bin=$REPLY
+    directory_components_are_safe "$install_home" || die 'HOME resolves to an unsafe directory'
+    directory_components_are_safe "$share_parent" || die 'the installation parent has unsafe ownership or permissions'
+    directory_components_are_safe "$bin" || die 'the command directory has unsafe ownership or permissions'
+    read_declared_version "$root/keepalive" || die 'the source tree has no valid KEEPALIVE_VERSION'
+    source_version=$REPLY
     if [[ -n ${XDG_CONFIG_HOME:-} ]]; then
         canonical_path "$XDG_CONFIG_HOME" || die 'XDG_CONFIG_HOME must be an absolute path'
         caller_config_home=$REPLY
@@ -445,13 +630,21 @@ main() {
         canonical_path "$install_home/.config" || die 'could not canonicalize the default configuration path'
         caller_config_home=$REPLY
     fi
+    paths_overlap "$caller_config_home" "$share_canonical" \
+        && die 'XDG_CONFIG_HOME and the installed source tree must not overlap'
+    paths_overlap "$caller_config_home" "$root_canonical" \
+        && die 'XDG_CONFIG_HOME and the installer source tree must not overlap'
+    directory_components_are_safe "$caller_config_home" \
+        || die 'XDG_CONFIG_HOME resolves to an unsafe directory'
     if [[ $caller_config_home != "$manager_effective_config_home" ]]; then
         die 'the shell and systemd user manager resolve different XDG_CONFIG_HOME paths; configure the login session and retry'
     fi
     config_home=$manager_effective_config_home
     canonical_path "$config_home/systemd/user" || die 'could not canonicalize the systemd user unit path'
     units=$REPLY
-    canonical_path "$install_home/.config/systemd/user" || die 'could not canonicalize the default systemd user unit path'
+    canonical_path "$install_home/.config" || die 'could not canonicalize the default configuration path'
+    legacy_config_home=$REPLY
+    canonical_path "$legacy_config_home/systemd/user" || die 'could not canonicalize the default systemd user unit path'
     legacy_units=$REPLY
     paths_overlap "$config_home" "$share_canonical" \
         && die 'XDG_CONFIG_HOME and the installed source tree must not overlap'
@@ -466,12 +659,15 @@ main() {
             || die "$share exists but is not a normal directory"
         installed_share_is_managed "$share" \
             || die "$share exists but is not a recognized Keep Alive Manager installation; preserving it"
-    fi
-    if [[ -f $share/.installed-unit-root && ! -L $share/.installed-unit-root \
-        && -r $share/.installed-unit-root ]]; then
-        IFS= read -r persisted_unit_root <"$share/.installed-unit-root" || true
-        if [[ $persisted_unit_root == /*/systemd/user ]]; then
-            canonical_path "$persisted_unit_root" && previous_unit_root=$REPLY
+        read_declared_version "$share/keepalive" || die 'the installed tree has no valid KEEPALIVE_VERSION'
+        installed_version=$REPLY
+        semver_compare "$source_version" "$installed_version" \
+            || die 'could not compare the source and installed semantic versions'
+        if [[ $REPLY == -1 && $INSTALL_ALLOW_DOWNGRADE == 0 ]]; then
+            die "refusing downgrade from $installed_version to $source_version: older code may not understand the current checkpoint format; use --allow-downgrade only after backing up runtime state and accepting the checkpoint-compatibility risk"
+        fi
+        if read_validated_persisted_unit_root "$share"; then
+            previous_unit_root=$REPLY
         fi
     fi
     legacy_unit_roots+=("$legacy_units")
@@ -480,9 +676,11 @@ main() {
     INSTALL_UNITS=$units
     INSTALL_LINK="$bin/keepalive"
 
-    mkdir -p "$share_parent" "$bin" "$units"
-    canonical_path "$units" || die 'could not canonicalize the created systemd user unit path'
-    units=$REPLY
+    ensure_directory_tree "$share_parent" || die 'could not create a safe installation parent'
+    ensure_directory_tree "$bin" || die 'could not create a safe command directory'
+    ensure_directory_tree "$units" || die 'could not create a safe systemd user unit directory'
+    directory_components_are_safe "$units" \
+        || die 'the systemd user unit path has unsafe ownership, permissions, or symlinked parents'
     INSTALL_UNITS=$units
     paths_overlap "$units" "$share_canonical" \
         && die 'the systemd user unit path and installed source tree overlap after creation'
@@ -498,16 +696,20 @@ main() {
     # Build the entire source payload before touching the currently usable install.
     INSTALL_STAGE=$(mktemp -d "$share_parent/.keepalive-manager.install.XXXXXX")
     cp -a -- "$root/lib" "$root/systemd" "$root/docs" "$root/tests" "$root/scripts" "$INSTALL_STAGE/"
-    cp -f -- "$root/keepalive" "$root/README.md" "$INSTALL_STAGE/"
+    cp -f -- "$root/keepalive" "$root/README.md" "$root/CHANGELOG.md" \
+        "$root/LICENSE" "$root/CONTRIBUTING.md" "$root/VALIDATION.md" "$INSTALL_STAGE/"
     chmod +x "$INSTALL_STAGE/keepalive" "$INSTALL_STAGE/scripts/"*.sh "$INSTALL_STAGE/tests/"*.sh
     printf '%s\n' "$units" >"$INSTALL_STAGE/.installed-unit-root"
-    chmod 0600 "$INSTALL_STAGE/.installed-unit-root"
+    stat -Lc '%d:%i:%u' -- "$units" >"$INSTALL_STAGE/.installed-unit-root.validation"
+    chmod 0600 "$INSTALL_STAGE/.installed-unit-root" "$INSTALL_STAGE/.installed-unit-root.validation"
 
     INSTALL_UNIT_BACKUP=$(mktemp -d "$share_parent/.keepalive-manager.units.XXXXXX")
     for unit in keepalive.service keepalive.socket; do
         if [[ -e $units/$unit && ! -f $units/$unit && ! -L $units/$unit ]]; then
             die "$units/$unit exists but is not a regular file or symlink"
         fi
+        unit_entry_is_safe "$units/$unit" \
+            || die "$units/$unit has an unsafe parent or is not a regular file or symlink"
         if [[ -e $units/$unit || -L $units/$unit ]]; then
             cp -a -- "$units/$unit" "$INSTALL_UNIT_BACKUP/$unit"
         fi
@@ -601,7 +803,7 @@ main() {
         [[ $old_root != "$units" && -z ${cleaned_roots[$old_root]+x} ]] || continue
         cleaned_roots["$old_root"]=1
         if ! remove_managed_unit_links "$old_root" \
-            || ! rm -f -- "$old_root/keepalive.socket" "$old_root/keepalive.service"; then
+            || ! remove_managed_unit_files "$old_root"; then
             printf 'install: warning: could not remove every legacy unit file under %s\n' \
                 "$old_root" >&2
         fi

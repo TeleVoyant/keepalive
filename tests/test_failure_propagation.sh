@@ -119,15 +119,17 @@ mkdir -p "$publish_handler_dir"
 ka_write_scalar "$publish_handler_dir/command" PING
 
 # Role: Simulate failure while committing the client-visible runtime index.
+# Publication happens after the command, so its failure must not turn a completed command
+# into ERROR: that would make a client retry and duplicate the already-applied operation.
 ka_state_publish_index() { return 79; }
 rc=0
 ka_ipc_handle_request "$publish_handler_id" >/dev/null || rc=$?
-assert_eq 79 "$rc" 'request handler propagates index publication failure'
-assert_eq ERROR "$(ka_read_first_line "$KA_RESPONSES_DIR/$publish_handler_id/status")" \
-    'index publication failure changes a successful command response to ERROR'
-assert_eq 'could not publish the runtime index' \
-    "$(ka_read_first_line "$KA_RESPONSES_DIR/$publish_handler_id/message")" \
-    'index publication failure reaches the client with a precise reason'
+assert_eq 0 "$rc" 'request handler preserves command success after index publication failure'
+assert_eq OK "$(ka_read_first_line "$KA_RESPONSES_DIR/$publish_handler_id/status")" \
+    'index publication failure does not change a successful command response to ERROR'
+assert_contains "$KA_RESPONSES_DIR/$publish_handler_id/message" \
+    'runtime index publication deferred' \
+    'index publication failure reaches the client as a stale-index warning'
 source "$TEST_ROOT/lib/state.sh"
 
 handler_id='response-handler-fail'

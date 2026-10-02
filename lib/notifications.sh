@@ -10,12 +10,6 @@ ka_notify_available() {
     fi
 }
 
-# Role: Return a validated positive notification subprocess timeout in integer seconds.
-ka_notify_timeout_seconds() {
-    ka_tunable KEEPALIVE_NOTIFY_TIMEOUT 2
-    printf '%s' "$REPLY"
-}
-
 # Role: Invoke notify-send under a hard deadline and expose its transport status.
 ka_notify_call() {
     ka_notify_available || return 127
@@ -29,6 +23,12 @@ ka_notify_call() {
 ka_notify() {
     local title=$1 body=$2 urgency=${3:-normal}
     ka_notify_available || return 0
+    # notify-send may pass these strings to a markup-capable notification server. Apply
+    # the same terminal-safe filter first, then escape markup metacharacters in order.
+    ka_sanitize_human_set "$title"; title=$REPLY
+    ka_sanitize_human_set "$body"; body=$REPLY
+    title=${title//&/\&amp;}; title=${title//</\&lt;}; title=${title//>/\&gt;}
+    body=${body//&/\&amp;}; body=${body//</\&lt;}; body=${body//>/\&gt;}
     ka_notify_call -a 'Keep Alive' -u "$urgency" -t 4000 -- "$title" "$body" >/dev/null 2>&1 || true
 }
 

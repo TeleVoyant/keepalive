@@ -4,8 +4,8 @@ This directory is a durable, evidence-based handoff for future work on this
 repository.
 
 It records the repository understanding produced from a full source, test, documentation,
-service-unit, and history review, most recently refreshed after the final portability and
-transaction-safety review and the performance and update-reload pass on 2026-10-01.
+service-unit, and history review, most recently refreshed for the 2026-10-02 uncommitted
+fix round on top of the current release.
 
 It does **not** contain hidden model instructions, private chain-of-thought, secrets,
 or transient platform state. It contains the useful project context another
@@ -15,21 +15,23 @@ maintainer or coding agent needs in order to continue safely.
 
 - Repository: `TeleVoyant/keepalive`
 - Branch: `master`
-- Reviewed baseline commit: the `v1.1.0` release commit (previous release `v1.0.0` at
-  `2ea6951`, Orca integration at `ea3d6f3`)
-- Release: **1.1.0**, released 2026-10-01 and tagged `v1.1.0`. Licensed MIT.
-- Product version: `1.1.0`
+- Release: **1.1.1**, released 2026-10-02 and tagged `v1.1.1`. Licensed MIT.
+- Reviewed baseline commit: the `v1.1.1` release commit (previous releases `v1.1.0` at
+  `cf27db4` and `v1.0.0` at `2ea6951`; Orca integration at `ea3d6f3`)
+- Product version: `1.1.1`
 - Implementation: Bash 5+, Linux `/proc`, Konsole D-Bus and Orca CLI adapters,
   `systemd --user`
-- Contents of 1.1.0 since `ea3d6f3`, in order: the cross-distribution systemd portability and
+- Contents since `ea3d6f3`, in order: 1.1.0 = the cross-distribution systemd portability and
   transaction-safety hardening pass, then the **2026-10-01 performance and update-reload
   pass** - deadline-paced daemon loop, presence-driven publication and discovery,
   fork-free hot paths, single-`jq` Orca parsing, low-priority unit scheduling, graceful
-  stop, installer reload verification, and TUI self-reload after an update. Measured
+  stop, installer reload verification, and TUI self-reload after an update. 1.1.1 = the
+  **2026-10-02 fix round**, which adds scheduler ownership, IPC/profile/output safety,
+  CLI configure/status, release tooling, and final classifier/discovery hardening. Measured
   results are in RISKS.md; method and safety rules in DEVELOPMENT.md.
-- Tests: 27 files, 1040 assertions, all passing (`./scripts/dev-check.sh`).
-- Installed on the development host from the release tree (2026-10-01); the live
-  daemon runs 1.1.0.
+- Tests: 31 files, 1519 assertions, all passing (`./tests/run.sh`; dev-check is the final gate).
+- Installed on the development host from the release tree (2026-10-02); the live
+  daemon runs 1.1.1.
 - Orca's volatile CLI/JSON contract stays isolated in `lib/orca.sh`, with generic
   dispatch in `lib/transport.sh` and a mock-backed daemon integration test.
 - `.agent/` was renamed to `.agents/` by the user; do not recreate the singular
@@ -53,7 +55,7 @@ these notes deliberately do not duplicate it:
 - [`../docs/CONFIGURATION.md`](../docs/CONFIGURATION.md): every environment knob with its
   default and the reasoning for it.
 - [`../docs/TROUBLESHOOTING.md`](../docs/TROUBLESHOOTING.md): symptom-first diagnosis.
-- [`../docs/TESTING.md`](../docs/TESTING.md): what each of the 1040 assertions covers and
+- [`../docs/TESTING.md`](../docs/TESTING.md): what each of the 1519 assertions covers and
   the conventions for adding one.
 - [`../CONTRIBUTING.md`](../CONTRIBUTING.md): the conventions the automated checks
   enforce.

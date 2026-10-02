@@ -1,7 +1,7 @@
 # Validation Report
 
-Date: 2026-10-01
-Version: 1.1.0
+Date: 2026-10-02
+Version: 1.1.1
 
 ## Automated result
 
@@ -11,8 +11,8 @@ The current worktree passed:
 Bash syntax:                 PASS
 Function-role comment lint:  PASS
 Version consistency:         PASS (keepalive + 4 documents + CHANGELOG)
-Test files:                  27 / 27 PASS
-Assertions:                  1040 / 1040 PASS (1 ownership case skips when not run as root)
+Test files:                  31 / 31 PASS
+Assertions:                  1519 / 1519 PASS (1 ownership case skips when not run as root)
 systemd-analyze verify:      PASS
 Installer layout simulation: PASS (non-root + mocked systemctl)
 Installer lifecycle/rollback: PASS (stateful mocked systemctl + injected activation failure)
@@ -85,7 +85,10 @@ Run the same aggregate command with:
 - Daemon refusals reach the client with their specific reason, on both the CLI and the TUI.
 - A D-Bus call that could not be made is transient and debounced; only a completed call returning a different value, or local `/proc` evidence, marks a target UNAVAILABLE.
 - Periodic health validation reuses the discovery snapshot and issues no D-Bus call for an already-discovered target, while pre-send validation stays live.
-- The public CLI drives the whole lifecycle: create, pause, idempotent pause, resume, delete, and `list --json` validated by a real JSON parser.
+- The public CLI drives the whole lifecycle: create, configure, pause, idempotent pause, resume, delete, and `list --json` validated by a real JSON parser; `configure` validates intervals in `1..999999999` and supports explicit profile policy.
+- `status --json` reads only validated snapshots, is presence-free, does not activate IPC or create HOME/configuration state, and matches `pid_start` before reporting a service online.
+- Published index rows retain columns 1-15 and append next-send/last-delivery columns 16-21; automatic `ENTER_ONLY` and one-shot Enter events are logged as `ENTER`.
+- Pending-submit ownership survives reload, maps legacy persisted `1` to `MAIN`, and CONFIGURE commits a `STALE` owner before replacing message files.
 - Event logs are trimmed to a retention budget and repeated scheduler-gap events collapse to one entry per episode.
 - Every drawn TUI line erases its own tail, so a frame that changes height cannot leave the previous line's text beside the new one.
 - One discovery pass is time-bounded; a truncated pass retains the previous snapshot instead of publishing a partial one.

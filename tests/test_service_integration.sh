@@ -63,6 +63,26 @@ run_keepalive() {
     run_test_user env "${envs[@]}" "$TEST_ROOT/keepalive" "$@"
 }
 
+# Role: Read one daemon-owned target checkpoint field as the isolated test account.
+target_field() {
+    local uuid=$1 field=$2 state_file
+    state_file="$XDG_RUNTIME_DIR/keepalive/targets/$uuid/state.tsv"
+    run_test_user awk -F '\t' -v wanted="$field" '$1 == wanted { print $2; exit }' "$state_file"
+}
+
+# Role: Read the versioned secondary message referenced by one target checkpoint.
+target_secondary_message() {
+    local uuid=$1 companion
+    companion=$(target_field "$uuid" secondary_message_file)
+    run_test_user cat "$XDG_RUNTIME_DIR/keepalive/targets/$uuid/$companion"
+}
+
+# Role: Read one scalar from the persistent profile through the public CLI.
+profile_field() {
+    local field=$1
+    run_keepalive profile | awk -F= -v wanted="$field" '$1 == wanted { print $2; exit }'
+}
+
 # Role: Submit a CREATE request through production IPC without driving the interactive wizard.
 create_target_via_ipc() {
     local uuid=$1 helper="$TEST_TMP/create-helper.sh"
@@ -169,6 +189,48 @@ assert_eq 'ok' "$create_response" 'CLI create builds a keep-alive from the saved
 list=$(run_keepalive list)
 rc=0; [[ $list == *Avela* && $list == *ACTIVE* ]] || rc=1
 assert_eq 0 "$rc" 'CLI-created keep-alive is ACTIVE'
+
+configure_response=$(run_keepalive configure "$old_uuid" \
+    --message 'first prompt' --message 'second prompt' \
+    --main-interval 123 --secondary-enabled 1 --secondary-interval 77 \
+    --secondary-message 'custom nudge' --notifications 1 --delivery-mode enter-only)
+assert_eq ok "$configure_response" \
+    'CLI configure crosses the real FIFO/service process boundary'
+assert_eq 123 "$(target_field "$old_uuid" main_interval)" 'configure stores the requested main interval'
+assert_eq 1 "$(target_field "$old_uuid" secondary_enabled)" 'configure stores secondary enablement'
+assert_eq 77 "$(target_field "$old_uuid" secondary_interval)" 'configure stores the secondary interval'
+assert_eq 1 "$(target_field "$old_uuid" notifications)" 'configure stores notifications'
+assert_eq ENTER_ONLY "$(target_field "$old_uuid" mode)" 'configure stores the delivery mode'
+assert_eq 'first prompt' "$(run_test_user cat "$XDG_RUNTIME_DIR/keepalive/targets/$old_uuid/messages/001")" \
+    'configure stores the first rotation message'
+assert_eq 'second prompt' "$(run_test_user cat "$XDG_RUNTIME_DIR/keepalive/targets/$old_uuid/messages/002")" \
+    'configure stores the second rotation message'
+assert_eq 'custom nudge' "$(target_secondary_message "$old_uuid")" 'configure stores the secondary message'
+assert_eq 123 "$(profile_field main_interval)" 'configure updates the persistent profile by default'
+assert_eq ENTER_ONLY "$(profile_field delivery_mode)" 'profile follows configure by default'
+
+invalid_output=''; invalid_rc=0
+invalid_output=$(run_keepalive configure "$old_uuid" --main-interval nope 2>&1) || invalid_rc=$?
+assert_eq 2 "$invalid_rc" 'configure rejects an invalid interval with usage status'
+rc=0; [[ $invalid_output == *'usage: keepalive configure UUID [options]'* ]] || rc=1
+assert_eq 0 "$rc" 'invalid configure arguments print command usage'
+assert_eq 123 "$(target_field "$old_uuid" main_interval)" 'invalid configure does not reach IPC or mutate state'
+
+assert_eq ok \
+    "$(run_keepalive configure "$old_uuid" --main-interval 124 --no-profile)" \
+    'configure can update only the selected target'
+assert_eq 124 "$(target_field "$old_uuid" main_interval)" 'target-only configure changes the requested value'
+assert_eq 123 "$(profile_field main_interval)" '--no-profile preserves the persistent profile'
+assert_eq 1 "$(target_field "$old_uuid" secondary_enabled)" 'omitted secondary enablement stays unchanged'
+assert_eq 77 "$(target_field "$old_uuid" secondary_interval)" 'omitted secondary interval stays unchanged'
+assert_eq ENTER_ONLY "$(target_field "$old_uuid" mode)" 'omitted delivery mode stays unchanged'
+assert_eq 'second prompt' "$(run_test_user cat "$XDG_RUNTIME_DIR/keepalive/targets/$old_uuid/messages/002")" \
+    'omitted message rotation stays unchanged'
+
+assert_eq ok \
+    "$(run_keepalive configure "$old_uuid" --main-interval 125 --profile)" \
+    '--profile explicitly selects the default profile behavior'
+assert_eq 125 "$(profile_field main_interval)" '--profile updates the persistent profile'
 
 assert_eq 'ok' "$(run_keepalive pause "$old_uuid")" 'CLI pause freezes the target'
 assert_eq 'already paused' "$(run_keepalive pause "$old_uuid")" 'CLI pause is idempotent'

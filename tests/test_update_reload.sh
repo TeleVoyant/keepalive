@@ -316,6 +316,10 @@ run_install_user() {
         "PATH=$INSTALL_FAKEBIN:/usr/bin:/bin"
     )
     if ((EUID == 0)); then
+        # The parent test directory and fixtures are recreated by root before each
+        # installer call; hand their complete tree to nobody, matching a real user run.
+        test_chown_for_unprivileged "$TEST_TMP"
+        chmod 755 "$TEST_TMP"
         runuser -u nobody -- env "${environment[@]}" "$command" "$@"
     else
         env "${environment[@]}" "$command" "$@"
@@ -444,6 +448,8 @@ write_service_state() {
 # Role: Make a newly-created installer case writable by the unprivileged shim account.
 prepare_install_case_owner() {
     if ((EUID == 0)); then
+        test_chown_for_unprivileged "$TEST_TMP"
+        chmod 755 "$TEST_TMP"
         test_chown_for_unprivileged "$CASE_ROOT"
         chmod 755 "$CASE_ROOT"
     fi
@@ -536,7 +542,12 @@ assert_contains "$report_out" 'Reloaded 2 running keep-alive(s)' \
     'reload report counts only restored non-AVAILABLE targets'
 assert_contains "$report_out" "Keep-alive $UNIT_UUID_TWO was PAUSED and is now ACTIVE" \
     'reload report counts and describes changed statuses'
-assert_contains "$report_err" '2 keep-alive(s) did not come back' \
+if ((FOREIGN_MANIFEST_SUPPORTED == 1)); then
+    expected_missing='1 keep-alive(s) did not come back'
+else
+    expected_missing='2 keep-alive(s) did not come back'
+fi
+assert_contains "$report_err" "$expected_missing" \
     'reload report counts both absent and AVAILABLE-only rows as missing'
 assert_contains "$report_err" "$UNIT_UUID_FOUR (PAUSED)" \
     'reload report identifies an AVAILABLE row as missing'
@@ -825,8 +836,7 @@ unset -f sleep ka_konsole_send_raw
 INVOKED_AS_CAPTURE="$TEST_TMP/invoked-as.capture"
 (
     cd "$TEST_ROOT"
-    source ./keepalive --version >/dev/null
-    printf '%s\n' "$KA_INVOKED_AS"
+    bash -c 'source "$1" --version >/dev/null; printf "%s\\n" "$KA_INVOKED_AS"' _ ./keepalive
 ) >"$INVOKED_AS_CAPTURE"
 IFS= read -r INVOKED_AS_VALUE <"$INVOKED_AS_CAPTURE" || true
 assert_eq "$TEST_ROOT/./keepalive" "$INVOKED_AS_VALUE" \
@@ -903,9 +913,6 @@ ka_tui_enter() { return 0; }
 
 # Role: Stub stale wizard cleanup for the unit-level TUI selection probe.
 ka_wizard_cleanup_stale() { return 0; }
-
-# Role: Stub install watching because selection restoration is tested independently of re-exec.
-ka_tui_watch_install() { return 0; }
 
 # Role: Keep the hermetic TUI loop from attempting an exec while recording its chosen row.
 ka_tui_update_ready() { return 1; }
