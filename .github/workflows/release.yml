@@ -35,9 +35,13 @@ jobs:
       - name: Run the aggregate check in the CI container
         run: |
           set -Eeuo pipefail
+          # The same UTF-8 locale as ci.yml: the suite's display assertions (truncation,
+          # glyphs) describe a UTF-8 terminal, and the C locale counts bytes.
           docker run --rm \
             --volume "$GITHUB_WORKSPACE:/src:ro" \
             --workdir /src \
+            --env LANG=C.UTF-8 \
+            --env LC_ALL=C.UTF-8 \
             docker.io/library/debian:12 \
             bash -lc '
               set -Eeuo pipefail
