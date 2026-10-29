@@ -1,5 +1,57 @@
 # Development and Operations Memory
 
+## Orca 1.4.241 round — 2026-10-29 (uncommitted on top of `67611b8`)
+
+Trigger: the user saw "occasionally incompatible Orca parsing" after Orca updated to 1.4.241,
+asked for keepalive to be brought up to date and made cheaper to run, and then for Orca to
+work without installing `jq` ("use jq when installed, awk otherwise").
+
+How the round ran: Orca orchestration (`orca orchestration ...`, run `run_c55a5edfe13f`) with
+at most three concurrent Codex workers on `gpt-5.6-luna` at `max` effort, reusing settled
+terminals for follow-ups. Waves: read-only research (Orca CLI contract, live journal
+evidence, performance profile; then failure-window correlation and Orca 1.4.241 bundle source
+reading; then the jq-removal assessment), lead implementation, two proofreading reviews, two
+test-writing workers, then a second review/test cycle for the awk reader. Research outputs
+were scratch files that were deleted at the end; the durable conclusions are in RISKS.md
+(Resolved on 2026-10-29) and below.
+
+Validation: `./tests/run.sh` and `./scripts/dev-check.sh` pass (see the counts in
+`../docs/TESTING.md`), pinned ShellCheck v0.10.0 (`docker.io/koalaman/shellcheck-alpine:v0.10.0`,
+present locally) reports zero findings, and `tests/test_orca_parity.sh` runs the adapter
+contract under jq 1.7, the system awk, gawk, mawk 1.3.4, and BusyBox awk 1.37.0. Not done: the
+live checklist with a disposable Orca agent (items 38-42) and reinstalling on this host; the
+installed daemon is still 1.1.1.
+
+Measured (this host, Orca 1.4.241):
+
+- one `orca-ide` start: about 0.27-0.39 s wall, 0.35 s CPU, 110-115 MiB peak RSS;
+- idle installed daemon: 0.055% of one core, 11.3 MB RSS, no child processes;
+- attended Orca discovery was 20 CLI starts/minute (about 7 s CPU/minute), now at most 6;
+- parse cost per 7.8 KB list: jq 16 ms, mawk 8 ms, gawk 16 ms, BusyBox awk 64 ms (wall,
+  median, startup included); 1001 pretty rows: jq 32 ms, mawk 215 ms, gawk 365 ms, BusyBox
+  1.4 s.
+
+Engineering lessons from this round:
+
+- Keep the raw provider response when a schema gate fails, or at least the gate's name: the
+  36-hour episode could not be attributed to a field because only `reason=schema` was logged.
+  Failures now report `schema:<gate>` and skipped rows report a count and category.
+- A per-row validity check inside an `all(...)` gate turns one transitional row into a
+  whole-snapshot outage. Classify rows (unfamiliar type vs. undeliverable) instead.
+- `jq` object construction needs parentheses around `//` alternatives
+  (`{a: (.x // .y)}`); bare `//` inside `{}` is a syntax error.
+- jq 1.7 depth limit: it refuses to open `[`/`{` once its parser stack holds 256 entries,
+  and an object member value sits above both the object and its key. `lib/orca.awk`
+  mirrors this with `STACK`.
+- jq 1.7 refuses a lone high surrogate escape but turns a lone low surrogate into U+FFFD;
+  its `[[:cntrl:]]` matches C0, DEL, and C1 (U+0080-U+009F).
+- BusyBox awk's per-character `substr` is superlinear in the indexed string's length; walk
+  input line by line (Orca output is pretty-printed) and append strings in runs.
+- `worker-release` never closes a terminal that was reused for a later dispatch; reusing
+  terminals trades cleanup for context, so expect to close them by hand afterwards.
+- A session scratchpad can disappear mid-run; give workers an in-repo fallback directory and
+  delete it before running the suite (its helper scripts trip `test_function_comments.sh`).
+
 ## 1.1.1 release round — 2026-10-02
 
 Released as **1.1.1** (`7b723f9`, tag `v1.1.1`), followed by `418e2e6` (release workflow
@@ -565,6 +617,9 @@ use the export-filtered archive workflow and reject forbidden private paths.
 - `CHANGELOG.md` is the release history; `dev-check.sh` requires a released section
   matching `KEEPALIVE_VERSION`.
 - `CONTRIBUTING.md` states the conventions the automated checks enforce.
+- `CLAUDE.md` is the short Claude Code orientation (commands, architecture, enforced
+  conventions). It points into `docs/` and `.agents/` instead of duplicating them, and it
+  does not repeat the version string, so `dev-check.sh` does not track it.
 - `LICENSE` is MIT.
 - `.agents/` adds implementation-level handoff details and separates observed risks
   from advertised behavior.

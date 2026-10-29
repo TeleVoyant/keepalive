@@ -4,20 +4,29 @@ source "${BASH_SOURCE[0]%/*}/testlib.sh"
 test_env_setup
 source_core
 
-if ! command -v jq >/dev/null 2>&1; then
-    printf 'ok 1 - Orca adapter tests skipped: jq is not installed\n'
-    TEST_COUNT=1
+parser=${KEEPALIVE_ORCA_PARSER:-auto}
+if [[ $parser == auto ]]; then
+    if command -v jq >/dev/null 2>&1; then parser='jq'; else parser='awk'; fi
+fi
+if [[ $parser == jq ]] && ! command -v jq >/dev/null 2>&1; then
+    test_skip 'Orca adapter tests' 'KEEPALIVE_ORCA_PARSER=jq but jq is not installed'
     test_finish
     exit
 fi
 
 export KEEPALIVE_ORCA_ENABLED=1
 export KEEPALIVE_ORCA_CLI="$TEST_ROOT/tests/fixtures/orca-mock"
-export KEEPALIVE_JQ
-KEEPALIVE_JQ=$(command -v jq)
+export KEEPALIVE_ORCA_PARSER=$parser
+if [[ $parser == jq ]]; then
+    KEEPALIVE_JQ=${KEEPALIVE_JQ:-$(command -v jq)}
+    export KEEPALIVE_JQ
+else
+    KEEPALIVE_AWK=${KEEPALIVE_AWK:-$(command -v awk)}
+    export KEEPALIVE_AWK
+fi
 KA_ORCA_CLI=''
 KA_ORCA_JQ=''
-assert_true 'Orca adapter resolves an explicit CLI and JSON parser' ka_orca_find
+assert_true "Orca adapter resolves an explicit CLI and $parser parser" ka_orca_find
 
 discovery=$(ka_orca_discover)
 IFS= read -r row <<<"$discovery"
@@ -39,7 +48,7 @@ if ka_orca_validate_target "$handle" "$pty" "$incarnation" "$worktree" "$runtime
 else
     validation_rc=$?
 fi
-assert_eq 15 "$validation_rc" 'a complete Orca show without agentIdentity is definitive agent loss'
+assert_eq 23 "$validation_rc" 'a complete Orca show without agentIdentity is transient no-agent evidence'
 rm -f -- "$shell_show_file"
 unset FAKE_ORCA_SHOW_NO_AGENT_FILE
 
@@ -51,7 +60,7 @@ if ka_orca_validate_target "$handle" "$pty" "$incarnation" "$worktree" "$runtime
 else
     validation_rc=$?
 fi
-assert_eq 15 "$validation_rc" 'a complete Orca show with null agentIdentity is definitive agent loss'
+assert_eq 23 "$validation_rc" 'a complete Orca show with null agentIdentity is transient no-agent evidence'
 rm -f -- "$null_agent_file"
 unset FAKE_ORCA_SHOW_NULL_AGENT_FILE
 
@@ -68,8 +77,8 @@ assert_true 'an unfamiliar Orca schema is retryable' ka_orca_validation_is_trans
 assert_false 'an unfamiliar Orca schema never consumes identity-loss strikes' \
     ka_orca_validation_consumes_strike "$validation_rc"
 schema_discovery=$(ka_orca_discover)
-schema_rc=0; [[ $schema_discovery == '#INCOMPLETE'$'\t'schema* ]] || schema_rc=1
-assert_eq 0 "$schema_rc" 'an agent row missing a binding field fails the discovery pass closed'
+assert_eq $'#SKIPPED\t1\tincomplete-binding=1\n#COMPLETE' "$schema_discovery" \
+    'an agent row missing a binding field is skipped without poisoning the discovery pass'
 rm -f -- "$missing_binding_file"
 unset FAKE_ORCA_MISSING_BINDING_FILE
 
@@ -199,7 +208,7 @@ ka_state_validate_targets
 ka_state_validate_targets
 assert_eq ACTIVE "${KA_T_STATUS[$uuid]}" \
     'repeated Orca schema incompatibility never becomes sticky unavailable'
-assert_eq 0 "${KA_T_STRIKES[$uuid]}" 'schema incompatibility does not accumulate reachability strikes'
+assert_eq 0 "${KA_T_STRIKES[$uuid]}" 'missing monitored binding remains transient without identity-loss strikes'
 rm -f -- "$missing_binding_file"
 unset FAKE_ORCA_MISSING_BINDING_FILE KEEPALIVE_ORCA_SNAPSHOT_MAX_AGE KEEPALIVE_VALIDATION_STRIKES
 assert_true 'generic transport validation dispatches to Orca' ka_transport_validate_target "$uuid"

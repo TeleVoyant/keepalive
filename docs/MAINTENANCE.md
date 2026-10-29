@@ -87,6 +87,24 @@ Do not merge changes that weaken these rules:
 46. A timed-out control read may still hold the first bytes of a request (Bash keeps
     partial input on timeout). `ka_ipc_service_read` must complete such a line, never
     discard it; timer slack makes the race common enough to drop about 5% of requests.
+47. Never let one Orca row fail the whole discovery pass merely because it cannot be a
+    target. Fail closed only for an envelope the adapter does not understand or a JSON type
+    no Orca release emits; skip and count an understood row whose binding is absent or out
+    of bounds. One pty-less pane otherwise froze the Orca snapshot for 36 hours.
+48. Never choose between Orca rows that share a manager ID with different bindings; skip
+    them all. Health and pre-send then validate the stored handle live.
+49. An Orca pane that reports no attached PTY or no agent identity is transient - counted
+    toward the strike budget by periodic health, a skipped send before delivery - and never
+    immediate identity loss; only a different non-empty value is.
+50. Pace the expensive Orca CLI starts - periodic discovery and live health fallback - on
+    their own floors (`KEEPALIVE_ORCA_DISCOVERY_INTERVAL`,
+    `KEEPALIVE_ORCA_LIVE_HEALTH_INTERVAL`). Never pace pre-send validation or a client's
+    explicit `REFRESH`.
+51. Log a persistent discovery condition when it starts, changes, or ends, plus a periodic
+    reminder; never once per pass.
+52. The jq programs in `orca.sh` and `orca.awk` are one contract. Change both together, keep
+    their output byte-identical, and keep the Orca tests passing under both readers. The awk
+    reader may refuse what jq accepts, never the reverse.
 
 ## Module responsibilities
 
@@ -104,6 +122,9 @@ Do not merge changes that weaken these rules:
 
 `orca.sh`
 : Volatile Orca CLI/JSON adapter, normalized identity contract, and atomic delivery.
+
+`orca.awk`
+: The jq-free reader for `orca.sh`'s JSON operations; the same contract in POSIX awk.
 
 `transport.sh`
 : Backend-neutral validation/delivery dispatch. Scheduler/recovery code depends on this,

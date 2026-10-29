@@ -112,15 +112,19 @@ write_tui_index() {
 
 # Role: Assert that one malformed Orca list response is represented by the schema sentinel.
 assert_orca_discovery_schema() {
-    local path=$1 label=$2 output
+    local path=$1 label=$2 expected=${3:-schema:} output
     cp -- "$path" "$FAKE_ORCA_JSON_FILE"
     output=$(ka_orca_discover)
-    assert_eq $'#INCOMPLETE\tschema' "$output" "$label"
+    if [[ $output == $'#INCOMPLETE\t'"$expected"* ]]; then
+        assert_eq 1 1 "$label"
+    else
+        assert_eq 1 0 "$label (expected gate $expected, got $output)"
+    fi
 }
 
 # Role: Assert that one malformed Orca show response is rejected as indeterminate schema.
 assert_orca_validation_schema() {
-    local path=$1 label=$2 rc
+    local path=$1 label=$2 expected=${3:-22} rc
     cp -- "$path" "$FAKE_ORCA_JSON_FILE"
     if ka_orca_validate_target "$ORCA_HANDLE" "$ORCA_PTY" "$ORCA_INCAR" \
         "$ORCA_WORKTREE" "$ORCA_RUNTIME" "$ORCA_HOST" "$ORCA_TAB" "$ORCA_LEAF" "$ORCA_AGENT"; then
@@ -128,7 +132,7 @@ assert_orca_validation_schema() {
     else
         rc=$?
     fi
-    assert_eq 22 "$rc" "$label"
+    assert_eq "$expected" "$rc" "$label"
 }
 
 # --- /proc baseline semantics and REPLY/printing parity ---
@@ -346,10 +350,76 @@ assert_eq $'org.kde.konsole\norg.kde.konsole-9\norg.kde.konsole-9' \
     "$(ka_qdbus_konsole_services)" \
     'qdbus line parsing rejects a suffixed line and retains old grep -o xorg token behavior'
 
-# --- Orca jq fail-closed corpus ---
-if ! command -v jq >/dev/null 2>&1; then
-    test_skip 'Orca malformed-stream assertions' 'jq is not installed'
+# --- Orca parser fail-closed corpus ---
+orca_parser=${KEEPALIVE_ORCA_PARSER:-auto}
+if [[ $orca_parser == auto ]]; then
+    if command -v jq >/dev/null 2>&1; then orca_parser='jq'; else orca_parser='awk'; fi
+fi
+if [[ $orca_parser == jq ]] && ! command -v jq >/dev/null 2>&1; then
+    test_skip 'Orca malformed-stream assertions' 'KEEPALIVE_ORCA_PARSER=jq but jq is not installed'
 else
+    # Role: Apply one deterministic JSON fixture edit with jq or Python when jq is unavailable.
+    orca_json_edit() {
+        local operation=$1 input=$2 output=$3 field=${4-}
+        if [[ $orca_parser == jq ]]; then
+            case $operation in
+                oversized-title) jq '.result.terminals[0].title = ("x" * 1025)' "$input" >"$output" ;;
+                control-title) jq '.result.terminals[0].title = "safe\u001btitle"' "$input" >"$output" ;;
+                slash-path) jq '.result.terminals[0].title = "" | .result.terminals[0].worktreePath = "/work/agent/"' "$input" >"$output" ;;
+                duplicate) jq '.result.terminals += [.result.terminals[0] | .handle = "term-other"] | .result.totalCount = 2' "$input" >"$output" ;;
+                missing-list-field) jq --arg field "$field" 'del(.result.terminals[0][$field])' "$input" >"$output" ;;
+                missing-agent) jq 'del(.result.terminals[0].agentIdentity)' "$input" >"$output" ;;
+                wrong-agent) jq '.result.terminals[0].agentIdentity = {}' "$input" >"$output" ;;
+                missing-runtime) jq 'del(._meta.runtimeId)' "$input" >"$output" ;;
+                missing-show-field) jq --arg field "$field" 'del(.result.terminal[$field])' "$input" >"$output" ;;
+                missing-show-agent) jq 'del(.result.terminal.agentIdentity)' "$input" >"$output" ;;
+                missing-show-runtime) jq 'del(._meta.runtimeId)' "$input" >"$output" ;;
+                *) return 2 ;;
+            esac
+            return
+        fi
+        python3 - "$operation" "$input" "$output" "$field" <<'PY'
+import json
+import sys
+
+operation, source, target, field = sys.argv[1:]
+with open(source, encoding='utf-8') as stream:
+    document = json.load(stream)
+if operation == 'oversized-title':
+    document['result']['terminals'][0]['title'] = 'x' * 1025
+elif operation == 'control-title':
+    document['result']['terminals'][0]['title'] = 'safe\x1btitle'
+elif operation == 'slash-path':
+    document['result']['terminals'][0]['title'] = ''
+    document['result']['terminals'][0]['worktreePath'] = '/work/agent/'
+elif operation == 'duplicate':
+    duplicate = dict(document['result']['terminals'][0])
+    duplicate['handle'] = 'term-other'
+    document['result']['terminals'].append(duplicate)
+    document['result']['totalCount'] = 2
+elif operation == 'missing-list-field':
+    document['result']['terminals'][0].pop(field, None)
+elif operation == 'missing-agent':
+    document['result']['terminals'][0].pop('agentIdentity', None)
+elif operation == 'wrong-agent':
+    document['result']['terminals'][0]['agentIdentity'] = {}
+elif operation == 'missing-runtime':
+    document['_meta'].pop('runtimeId', None)
+elif operation == 'missing-show-field':
+    document['result']['terminal'].pop(field, None)
+elif operation == 'missing-show-agent':
+    document['result']['terminal'].pop('agentIdentity', None)
+elif operation == 'missing-show-runtime':
+    document['_meta'].pop('runtimeId', None)
+else:
+    raise SystemExit(2)
+with open(target, 'w', encoding='utf-8') as stream:
+    json.dump(document, stream, ensure_ascii=False, separators=(',', ':'))
+    stream.write('\n')
+PY
+    }
+
+    export KEEPALIVE_ORCA_PARSER=$orca_parser
     orca_stub="$TEST_TMP/orca-json-stub"
     cat >"$orca_stub" <<'SHIM'
 #!/usr/bin/env bash
@@ -360,13 +430,19 @@ SHIM
     valid_list="$TEST_TMP/orca-valid-list.json"
     valid_show="$TEST_TMP/orca-valid-show.json"
     cat >"$valid_list" <<'JSON'
-{"ok":true,"result":{"terminals":[{"handle":"term-agent","ptyId":"pty-1","incarnationId":"inc-1","worktreeId":"wt-1","worktreePath":"/work/agent","title":"Agent","connected":true,"writable":true,"orphaned":false,"executionHostId":"host-1","tabId":"tab-1","leafId":"leaf-1","agentIdentity":"codex"}],"truncated":false},"_meta":{"runtimeId":"runtime-1"}}
+{"ok":true,"result":{"terminals":[{"handle":"term-agent","ptyId":"pty-1","incarnationId":"inc-1","worktreeId":"wt-1","worktreePath":"/work/agent","title":"Agent","connected":true,"writable":true,"orphaned":false,"executionHostId":"host-1","tabId":"tab-1","leafId":"leaf-1","agentIdentity":"codex"}],"truncated":false,"totalCount":1},"_meta":{"runtimeId":"runtime-1"}}
 JSON
     cat >"$valid_show" <<'JSON'
 {"ok":true,"result":{"terminal":{"handle":"term-agent","ptyId":"pty-1","incarnationId":"inc-1","worktreeId":"wt-1","worktreePath":"/work/agent","connected":true,"writable":true,"orphaned":false,"executionHostId":"host-1","tabId":"tab-1","leafId":"leaf-1","agentIdentity":"codex"}},"_meta":{"runtimeId":"runtime-1"}}
 JSON
-    KEEPALIVE_JQ=$(command -v jq)
-    export KEEPALIVE_ORCA_ENABLED=1 KEEPALIVE_ORCA_CLI="$orca_stub" KEEPALIVE_JQ
+    if [[ $orca_parser == jq ]]; then
+        KEEPALIVE_JQ=${KEEPALIVE_JQ:-$(command -v jq)}
+        export KEEPALIVE_JQ
+    else
+        KEEPALIVE_AWK=${KEEPALIVE_AWK:-$(command -v awk)}
+        export KEEPALIVE_AWK
+    fi
+    export KEEPALIVE_ORCA_ENABLED=1 KEEPALIVE_ORCA_CLI="$orca_stub"
     export FAKE_ORCA_JSON_FILE="$TEST_TMP/orca-selected.json" KEEPALIVE_ORCA_TIMEOUT=3
     KA_ORCA_CLI=''
     KA_ORCA_JQ=''
@@ -379,14 +455,14 @@ JSON
     # A title is display text set by the program in the terminal: an odd one is cleaned
     # and bounded rather than allowed to fail discovery for every Orca terminal.
     oversized_title_list="$TEST_TMP/orca-oversized-title-list.json"
-    jq '.result.terminals[0].title = ("x" * 1025)' "$valid_list" >"$oversized_title_list"
+    orca_json_edit oversized-title "$valid_list" "$oversized_title_list"
     cp -- "$oversized_title_list" "$FAKE_ORCA_JSON_FILE"
     title_row=$(ka_orca_discover)
     title_row=${title_row%%$'\n'*}
     IFS=$'\t' read -r _ _ title_name _ <<<"$title_row"
     assert_eq 256 "${#title_name}" 'an over-long Orca title is truncated to its display bound, not rejected'
     control_title_list="$TEST_TMP/orca-control-title-list.json"
-    jq '.result.terminals[0].title = "safe\u001btitle"' "$valid_list" >"$control_title_list"
+    orca_json_edit control-title "$valid_list" "$control_title_list"
     cp -- "$control_title_list" "$FAKE_ORCA_JSON_FILE"
     title_row=$(ka_orca_discover)
     title_row=${title_row%%$'\n'*}
@@ -395,8 +471,7 @@ JSON
     # The rows are read with IFS=tab, which collapses adjacent tabs: an empty fallback name
     # (a trailing-slash worktree path) would shift every later field, including the ID.
     slash_path_list="$TEST_TMP/orca-slash-path-list.json"
-    jq '.result.terminals[0].title = "" | .result.terminals[0].worktreePath = "/work/agent/"' \
-        "$valid_list" >"$slash_path_list"
+    orca_json_edit slash-path "$valid_list" "$slash_path_list"
     cp -- "$slash_path_list" "$FAKE_ORCA_JSON_FILE"
     title_row=$(ka_orca_discover)
     title_row=${title_row%%$'\n'*}
@@ -404,10 +479,11 @@ JSON
     assert_eq agent "$title_name" 'a trailing-slash Orca worktree path still names the row'
     assert_eq orca-runtime-1-inc-1 "$title_id" 'an empty title fallback cannot shift the Orca row fields'
     duplicate_id_list="$TEST_TMP/orca-duplicate-id-list.json"
-    jq '.result.terminals += [.result.terminals[0] | .handle = "term-other"]' \
-        "$valid_list" >"$duplicate_id_list"
-    assert_orca_discovery_schema "$duplicate_id_list" \
-        'Orca discovery rejects duplicate eligible manager IDs before projection'
+    orca_json_edit duplicate "$valid_list" "$duplicate_id_list"
+    cp -- "$duplicate_id_list" "$FAKE_ORCA_JSON_FILE"
+    duplicate_id_output=$(ka_orca_discover)
+    assert_eq $'#SKIPPED\t2\tambiguous-incarnation=2\n#COMPLETE' "$duplicate_id_output" \
+        'Orca discovery skips all rows with conflicting eligible manager IDs'
     cp -- "$valid_show" "$FAKE_ORCA_JSON_FILE"
     ORCA_HANDLE=term-agent ORCA_PTY=pty-1 ORCA_INCAR=inc-1 ORCA_WORKTREE=wt-1 \
         ORCA_RUNTIME=runtime-1 ORCA_HOST=host-1 ORCA_TAB=tab-1 ORCA_LEAF=leaf-1 ORCA_AGENT=codex
@@ -424,9 +500,9 @@ JSON
     { cat "$valid_show"; printf '{"broken":\n'; } >"$multi_valid_invalid_show"
     { printf '{"broken":\n'; cat "$valid_show"; } >"$multi_invalid_valid_show"
     assert_orca_discovery_schema "$multi_valid_invalid_list" \
-        'Orca discovery rejects a valid document followed by an invalid document'
+        'Orca discovery rejects a valid document followed by an invalid document' schema:not-json
     assert_orca_discovery_schema "$multi_invalid_valid_list" \
-        'Orca discovery rejects an invalid document followed by a valid document'
+        'Orca discovery rejects an invalid document followed by a valid document' schema:not-json
     assert_orca_validation_schema "$multi_valid_invalid_show" \
         'Orca validation rejects a valid document followed by an invalid document'
     assert_orca_validation_schema "$multi_invalid_valid_show" \
@@ -436,48 +512,59 @@ JSON
     non_object_show="$TEST_TMP/orca-non-object-show.json"
     printf '[]\n' >"$non_object_list"
     printf '[]\n' >"$non_object_show"
-    assert_orca_discovery_schema "$non_object_list" 'Orca discovery rejects non-object JSON'
+    assert_orca_discovery_schema "$non_object_list" 'Orca discovery rejects non-object JSON' schema:not-object
     assert_orca_validation_schema "$non_object_show" 'Orca validation rejects non-object JSON'
 
     unparseable_list="$TEST_TMP/orca-unparseable-list.json"
     unparseable_show="$TEST_TMP/orca-unparseable-show.json"
     printf '{not-json\n' >"$unparseable_list"
     printf '{not-json\n' >"$unparseable_show"
-    assert_orca_discovery_schema "$unparseable_list" 'Orca discovery rejects unparseable JSON'
+    assert_orca_discovery_schema "$unparseable_list" 'Orca discovery rejects unparseable JSON' schema:not-json
     assert_orca_validation_schema "$unparseable_show" 'Orca validation rejects unparseable JSON'
 
-    for missing_list_field in handle ptyId incarnationId worktreeId worktreePath executionHostId tabId leafId; do
+    missing_list_field=handle
+    missing_list="$TEST_TMP/orca-missing-list-$missing_list_field.json"
+    orca_json_edit missing-list-field "$valid_list" "$missing_list" "$missing_list_field"
+    assert_orca_discovery_schema "$missing_list" \
+        "Orca discovery rejects an agent row missing $missing_list_field" schema:row-type
+    for missing_list_field in ptyId incarnationId worktreeId worktreePath executionHostId tabId leafId; do
         missing_list="$TEST_TMP/orca-missing-list-$missing_list_field.json"
-        jq --arg field "$missing_list_field" 'del(.result.terminals[0][$field])' \
-            "$valid_list" >"$missing_list"
-        assert_orca_discovery_schema "$missing_list" \
-            "Orca discovery rejects an agent row missing $missing_list_field"
+        orca_json_edit missing-list-field "$valid_list" "$missing_list" "$missing_list_field"
+        cp -- "$missing_list" "$FAKE_ORCA_JSON_FILE"
+        missing_binding_output=$(ka_orca_discover)
+        assert_eq $'#SKIPPED\t1\tincomplete-binding=1\n#COMPLETE' "$missing_binding_output" \
+            "Orca discovery skips an agent row missing $missing_list_field"
     done
     missing_agent_identity="$TEST_TMP/orca-missing-list-agentIdentity.json"
-    jq 'del(.result.terminals[0].agentIdentity)' "$valid_list" >"$missing_agent_identity"
+    orca_json_edit missing-agent "$valid_list" "$missing_agent_identity"
     cp -- "$missing_agent_identity" "$FAKE_ORCA_JSON_FILE"
     missing_agent_output="$TEST_TMP/orca-missing-agent.out"
     ka_orca_discover >"$missing_agent_output"
     assert_eq '#COMPLETE' "$(<"$missing_agent_output")" \
         'Orca discovery skips ordinary shell rows missing optional agentIdentity'
     wrong_agent_identity="$TEST_TMP/orca-wrong-list-agentIdentity.json"
-    jq '.result.terminals[0].agentIdentity = {}' "$valid_list" >"$wrong_agent_identity"
+    orca_json_edit wrong-agent "$valid_list" "$wrong_agent_identity"
     assert_orca_discovery_schema "$wrong_agent_identity" \
-        'Orca discovery rejects an agent row with wrong-typed agentIdentity'
+        'Orca discovery rejects an agent row with wrong-typed agentIdentity' schema:row-type
     missing_list="$TEST_TMP/orca-missing-list-runtimeId.json"
-    jq 'del(._meta.runtimeId)' "$valid_list" >"$missing_list"
+    orca_json_edit missing-runtime "$valid_list" "$missing_list"
     assert_orca_discovery_schema "$missing_list" \
-        'Orca discovery rejects a response missing _meta.runtimeId'
+        'Orca discovery rejects a response missing _meta.runtimeId' schema:runtime-id
 
-    for missing_show_field in handle ptyId incarnationId worktreeId executionHostId tabId leafId; do
+    for missing_show_field in handle executionHostId tabId leafId; do
         missing_show="$TEST_TMP/orca-missing-show-$missing_show_field.json"
-        jq --arg field "$missing_show_field" 'del(.result.terminal[$field])' \
-            "$valid_show" >"$missing_show"
+        orca_json_edit missing-show-field "$valid_show" "$missing_show" "$missing_show_field"
         assert_orca_validation_schema "$missing_show" \
             "Orca validation returns 22 when show is missing $missing_show_field"
     done
+    for missing_show_field in ptyId incarnationId; do
+        missing_show="$TEST_TMP/orca-missing-show-$missing_show_field.json"
+        orca_json_edit missing-show-field "$valid_show" "$missing_show" "$missing_show_field"
+        assert_orca_validation_schema "$missing_show" \
+            "Orca validation returns 24 when show is missing $missing_show_field" 24
+    done
     missing_show="$TEST_TMP/orca-missing-show-agentIdentity.json"
-    jq 'del(.result.terminal.agentIdentity)' "$valid_show" >"$missing_show"
+    orca_json_edit missing-show-agent "$valid_show" "$missing_show"
     cp -- "$missing_show" "$FAKE_ORCA_JSON_FILE"
     if ka_orca_validate_target "$ORCA_HANDLE" "$ORCA_PTY" "$ORCA_INCAR" \
         "$ORCA_WORKTREE" "$ORCA_RUNTIME" "$ORCA_HOST" "$ORCA_TAB" "$ORCA_LEAF" "$ORCA_AGENT"; then
@@ -485,10 +572,10 @@ JSON
     else
         missing_agent_rc=$?
     fi
-    assert_eq 15 "$missing_agent_rc" \
-        'Orca validation returns definitive agent loss when show omits agentIdentity'
+    assert_eq 23 "$missing_agent_rc" \
+        'Orca validation returns transient no-agent evidence when show omits agentIdentity'
     missing_show="$TEST_TMP/orca-missing-show-runtimeId.json"
-    jq 'del(._meta.runtimeId)' "$valid_show" >"$missing_show"
+    orca_json_edit missing-show-runtime "$valid_show" "$missing_show"
     assert_orca_validation_schema "$missing_show" \
         'Orca validation returns 22 when show is missing _meta.runtimeId'
 fi

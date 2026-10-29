@@ -62,7 +62,8 @@ explicitly selects the default behavior).
 | Variable | Default | Meaning |
 |---|---:|---|
 | `KEEPALIVE_KONSOLE_ENABLED` | `auto` | `auto` enables Konsole when qdbus is available; `1` requests it explicitly; `0` disables it. |
-| `KEEPALIVE_ORCA_ENABLED` | `auto` | `auto` enables Orca when both `orca-ide` and `jq` are available; `1` requests it explicitly; `0` disables it. |
+| `KEEPALIVE_ORCA_ENABLED` | `auto` | `auto` enables Orca when `orca-ide` is available (its JSON is read with `jq` when installed, otherwise with the built-in `awk` reader); `1` requests it explicitly; `0` disables it. |
+| `KEEPALIVE_ORCA_PARSER` | `auto` | Which program reads Orca's JSON: `auto` uses `jq` when installed and the built-in POSIX `awk` reader (`lib/orca.awk`) otherwise; `jq` or `awk` forces one. Both apply the same checks and produce the same results; the `awk` reader additionally refuses input that is not well-formed JSON but that jq tolerates (raw invalid UTF-8, leading-zero numbers), which Orca never emits, and runs under `KEEPALIVE_ORCA_TIMEOUT`. Prefer `jq` or a gawk/mawk `awk` with hundreds of Orca terminals: BusyBox awk is markedly slower on very large responses. |
 
 At least one usable backend is required. An explicitly requested backend that is missing
 is reported, but the daemon may still run when the other backend is usable. These are
@@ -74,9 +75,11 @@ client shell.
 | Variable | Default | Meaning |
 |---|---:|---|
 | `KEEPALIVE_DISCOVERY_INTERVAL` | `3` | Seconds between full discovery passes **while a client is attached**. Discovery queries each enabled terminal backend; it is what populates the `AVAILABLE` rows a client displays. |
+| `KEEPALIVE_ORCA_DISCOVERY_INTERVAL` | `10` | Minimum seconds between periodic Orca discovery passes, attended or not. Every Orca pass starts the Electron-based `orca-ide` CLI - measured at about 0.35 s of CPU and 110 MiB peak memory per call on Orca 1.4.241 - so following the three-second attended cadence cost roughly a ninth of a core for as long as a manager stayed open. While a client is attached, new Orca agents therefore appear within about ten seconds (unattended discovery follows `KEEPALIVE_IDLE_DISCOVERY_INTERVAL`); pressing `r` (a client `REFRESH`) and every CLI command still run an immediate pass. Konsole keeps `KEEPALIVE_DISCOVERY_INTERVAL`. |
 | `KEEPALIVE_IDLE_DISCOVERY_INTERVAL` | `30` | Seconds between discovery passes when no client has been seen recently. Discovery exists to serve clients, so with nobody watching it backs off - and it then runs only for a backend that has a monitored target and whose snapshot maximum age (below) reaches this interval, since health is the only remaining reader. With the defaults that is Orca, not Konsole. |
 | `KEEPALIVE_CLIENT_PRESENCE_TTL` | `20` | Seconds a client is still considered attached after its last request. Governs the switch between the two cadences above. |
 | `KEEPALIVE_HEALTH_INTERVAL` | `2` | Seconds between health checks of **monitored** targets. Independent of discovery: a monitored target is validated on this cadence whether or not anyone is watching. |
+| `KEEPALIVE_ORCA_LIVE_HEALTH_INTERVAL` | `10` | Minimum seconds between health passes that check Orca targets **live**. Health normally reuses the fresh Orca discovery snapshot and makes no CLI call at all; a live check per target is needed only while discovery has no fresh snapshot (Orca closed, or its responses failing), and it costs one CLI start per target. Strikes accrue at this pace, so with the default `KEEPALIVE_VALIDATION_STRIKES` an unreachable Orca target is given up on after about 50 seconds instead of 10. A client's explicit refresh and pre-send validation are always live and ignore this. |
 | `KEEPALIVE_STATUS_INTERVAL` | `15` | Seconds between `service.state` writes, and between periodic index publications while no client is attached (every request republishes the index anyway, and an attached client gets it every second). |
 | `KEEPALIVE_CHECKPOINT_INTERVAL` | `30` | Seconds between flushes of ticked-down countdowns to disk. A tick marks a target dirty rather than rewriting its checkpoint every second; transitions and deliveries still checkpoint immediately, and a clean shutdown always flushes. Raising this lowers I/O and widens the worst-case staleness after a `kill -9`. |
 | `KEEPALIVE_SUSPEND_GAP` | `2` | Seconds of unaccounted elapsed time above which the scheduler treats the gap as a suspend rather than as normal drift, and preserves countdowns instead of burning them down. |
@@ -93,7 +96,7 @@ client shell.
 | `KEEPALIVE_NOTIFY_TIMEOUT` | `2` | Seconds `notify-send` may take. A missing or hung notification daemon must never delay delivery. |
 | `KEEPALIVE_SNAPSHOT_MAX_AGE` | `10` | Seconds a discovery snapshot may be reused for health validation. Past this the daemon falls back to a live check, which for a handful of targets is far cheaper than keeping discovery itself fast. Pre-send validation is always live and ignores this. |
 | `KEEPALIVE_ORCA_SNAPSHOT_MAX_AGE` | `35` | Equivalent maximum age for Orca's authoritative terminal-list snapshot. It spans the default idle discovery interval; pre-send validation still calls Orca live. |
-| `KEEPALIVE_VALIDATION_STRIKES` | `5` | Consecutive reachability failures tolerated before a target is given up on and marked `UNAVAILABLE`. An unsupported Orca response schema does not consume this budget because it proves nothing about target identity or reachability. |
+| `KEEPALIVE_VALIDATION_STRIKES` | `5` | Consecutive reachability failures tolerated before a target is given up on and marked `UNAVAILABLE`. An unsupported Orca response schema does not consume this budget because it proves nothing about target identity or reachability. In periodic health, an Orca pane that reports no attached PTY or no agent identity does consume it: either proves no other identity, but one that persists means the recorded agent is gone. A pre-send check with the same result only skips that send. |
 
 ## Delivery
 
@@ -127,7 +130,8 @@ next attempt completes the pending line instead of repeating it.
 | `KEEPALIVE_QDBUS` | autodetected | Path to the `qdbus` binary. Mainly a test seam; the suite points it at a mock. **Setting this also disables the `dbus-send` fast path below**, so every call is routed through the one binary you named - which is what makes the mock authoritative in tests, and what makes this a poor thing to set in production. |
 | `KEEPALIVE_DBUS_SEND` | autodetected | Path to `dbus-send`, preferred over `qdbus` for hot-path calls because it starts in roughly 2.4 ms against `qdbus6`'s 12.8 ms of Qt initialization. |
 | `KEEPALIVE_ORCA_CLI` | autodetected | Explicit path to Orca's CLI. Auto-detection looks for `orca-ide` and common install paths; it deliberately never executes bare `orca` on Linux. |
-| `KEEPALIVE_JQ` | autodetected | Explicit path to `jq`, required only by the Orca backend to validate and normalize CLI JSON. |
+| `KEEPALIVE_JQ` | autodetected | Explicit path to `jq` for reading Orca's JSON. Optional: without `jq` the built-in `awk` reader is used. A path set here that is not executable disables the Orca backend rather than silently switching readers. |
+| `KEEPALIVE_AWK` | autodetected | Explicit path to the `awk` that runs the built-in Orca JSON reader when `jq` is not used. |
 | `KEEPALIVE_NOTIFY_SEND` | `notify-send` | Path to the desktop notification binary. |
 | `KEEPALIVE_MONOTONIC_FILE` | `/proc/uptime` | Source of monotonic time. A test seam for driving the clock deterministically. |
 | `KEEPALIVE_SKIP_SHELLCHECK` | unset | Set to any non-empty value to skip the ShellCheck stage in `scripts/dev-check.sh`. The stage also self-skips when ShellCheck is not installed. |

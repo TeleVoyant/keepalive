@@ -270,6 +270,33 @@ KA_ORCA_DISCOVERY_FAILURE=''
 KA_DISCOVERY_STAMP_ORCA=0
 KA_ORCA_RETRY_AT=0
 
+# The Orca CLI is much more expensive than the Konsole scan. Its own floor is independent
+# of the attended Konsole cadence, treats zero/ahead stamps as no usable history, and must
+# not require state.sh globals when service.sh is sourced directly by a caller.
+KEEPALIVE_ORCA_DISCOVERY_INTERVAL=10
+KA_CLIENT_PRESENT=1
+KA_KONSOLE_ENABLED=1
+KA_ORCA_ENABLED=1
+KA_SVC_IDLE_DISCOVERY=()
+KA_ORCA_DISCOVERY_FAILURE=''
+unset KA_ORCA_DISCOVERY_ATTEMPT_AT
+ka_service_discovery_backends 100
+assert_eq 'konsole orca' "${KA_SVC_DISCOVER[*]}" 'unset Orca attempt stamp does not suppress the first pass'
+KA_ORCA_DISCOVERY_ATTEMPT_AT=100
+ka_service_discovery_backends 105
+assert_eq konsole "${KA_SVC_DISCOVER[*]}" 'Orca floor skips only Orca while Konsole remains on its cadence'
+ka_service_discovery_backends 110
+assert_eq 'konsole orca' "${KA_SVC_DISCOVER[*]}" 'Orca discovery resumes when its own floor elapses'
+KA_ORCA_DISCOVERY_ATTEMPT_AT=0
+ka_service_discovery_backends 105
+assert_eq 'konsole orca' "${KA_SVC_DISCOVER[*]}" 'zero Orca attempt stamp does not suppress discovery'
+KA_ORCA_DISCOVERY_ATTEMPT_AT=200
+ka_service_discovery_backends 105
+assert_eq 'konsole orca' "${KA_SVC_DISCOVER[*]}" 'an Orca stamp ahead of now is treated as monotonic rollback'
+assert_true 'service discovery tolerates an unset state-owned stamp under set -u' \
+    bash -c 'set -Eeuo pipefail; source "$1/lib/common.sh"; source "$1/lib/service.sh"; KA_CLIENT_PRESENT=1; KA_KONSOLE_ENABLED=0; KA_ORCA_ENABLED=1; KA_SVC_IDLE_DISCOVERY=(); KEEPALIVE_ORCA_DISCOVERY_INTERVAL=10; unset KA_ORCA_DISCOVERY_ATTEMPT_AT; ka_service_discovery_backends 100; [[ ${KA_SVC_DISCOVER[*]} == orca ]]' _ "$TEST_ROOT"
+unset KEEPALIVE_ORCA_DISCOVERY_INTERVAL
+
 # Prepare two independent isolated daemon homes after all direct helper assertions.
 idle_root="$TEST_TMP/idle-daemon"
 flight_root="$TEST_TMP/flight-daemon"

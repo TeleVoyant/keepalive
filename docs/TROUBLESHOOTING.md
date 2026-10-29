@@ -72,8 +72,9 @@ systemctl --user restart keepalive.socket keepalive.service
 
 **What does `doctor` consider usable?** The qdbus/dbus-send lines only report executable
 presence. `Konsole D-Bus bus: REACHABLE` is what counts that backend, even when the
-service count is zero because Konsole is not running. For Orca, both `orca-ide` and `jq`
-must be present and the runtime probe must be reachable. The `usable terminal backends`
+service count is zero because Konsole is not running. For Orca, `orca-ide` and a JSON reader
+(`jq`, or the built-in `awk` reader without it) must be present and the runtime probe must
+be reachable. The `usable terminal backends`
 count includes only those reachable backends; `doctor` exits nonzero only for missing core
 requirements or when no enabled backend is reachable, not merely because an optional
 backend is offline or the systemd user manager is unavailable.
@@ -127,17 +128,42 @@ keepalive doctor
 /home/you/.local/bin/orca-ide status --json
 ```
 
-The doctor must show an Orca CLI, `jq`, and a reachable runtime. On Linux, configure
+The doctor must show an Orca CLI, a JSON reader (`jq` when installed, otherwise the built-in
+`awk` reader), and a reachable runtime. On Linux, configure
 `KEEPALIVE_ORCA_CLI` with the path to `orca-ide` if auto-detection misses it; do not point
 it at bare `orca`, which is commonly the GNOME screen reader.
 
 Only terminals with a non-empty Orca `agentIdentity` are listed. Ordinary shell tabs are
 excluded intentionally. The terminal must also be connected, writable, and non-orphaned.
 
-If the journal says Orca discovery did not complete after an Orca update, the CLI's JSON
-contract probably changed. Existing Orca discovery rows are retained, but sends still
-require live validation. Update the isolated mapping in `lib/orca.sh` and its mock test;
-do not weaken schema checks or bypass identity validation.
+A pane that cannot be a target is skipped, not an error: one with no attached PTY yet (or
+any more), a foreign or SSH route without an execution host, and split or mirrored panes
+that share one PTY. The journal notes the skip once, when the set changes:
+
+```text
+Orca discovery skipped agent rows it cannot bind safely: 1 (incomplete-binding=1); other rows refreshed normally
+```
+
+If the journal says Orca discovery did not complete, the warning names the gate that
+refused the whole response:
+
+| `reason=` | Meaning |
+|---|---|
+| `command-<status>` | `orca-ide` itself failed; `command-124` is the `KEEPALIVE_ORCA_TIMEOUT` deadline. Usually Orca is closed or restarting. |
+| `schema:not-json`, `schema:document-count`, `schema:not-object` | stdout was not exactly one JSON object - something printed around it. |
+| `schema:not-ok`, `schema:runtime-id`, `schema:terminals` | The envelope is not the one the adapter knows. |
+| `schema:truncation-marker`, `schema:truncated` | The completeness marker is missing, or more than 1000 terminals were reported. |
+| `schema:total-count` | `totalCount` is missing or disagrees with the rows returned. |
+| `schema:oversize` | The response exceeded 4 MiB and was not parsed. |
+| `schema:parse-timeout` | The built-in `awk` reader did not finish within `KEEPALIVE_ORCA_TIMEOUT`; installing `jq` (or a gawk/mawk `awk` instead of BusyBox) avoids it. |
+| `schema:row-type`, `schema:binding-type` | A row field has a JSON type no Orca release emits. |
+| `schema:shape`, `schema:no-marker` | The response broke the adapter's own expectations in a way no named gate covers. |
+
+The warning repeats only when the reason changes or every fifteen minutes, and recovery is
+logged with the number of failed passes. Existing Orca discovery rows are retained, and
+sends still require live validation. A persistent `schema:` reason after an Orca update
+means the CLI's JSON contract changed: update the isolated mapping in `lib/orca.sh` and
+its mock test; do not weaken schema checks or bypass identity validation.
 
 ---
 

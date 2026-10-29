@@ -1,15 +1,354 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+# The adapter's jq-free mode must still be testable on a host where jq is absent.  The
+# normal fixture path below uses jq because it is convenient for constructing large and
+# deliberately malformed documents; this small Python fallback emits the same synthetic
+# envelopes without making jq a fixture prerequisite.
+if ! command -v jq >/dev/null 2>&1; then
+    if ! command -v python3 >/dev/null 2>&1; then
+        printf 'orca-mock: jq or python3 is required to build fixture responses\n' >&2
+        exit 127
+    fi
+    exec python3 - "$@" <<'PY'
+import copy
+import json
+import os
+import pathlib
+import sys
+import time
+
+
+def flag(name):
+    path = os.environ.get(name, "")
+    return bool(path and os.path.exists(path))
+
+
+def value(name, default):
+    path = os.environ.get(name + "_FILE", "")
+    if path and os.access(path, os.R_OK):
+        with open(path, "r", encoding="utf-8", errors="surrogateescape") as source:
+            return source.readline().rstrip("\n")
+    return os.environ.get(name, default)
+
+
+def encoded(value):
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def emit(payload):
+    if flag("FAKE_ORCA_STDOUT_NOISE_FILE"):
+        print("fixture diagnostic on stdout")
+    if flag("FAKE_ORCA_STDERR_NOISE_FILE"):
+        print("fixture diagnostic on stderr", file=sys.stderr)
+    if isinstance(payload, str):
+        print(payload, end="" if payload.endswith("\n") else "\n")
+        document = payload
+    else:
+        document = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        print(document)
+    if flag("FAKE_ORCA_MULTI_DOCUMENT_FILE"):
+        print(document, end="" if document.endswith("\n") else "\n")
+
+
+def emit_file(path):
+    if flag("FAKE_ORCA_STDOUT_NOISE_FILE"):
+        print("fixture diagnostic on stdout")
+    if flag("FAKE_ORCA_STDERR_NOISE_FILE"):
+        print("fixture diagnostic on stderr", file=sys.stderr)
+    document = pathlib.Path(path).read_text(encoding="utf-8", errors="surrogateescape")
+    print(document, end="" if document.endswith("\n") else "\n")
+    if flag("FAKE_ORCA_MULTI_DOCUMENT_FILE"):
+        print(document, end="" if document.endswith("\n") else "\n")
+
+
+def error(code):
+    return {"id": "mock-error", "ok": False,
+            "error": {"code": code, "message": "mock failure"},
+            "_meta": {"runtimeId": None}}
+
+
+runtime = value("FAKE_ORCA_RUNTIME", "runtime-1111")
+handle = value("FAKE_ORCA_HANDLE", "term_mock-agent")
+pty = value("FAKE_ORCA_PTY", "repo::/work/Orca-Project@@pty-1")
+incarnation = value("FAKE_ORCA_INCARNATION", "incarnation-2222")
+worktree = value("FAKE_ORCA_WORKTREE", "repo::/work/Orca-Project")
+worktree_path = value("FAKE_ORCA_PATH", "/work/Orca-Project")
+host = value("FAKE_ORCA_HOST", "local")
+tab = value("FAKE_ORCA_TAB", "tab-3333")
+leaf = value("FAKE_ORCA_LEAF", "leaf-4444")
+agent = value("FAKE_ORCA_AGENT", "codex")
+title = value("FAKE_ORCA_TITLE", "Codex - Orca Project")
+branch = value("FAKE_ORCA_BRANCH", "main")
+preview = value("FAKE_ORCA_PREVIEW", "fixture preview")
+
+if flag("FAKE_ORCA_HANG_FILE"):
+    time.sleep(float(os.environ.get("FAKE_ORCA_HANG_SECONDS", "5")))
+
+if sys.argv[1:] == ["--version"]:
+    print("1.4.241-mock")
+    raise SystemExit(0)
+
+if os.environ.get("FAKE_ORCA_RESPONSE_FILE") and os.access(os.environ["FAKE_ORCA_RESPONSE_FILE"], os.R_OK):
+    emit_file(os.environ["FAKE_ORCA_RESPONSE_FILE"])
+    raise SystemExit(0)
+
+if flag("FAKE_ORCA_OVERSIZE_FILE"):
+    print(" " * 4194305 + "{}")
+    raise SystemExit(0)
+
+if flag("FAKE_ORCA_ERROR_FILE"):
+    emit(error(value("FAKE_ORCA_ERROR_CODE", "runtime_unavailable")))
+    raise SystemExit(1)
+
+
+def base_agent():
+    return {
+        "handle": handle, "ptyId": pty, "incarnationId": incarnation,
+        "worktreeId": worktree, "worktreePath": worktree_path,
+        "executionHostId": host, "tabId": tab, "leafId": leaf,
+        "agentIdentity": agent, "title": title, "connected": True,
+        "writable": True, "orphaned": False, "branch": branch,
+        "lastOutputAt": 0, "preview": preview,
+    }
+
+
+def apply_common(row, show=False):
+    row["connected"] = not flag("FAKE_ORCA_DISCONNECTED_FILE")
+    row["writable"] = not flag("FAKE_ORCA_NOT_WRITABLE_FILE")
+    row["orphaned"] = flag("FAKE_ORCA_ORPHANED_FILE")
+    ptyless = "FAKE_ORCA_SHOW_NO_PTY_FILE" if show else "FAKE_ORCA_PTYLESS_FILE"
+    pty_absent = "FAKE_ORCA_SHOW_PTY_ABSENT_FILE" if show else "FAKE_ORCA_PTYLESS_ABSENT_FILE"
+    pty_empty = "FAKE_ORCA_SHOW_PTY_EMPTY_FILE" if show else "FAKE_ORCA_PTYLESS_EMPTY_FILE"
+    if flag(ptyless):
+        row["ptyId"] = None
+        row["incarnationId"] = None
+    elif flag(pty_absent):
+        row.pop("ptyId", None)
+        row.pop("incarnationId", None)
+    elif flag(pty_empty):
+        row["ptyId"] = ""
+        row["incarnationId"] = ""
+    if flag("FAKE_ORCA_FOREIGN_FILE") and not show:
+        row.pop("executionHostId", None)
+    if flag("FAKE_ORCA_MISSING_BINDING_FILE"):
+        row.pop("leafId", None)
+    if flag("FAKE_ORCA_NULL_TITLE_FILE") and not show:
+        row["title"] = None
+    if flag("FAKE_ORCA_ABSENT_TITLE_FILE") and not show:
+        row.pop("title", None)
+    if flag("FAKE_ORCA_NULL_AGENT_FILE") and not show:
+        row["agentIdentity"] = None
+    if flag("FAKE_ORCA_ABSENT_AGENT_FILE") and not show:
+        row.pop("agentIdentity", None)
+    if flag("FAKE_ORCA_SHOW_NO_AGENT_FILE") and show:
+        row.pop("agentIdentity", None)
+    if flag("FAKE_ORCA_SHOW_NULL_AGENT_FILE") and show:
+        row["agentIdentity"] = None
+    if flag("FAKE_ORCA_SHOW_EMPTY_AGENT_FILE") and show:
+        row["agentIdentity"] = ""
+    if flag("FAKE_ORCA_WRONG_AGENT_TYPE_FILE"):
+        row["agentIdentity"] = {}
+    if flag("FAKE_ORCA_LONG_AGENT_FILE"):
+        row["agentIdentity"] = "x" * 129
+    if flag("FAKE_ORCA_WRONG_BINDING_TYPE_FILE"):
+        row["ptyId"] = []
+    if flag("FAKE_ORCA_OVERSIZED_BINDING_FILE") and not show:
+        row["ptyId"] = "x" * 4097
+    if flag("FAKE_ORCA_WRONG_HANDLE_TYPE_FILE"):
+        row["handle"] = {}
+    if flag("FAKE_ORCA_WRONG_CONNECTED_TYPE_FILE"):
+        row["connected"] = None
+    if flag("FAKE_ORCA_WRONG_WRITABLE_TYPE_FILE"):
+        row["writable"] = None
+    if flag("FAKE_ORCA_WRONG_ORPHANED_TYPE_FILE"):
+        row["orphaned"] = None
+    if show:
+        for name, switch in (("handle", "FAKE_ORCA_SHOW_MISSING_HANDLE_FILE"),
+                             ("worktreeId", "FAKE_ORCA_SHOW_MISSING_WORKTREE_FILE"),
+                             ("tabId", "FAKE_ORCA_SHOW_MISSING_TAB_FILE"),
+                             ("leafId", "FAKE_ORCA_SHOW_MISSING_LEAF_FILE"),
+                             ("executionHostId", "FAKE_ORCA_SHOW_MISSING_HOST_FILE")):
+            if flag(switch):
+                row.pop(name, None)
+    return row
+
+
+command = " ".join(sys.argv[1:3])
+if command == "status --json":
+    path = os.environ.get("FAKE_ORCA_STATUS_JSON_FILE", "")
+    if path and os.access(path, os.R_OK):
+        emit_file(path)
+        raise SystemExit(0)
+    status = {"id": "mock-status", "ok": True,
+              "result": {"runtime": {"reachable": not flag("FAKE_ORCA_UNREACHABLE_FILE"),
+                                       "runtimeId": runtime}},
+              "_meta": {"runtimeId": runtime}}
+    if flag("FAKE_ORCA_STATUS_MISSING_RUNTIME_FILE"):
+        status["_meta"].pop("runtimeId", None)
+    if flag("FAKE_ORCA_STATUS_WRONG_REACHABLE_FILE"):
+        status["result"]["runtime"]["reachable"] = "true"
+    emit(status)
+elif command == "terminal list":
+    path = os.environ.get("FAKE_ORCA_LIST_JSON_FILE", "")
+    if path and os.access(path, os.R_OK):
+        emit_file(path)
+        raise SystemExit(0)
+    if flag("FAKE_ORCA_BAD_SCHEMA_FILE"):
+        emit({"id": "mock-list", "ok": True,
+              "result": {"terminals": "changed", "truncated": False, "totalCount": 0},
+              "_meta": {"runtimeId": runtime}})
+        raise SystemExit(0)
+    agent_row = apply_common(base_agent())
+    base_row = base_agent()
+    base_row["connected"] = agent_row["connected"]
+    base_row["writable"] = agent_row["writable"]
+    base_row["orphaned"] = agent_row["orphaned"]
+    shell_row = {"handle": "term_shell", "ptyId": "shell-pty", "incarnationId": "shell-inc",
+                 "worktreeId": worktree, "worktreePath": worktree_path,
+                 "executionHostId": host, "tabId": "shell-tab", "leafId": "shell-leaf",
+                 "title": "Shell", "connected": agent_row["connected"],
+                 "writable": agent_row["writable"], "orphaned": agent_row["orphaned"],
+                 "branch": branch, "lastOutputAt": 0, "preview": ""}
+    if flag("FAKE_ORCA_NONCANDIDATE_WRONG_BINDING_FILE"):
+        shell_row["ptyId"] = []
+    terminals = [agent_row, shell_row]
+    if flag("FAKE_ORCA_SECOND_AGENT_FILE") or flag("FAKE_ORCA_LIVE_FIVE_FILE"):
+        second = copy.deepcopy(base_row)
+        second.update(handle="term_second-agent", ptyId="pty-second", incarnationId="incarnation-second",
+                      worktreeId="worktree-second", worktreePath="/work/second", tabId="tab-second",
+                      leafId="leaf-second", agentIdentity="claude", title="Claude - Fixture")
+        terminals.insert(1, second)
+    if flag("FAKE_ORCA_LIVE_FIVE_FILE"):
+        for index in (3, 4, 5):
+            live = copy.deepcopy(base_row)
+            live.update(handle="term_live-" + str(index), ptyId="pty-live-" + str(index),
+                        incarnationId="incarnation-live-" + str(index), worktreeId="worktree-live-" + str(index),
+                        worktreePath="/work/live-" + str(index), tabId="tab-live-" + str(index),
+                        leafId="leaf-live-" + str(index), agentIdentity="codex",
+                        title="Codex - Live " + str(index))
+            terminals.insert(-1, live)
+    if flag("FAKE_ORCA_EXACT_DUPLICATE_FILE"):
+        terminals = [agent_row, copy.deepcopy(agent_row), shell_row]
+    if flag("FAKE_ORCA_DUPLICATE_FILE") or flag("FAKE_ORCA_CONFLICTING_DUPLICATE_FILE"):
+        conflict = copy.deepcopy(agent_row)
+        conflict.update(handle="term_conflict", ptyId="pty-conflict", tabId="tab-conflict", leafId="leaf-conflict")
+        terminals = [agent_row, conflict, shell_row]
+    if flag("FAKE_ORCA_INCOMPLETE_DUPLICATE_FILE"):
+        incomplete = copy.deepcopy(agent_row)
+        incomplete.pop("executionHostId", None)
+        terminals = [agent_row, incomplete, shell_row]
+    if flag("FAKE_ORCA_EMPTY_LIST_FILE"):
+        terminals = []
+    if flag("FAKE_ORCA_OVER_LIMIT_FILE"):
+        terminals = []
+        for index in range(1001):
+            over = copy.deepcopy(base_row)
+            over.update(handle="term-over-" + str(index), ptyId="pty-over-" + str(index),
+                        incarnationId="incarnation-over-" + str(index), tabId="tab-over-" + str(index),
+                        leafId="leaf-over-" + str(index))
+            terminals.append(over)
+        terminals.append(shell_row)
+    list_result = {"terminals": terminals, "truncated": flag("FAKE_ORCA_TRUNCATED_FILE"),
+                   "totalCount": len(terminals), "hostScope": {"hostIds": [runtime], "omittedHostIds": []},
+                   "topologyRevisions": {"fixture-worktree": 1}}
+    listing = {"id": "mock-list", "ok": True, "result": list_result,
+               "_meta": {"runtimeId": runtime}}
+    if flag("FAKE_ORCA_TOTAL_COUNT_MISMATCH_FILE"):
+        listing["result"]["totalCount"] += 1
+    if flag("FAKE_ORCA_MISSING_TOTAL_COUNT_FILE"):
+        listing["result"].pop("totalCount", None)
+    if flag("FAKE_ORCA_MISSING_TRUNCATED_FILE"):
+        listing["result"].pop("truncated", None)
+    if flag("FAKE_ORCA_TRUNCATED_STRING_FILE"):
+        listing["result"]["truncated"] = "false"
+    if flag("FAKE_ORCA_NOT_OK_FILE"):
+        listing["ok"] = False
+    if flag("FAKE_ORCA_MISSING_RUNTIME_FILE"):
+        listing["_meta"].pop("runtimeId", None)
+    if flag("FAKE_ORCA_WRONG_RUNTIME_TYPE_FILE"):
+        listing["_meta"]["runtimeId"] = 5
+    if flag("FAKE_ORCA_NON_OBJECT_FILE"):
+        listing = []
+    if flag("FAKE_ORCA_OVER_LIMIT_FILE"):
+        emit(json.dumps(listing, ensure_ascii=False, indent=2))
+    else:
+        emit(listing)
+elif command == "terminal show":
+    path = os.environ.get("FAKE_ORCA_SHOW_JSON_FILE", "")
+    if path and os.access(path, os.R_OK):
+        emit_file(path)
+        raise SystemExit(0)
+    if flag("FAKE_ORCA_SHOW_GONE_FILE") or flag("FAKE_ORCA_GONE_FILE"):
+        emit(error("terminal_gone"))
+        raise SystemExit(1)
+    if flag("FAKE_ORCA_SHOW_ERROR_FILE"):
+        emit(error(value("FAKE_ORCA_SHOW_ERROR_CODE", "runtime_unavailable")))
+        raise SystemExit(1)
+    terminal = apply_common(base_agent(), show=True)
+    terminal.update(paneRuntimeId="fixture-pane-runtime", rendererGraphEpoch=1, agentWait=None)
+    showing = {"id": "mock-show", "ok": True, "result": {"terminal": terminal},
+               "_meta": {"runtimeId": runtime}}
+    if flag("FAKE_ORCA_SHOW_MISSING_RUNTIME_FILE"):
+        showing["_meta"].pop("runtimeId", None)
+    if flag("FAKE_ORCA_SHOW_NOT_OK_FILE"):
+        showing["ok"] = False
+    emit(showing)
+elif command == "terminal send":
+    send_handle = ""
+    text = ""
+    text_set = 0
+    enter = 0
+    argv = sys.argv[3:]
+    index = 0
+    while index < len(argv):
+        if argv[index] == "--terminal" and index + 1 < len(argv):
+            send_handle = argv[index + 1]
+            index += 2
+        elif argv[index] == "--text" and index + 1 < len(argv):
+            text = argv[index + 1]
+            text_set = 1
+            index += 2
+        elif argv[index] == "--enter":
+            enter = 1
+            index += 1
+        else:
+            index += 1
+    if os.environ.get("FAKE_ORCA_SEND_LOG"):
+        with open(os.environ["FAKE_ORCA_SEND_LOG"], "a", encoding="utf-8") as log:
+            log.write("handle=%s\ttext_set=%s\tenter=%s\ttext=%s\n" %
+                      (send_handle, text_set, enter, text))
+    if flag("FAKE_ORCA_SEND_FAIL_FILE"):
+        emit(error("terminal_not_writable"))
+        raise SystemExit(1)
+    emit({"id": "mock-send", "ok": True,
+          "result": {"send": {"handle": send_handle, "accepted": True,
+                                "bytesWritten": len(text.encode("utf-8"))}},
+          "_meta": {"runtimeId": runtime}})
+else:
+    emit(error("invalid_argument"))
+    raise SystemExit(1)
+PY
+fi
+
 # Role: Escape one fixture value for literal inclusion in a JSON string.
 json_escape() {
     local value=$1
     value=${value//\\/\\\\}
     value=${value//\"/\\\"}
+    value=${value//$'\b'/\\b}
+    value=${value//$'\f'/\\f}
     value=${value//$'\n'/\\n}
     value=${value//$'\r'/\\r}
     value=${value//$'\t'/\\t}
+    value=${value//$'\e'/\\u001b}
     printf '%s' "$value"
+}
+
+# Role: Quote one fixture value as a JSON string without interpreting its contents.
+json_string() {
+    local value=$1
+    printf '"%s"' "$(json_escape "$value")"
 }
 
 # Role: Load a mutable fixture value from a file when supplied, otherwise use its default.
@@ -20,9 +359,81 @@ fixture_value() {
     return 0
 }
 
-if [[ -n ${FAKE_ORCA_HANG_FILE:-} && -e ${FAKE_ORCA_HANG_FILE:-} ]]; then
-    sleep "${FAKE_ORCA_HANG_SECONDS:-5}"
-fi
+# Role: Test whether a deterministic fixture switch is enabled by an existing file.
+fixture_flag() {
+    local path=${1-}
+    [[ -n $path && -e $path ]]
+}
+
+# Role: Add configured stdout/stderr noise and optional duplicate JSON documents to one response.
+emit_json() {
+    local payload=$1
+    if fixture_flag "${FAKE_ORCA_STDOUT_NOISE_FILE:-}"; then
+        printf 'fixture diagnostic on stdout\n'
+    fi
+    if fixture_flag "${FAKE_ORCA_STDERR_NOISE_FILE:-}"; then
+        printf 'fixture diagnostic on stderr\n' >&2
+    fi
+    printf '%s\n' "$payload"
+    if fixture_flag "${FAKE_ORCA_MULTI_DOCUMENT_FILE:-}"; then
+        printf '%s\n' "$payload"
+    fi
+}
+
+# Role: Emit caller-supplied JSON while retaining the fixture's noise and multi-document switches.
+emit_file() {
+    local path=$1
+    if fixture_flag "${FAKE_ORCA_STDOUT_NOISE_FILE:-}"; then
+        printf 'fixture diagnostic on stdout\n'
+    fi
+    if fixture_flag "${FAKE_ORCA_STDERR_NOISE_FILE:-}"; then
+        printf 'fixture diagnostic on stderr\n' >&2
+    fi
+    cat -- "$path"
+    [[ -s $path && $(tail -c 1 "$path") != $'\n' ]] && printf '\n'
+    if fixture_flag "${FAKE_ORCA_MULTI_DOCUMENT_FILE:-}"; then
+        cat -- "$path"
+        [[ -s $path && $(tail -c 1 "$path") != $'\n' ]] && printf '\n'
+    fi
+}
+
+# Role: Build one terminal-list row with the live Orca 1.4.241 field families.
+build_agent_json() {
+    local connected_json=$1 writable_json=$2 orphaned_json=$3
+    jq -cn \
+        --arg handle "$handle" --arg pty "$pty" --arg incarnation "$incarnation" \
+        --arg worktree "$worktree" --arg path "$worktree_path" --arg host "$host" \
+        --arg tab "$tab" --arg leaf "$leaf" --arg agent "$agent" --arg title "$title" \
+        --arg branch "$branch" --arg preview "$preview" \
+        --argjson connected "$connected_json" --argjson writable "$writable_json" \
+        --argjson orphaned "$orphaned_json" \
+        '{handle:$handle,ptyId:$pty,incarnationId:$incarnation,worktreeId:$worktree,
+          worktreePath:$path,executionHostId:$host,tabId:$tab,leafId:$leaf,
+          agentIdentity:$agent,title:$title,connected:$connected,writable:$writable,
+          orphaned:$orphaned,branch:$branch,lastOutputAt:0,preview:$preview}'
+}
+
+# Role: Build the ordinary shell row whose optional agent identity is intentionally absent.
+build_shell_json() {
+    local connected_json=$1 writable_json=$2 orphaned_json=$3
+    jq -cn \
+        --arg worktree "$worktree" --arg path "$worktree_path" --arg host "$host" \
+        --arg branch "$branch" --arg preview "" \
+        --argjson connected "$connected_json" --argjson writable "$writable_json" \
+        --argjson orphaned "$orphaned_json" \
+        '{handle:"term_shell",ptyId:"shell-pty",incarnationId:"shell-inc",
+          worktreeId:$worktree,worktreePath:$path,executionHostId:$host,
+          tabId:"shell-tab",leafId:"shell-leaf",title:"Shell",connected:$connected,
+          writable:$writable,orphaned:$orphaned,branch:$branch,lastOutputAt:0,
+          preview:$preview}'
+}
+
+# Role: Build the standard Orca error envelope used by read-only command failures.
+error_json() {
+    local code=$1
+    printf '{"id":"mock-error","ok":false,"error":{"code":%s,"message":"mock failure"},"_meta":{"runtimeId":null}}' \
+        "$(json_string "$code")"
+}
 
 fixture_value "${FAKE_ORCA_RUNTIME:-runtime-1111}" "${FAKE_ORCA_RUNTIME_FILE:-}"; runtime=$REPLY
 fixture_value "${FAKE_ORCA_HANDLE:-term_mock-agent}" "${FAKE_ORCA_HANDLE_FILE:-}"; handle=$REPLY
@@ -35,85 +446,263 @@ fixture_value "${FAKE_ORCA_TAB:-tab-3333}" "${FAKE_ORCA_TAB_FILE:-}"; tab=$REPLY
 fixture_value "${FAKE_ORCA_LEAF:-leaf-4444}" "${FAKE_ORCA_LEAF_FILE:-}"; leaf=$REPLY
 fixture_value "${FAKE_ORCA_AGENT:-codex}" "${FAKE_ORCA_AGENT_FILE:-}"; agent=$REPLY
 fixture_value "${FAKE_ORCA_TITLE:-Codex - Orca Project}" "${FAKE_ORCA_TITLE_FILE:-}"; title=$REPLY
+fixture_value "${FAKE_ORCA_BRANCH:-main}" "${FAKE_ORCA_BRANCH_FILE:-}"; branch=$REPLY
+fixture_value "${FAKE_ORCA_PREVIEW:-fixture preview}" "${FAKE_ORCA_PREVIEW_FILE:-}"; preview=$REPLY
+
+if [[ -n ${FAKE_ORCA_HANG_FILE:-} && -e ${FAKE_ORCA_HANG_FILE:-} ]]; then
+    sleep "${FAKE_ORCA_HANG_SECONDS:-5}"
+fi
 
 if [[ ${1-} == --version ]]; then
-    printf '0.9.0-mock\n'
+    printf '1.4.241-mock\n'
+    exit 0
+fi
+
+command_name="${1-} ${2-}"
+if [[ -n ${FAKE_ORCA_RESPONSE_FILE:-} && -r ${FAKE_ORCA_RESPONSE_FILE:-} ]]; then
+    emit_file "$FAKE_ORCA_RESPONSE_FILE"
+    exit 0
+fi
+
+if fixture_flag "${FAKE_ORCA_OVERSIZE_FILE:-}"; then
+    printf '%*s{}\n' 4194305 ''
     exit 0
 fi
 
 if [[ -n ${FAKE_ORCA_ERROR_FILE:-} && -e ${FAKE_ORCA_ERROR_FILE:-} ]]; then
-    printf '{"id":"mock","ok":false,"error":{"code":"runtime_unavailable","message":"mock offline"},"_meta":{"runtimeId":null}}\n'
+    fixture_value "${FAKE_ORCA_ERROR_CODE:-runtime_unavailable}" "${FAKE_ORCA_ERROR_CODE_FILE:-}"; error_code=$REPLY
+    emit_json "$(error_json "$error_code")"
     exit 1
 fi
 
-case "${1-} ${2-}" in
+case $command_name in
     'status --json')
-        printf '{"id":"mock-status","ok":true,"result":{"runtime":{"reachable":true,"runtimeId":"%s"}},"_meta":{"runtimeId":"%s"}}\n' \
-            "$(json_escape "$runtime")" "$(json_escape "$runtime")"
+        if [[ -n ${FAKE_ORCA_STATUS_JSON_FILE:-} && -r ${FAKE_ORCA_STATUS_JSON_FILE:-} ]]; then
+            emit_file "$FAKE_ORCA_STATUS_JSON_FILE"
+            exit 0
+        fi
+        reachable=true
+        fixture_flag "${FAKE_ORCA_UNREACHABLE_FILE:-}" && reachable=false
+        status_json=$(jq -cn --arg runtime "$runtime" --argjson reachable "$reachable" \
+            '{id:"mock-status",ok:true,result:{runtime:{reachable:$reachable,runtimeId:$runtime}},
+              _meta:{runtimeId:$runtime}}')
+        if fixture_flag "${FAKE_ORCA_STATUS_MISSING_RUNTIME_FILE:-}"; then
+            status_json=$(jq 'del(._meta.runtimeId)' <<<"$status_json")
+        fi
+        if fixture_flag "${FAKE_ORCA_STATUS_WRONG_REACHABLE_FILE:-}"; then
+            status_json=$(jq '.result.runtime.reachable = "true"' <<<"$status_json")
+        fi
+        emit_json "$status_json"
         ;;
+
     'terminal list')
-        if [[ -n ${FAKE_ORCA_BAD_SCHEMA_FILE:-} && -e ${FAKE_ORCA_BAD_SCHEMA_FILE:-} ]]; then
-            printf '{"id":"mock-list","ok":true,"result":{"terminals":"changed"}}\n'
+        if [[ -n ${FAKE_ORCA_LIST_JSON_FILE:-} && -r ${FAKE_ORCA_LIST_JSON_FILE:-} ]]; then
+            emit_file "$FAKE_ORCA_LIST_JSON_FILE"
+            exit 0
+        fi
+        connected=true
+        writable=true
+        orphaned=false
+        fixture_flag "${FAKE_ORCA_DISCONNECTED_FILE:-}" && connected=false
+        fixture_flag "${FAKE_ORCA_NOT_WRITABLE_FILE:-}" && writable=false
+        fixture_flag "${FAKE_ORCA_ORPHANED_FILE:-}" && orphaned=true
+        connected_json=$connected
+        writable_json=$writable
+        orphaned_json=$orphaned
+        agent_json=$(build_agent_json "$connected_json" "$writable_json" "$orphaned_json")
+        base_agent_json=$agent_json
+        shell_json=$(build_shell_json "$connected_json" "$writable_json" "$orphaned_json")
+        if fixture_flag "${FAKE_ORCA_NONCANDIDATE_WRONG_BINDING_FILE:-}"; then
+            shell_json=$(jq '.ptyId = []' <<<"$shell_json")
+        fi
+
+        if fixture_flag "${FAKE_ORCA_PTYLESS_FILE:-}"; then
+            agent_json=$(jq '.ptyId = null | .incarnationId = null' <<<"$agent_json")
+        elif fixture_flag "${FAKE_ORCA_PTYLESS_ABSENT_FILE:-}"; then
+            agent_json=$(jq 'del(.ptyId,.incarnationId)' <<<"$agent_json")
+        elif fixture_flag "${FAKE_ORCA_PTYLESS_EMPTY_FILE:-}"; then
+            agent_json=$(jq '.ptyId = "" | .incarnationId = ""' <<<"$agent_json")
+        fi
+        fixture_flag "${FAKE_ORCA_FOREIGN_FILE:-}" && agent_json=$(jq 'del(.executionHostId)' <<<"$agent_json")
+        fixture_flag "${FAKE_ORCA_MISSING_BINDING_FILE:-}" && agent_json=$(jq 'del(.leafId)' <<<"$agent_json")
+        fixture_flag "${FAKE_ORCA_NULL_TITLE_FILE:-}" && agent_json=$(jq '.title = null' <<<"$agent_json")
+        fixture_flag "${FAKE_ORCA_ABSENT_TITLE_FILE:-}" && agent_json=$(jq 'del(.title)' <<<"$agent_json")
+        fixture_flag "${FAKE_ORCA_NULL_AGENT_FILE:-}" && agent_json=$(jq '.agentIdentity = null' <<<"$agent_json")
+        fixture_flag "${FAKE_ORCA_ABSENT_AGENT_FILE:-}" && agent_json=$(jq 'del(.agentIdentity)' <<<"$agent_json")
+        fixture_flag "${FAKE_ORCA_WRONG_AGENT_TYPE_FILE:-}" && agent_json=$(jq '.agentIdentity = {}' <<<"$agent_json")
+        fixture_flag "${FAKE_ORCA_LONG_AGENT_FILE:-}" && agent_json=$(jq '.agentIdentity = ("x" * 129)' <<<"$agent_json")
+        fixture_flag "${FAKE_ORCA_WRONG_BINDING_TYPE_FILE:-}" && agent_json=$(jq '.ptyId = []' <<<"$agent_json")
+        fixture_flag "${FAKE_ORCA_OVERSIZED_BINDING_FILE:-}" && agent_json=$(jq '.ptyId = ("x" * 4097)' <<<"$agent_json")
+        fixture_flag "${FAKE_ORCA_WRONG_HANDLE_TYPE_FILE:-}" && agent_json=$(jq '.handle = {}' <<<"$agent_json")
+        fixture_flag "${FAKE_ORCA_WRONG_CONNECTED_TYPE_FILE:-}" && agent_json=$(jq '.connected = null' <<<"$agent_json")
+        fixture_flag "${FAKE_ORCA_WRONG_WRITABLE_TYPE_FILE:-}" && agent_json=$(jq '.writable = null' <<<"$agent_json")
+        fixture_flag "${FAKE_ORCA_WRONG_ORPHANED_TYPE_FILE:-}" && agent_json=$(jq '.orphaned = null' <<<"$agent_json")
+
+        terminals_json=$(jq -cn --argjson agent "$agent_json" --argjson shell "$shell_json" '[$agent,$shell]')
+        if fixture_flag "${FAKE_ORCA_SECOND_AGENT_FILE:-}" || fixture_flag "${FAKE_ORCA_LIVE_FIVE_FILE:-}"; then
+            second_json=$(jq '.handle = "term_second-agent" | .ptyId = "pty-second" |
+                .incarnationId = "incarnation-second" | .worktreeId = "worktree-second" |
+                .worktreePath = "/work/second" | .tabId = "tab-second" | .leafId = "leaf-second" |
+                .agentIdentity = "claude" | .title = "Claude - Fixture"' <<<"$base_agent_json")
+            terminals_json=$(jq -cn --argjson current "$terminals_json" --argjson second "$second_json" \
+                '$current[0:1] + [$second] + $current[1:]')
+        fi
+        if fixture_flag "${FAKE_ORCA_LIVE_FIVE_FILE:-}"; then
+            for live_index in 3 4 5; do
+                live_json=$(jq --arg index "$live_index" \
+                    '.handle = ("term_live-" + $index) |
+                     .ptyId = ("pty-live-" + $index) |
+                     .incarnationId = ("incarnation-live-" + $index) |
+                     .worktreeId = ("worktree-live-" + $index) |
+                     .worktreePath = ("/work/live-" + $index) |
+                     .tabId = ("tab-live-" + $index) |
+                     .leafId = ("leaf-live-" + $index) |
+                     .agentIdentity = "codex" |
+                     .title = ("Codex - Live " + $index)' <<<"$base_agent_json")
+                terminals_json=$(jq -cn --argjson current "$terminals_json" --argjson live "$live_json" \
+                    '$current[0:-1] + [$live, $current[-1]]')
+            done
+        fi
+        if fixture_flag "${FAKE_ORCA_EXACT_DUPLICATE_FILE:-}"; then
+            terminals_json=$(jq -cn --argjson agent "$agent_json" --argjson shell "$shell_json" '[$agent,$agent,$shell]')
+        fi
+        if fixture_flag "${FAKE_ORCA_DUPLICATE_FILE:-}" || \
+            fixture_flag "${FAKE_ORCA_CONFLICTING_DUPLICATE_FILE:-}"; then
+            conflict_json=$(jq '.handle = "term_conflict" | .ptyId = "pty-conflict" |
+                .tabId = "tab-conflict" | .leafId = "leaf-conflict"' <<<"$agent_json")
+            terminals_json=$(jq -cn --argjson agent "$agent_json" --argjson conflict "$conflict_json" \
+                --argjson shell "$shell_json" '[$agent,$conflict,$shell]')
+        fi
+        if fixture_flag "${FAKE_ORCA_INCOMPLETE_DUPLICATE_FILE:-}"; then
+            incomplete_json=$(jq 'del(.executionHostId)' <<<"$agent_json")
+            terminals_json=$(jq -cn --argjson agent "$agent_json" --argjson incomplete "$incomplete_json" \
+                --argjson shell "$shell_json" '[$agent,$incomplete,$shell]')
+        fi
+        if fixture_flag "${FAKE_ORCA_EMPTY_LIST_FILE:-}"; then
+            terminals_json='[]'
+        fi
+
+        if fixture_flag "${FAKE_ORCA_BAD_SCHEMA_FILE:-}"; then
+            list_json='{"id":"mock-list","ok":true,"result":{"terminals":"changed","truncated":false,"totalCount":0},"_meta":{"runtimeId":"runtime-1111"}}'
+            emit_json "$list_json"
             exit 0
         fi
         truncated=false
-        [[ -n ${FAKE_ORCA_TRUNCATED_FILE:-} && -e ${FAKE_ORCA_TRUNCATED_FILE:-} ]] && truncated=true
-        connected=true
-        [[ -n ${FAKE_ORCA_DISCONNECTED_FILE:-} && -e ${FAKE_ORCA_DISCONNECTED_FILE:-} ]] && connected=false
-        printf '{"id":"mock-list","ok":true,"result":{"terminals":['
-        printf '{"handle":"%s","ptyId":"%s","incarnationId":"%s","orphaned":false,' \
-            "$(json_escape "$handle")" "$(json_escape "$pty")" "$(json_escape "$incarnation")"
-        if [[ -n ${FAKE_ORCA_MISSING_BINDING_FILE:-} && -e ${FAKE_ORCA_MISSING_BINDING_FILE:-} ]]; then
-            printf '"worktreeId":"%s","worktreePath":"%s","tabId":"%s",' \
-                "$(json_escape "$worktree")" "$(json_escape "$worktree_path")" "$(json_escape "$tab")"
+        fixture_flag "${FAKE_ORCA_TRUNCATED_FILE:-}" && truncated=true
+        if fixture_flag "${FAKE_ORCA_OVER_LIMIT_FILE:-}"; then
+            list_json=$(jq -cn --argjson agent "$base_agent_json" --argjson shell "$shell_json" \
+                --argjson truncated "$truncated" --arg runtime "$runtime" \
+                '([range(0;1001) as $index | $agent |
+                   .handle = ("term-over-" + ($index | tostring)) |
+                   .ptyId = ("pty-over-" + ($index | tostring)) |
+                   .incarnationId = ("incarnation-over-" + ($index | tostring)) |
+                   .tabId = ("tab-over-" + ($index | tostring)) |
+                   .leafId = ("leaf-over-" + ($index | tostring))] + [$shell]) as $terminals |
+                 {id:"mock-list",ok:true,result:{terminals:$terminals,truncated:$truncated,
+                   totalCount:($terminals | length),hostScope:{hostIds:[$runtime],omittedHostIds:[]},
+                   topologyRevisions:{"fixture-worktree":1}},_meta:{runtimeId:$runtime}}')
         else
-            printf '"worktreeId":"%s","worktreePath":"%s","tabId":"%s","leafId":"%s",' \
-                "$(json_escape "$worktree")" "$(json_escape "$worktree_path")" \
-                "$(json_escape "$tab")" "$(json_escape "$leaf")"
+            terminal_count=$(jq -r 'length' <<<"$terminals_json")
+            list_json=$(jq -cn --argjson terminals "$terminals_json" --argjson truncated "$truncated" \
+                --argjson total "$terminal_count" --arg runtime "$runtime" \
+                '{id:"mock-list",ok:true,result:{terminals:$terminals,truncated:$truncated,
+                  totalCount:$total,hostScope:{hostIds:[$runtime],omittedHostIds:[]},
+                  topologyRevisions:{"fixture-worktree":1}},_meta:{runtimeId:$runtime}}')
         fi
-        printf '"title":"%s","connected":%s,"writable":true,"executionHostId":"%s","agentIdentity":"%s"},' \
-            "$(json_escape "$title")" "$connected" "$(json_escape "$host")" "$(json_escape "$agent")"
-        # A writable ordinary shell is deliberately present; discovery must filter it out.
-        printf '{"handle":"term_shell","ptyId":"shell-pty","incarnationId":"shell-inc","orphaned":false,'
-        printf '"worktreeId":"%s","worktreePath":"%s","tabId":"shell-tab","leafId":"shell-leaf",' \
-            "$(json_escape "$worktree")" "$(json_escape "$worktree_path")"
-        printf '"title":"Shell","connected":true,"writable":true,"executionHostId":"%s"}' \
-            "$(json_escape "$host")"
-        printf '],"totalCount":2,"truncated":%s},"_meta":{"runtimeId":"%s"}}\n' \
-            "$truncated" "$(json_escape "$runtime")"
+        if fixture_flag "${FAKE_ORCA_TOTAL_COUNT_MISMATCH_FILE:-}"; then
+            list_json=$(jq '.result.totalCount += 1' <<<"$list_json")
+        fi
+        if fixture_flag "${FAKE_ORCA_MISSING_TOTAL_COUNT_FILE:-}"; then
+            list_json=$(jq 'del(.result.totalCount)' <<<"$list_json")
+        fi
+        if fixture_flag "${FAKE_ORCA_MISSING_TRUNCATED_FILE:-}"; then
+            list_json=$(jq 'del(.result.truncated)' <<<"$list_json")
+        fi
+        if fixture_flag "${FAKE_ORCA_TRUNCATED_STRING_FILE:-}"; then
+            list_json=$(jq '.result.truncated = "false"' <<<"$list_json")
+        fi
+        if fixture_flag "${FAKE_ORCA_NOT_OK_FILE:-}"; then
+            list_json=$(jq '.ok = false' <<<"$list_json")
+        fi
+        if fixture_flag "${FAKE_ORCA_MISSING_RUNTIME_FILE:-}"; then
+            list_json=$(jq 'del(._meta.runtimeId)' <<<"$list_json")
+        fi
+        if fixture_flag "${FAKE_ORCA_WRONG_RUNTIME_TYPE_FILE:-}"; then
+            list_json=$(jq '._meta.runtimeId = 5' <<<"$list_json")
+        fi
+        if fixture_flag "${FAKE_ORCA_NON_OBJECT_FILE:-}"; then
+            list_json='[]'
+        fi
+        if fixture_flag "${FAKE_ORCA_OVER_LIMIT_FILE:-}"; then
+            list_json=$(jq . <<<"$list_json")
+        fi
+        emit_json "$list_json"
         ;;
+
     'terminal show')
-        if [[ -n ${FAKE_ORCA_GONE_FILE:-} && -e ${FAKE_ORCA_GONE_FILE:-} ]]; then
-            printf '{"id":"mock-show","ok":false,"error":{"code":"terminal_gone","message":"gone"},"_meta":{"runtimeId":"%s"}}\n' \
-                "$(json_escape "$runtime")"
+        if [[ -n ${FAKE_ORCA_SHOW_JSON_FILE:-} && -r ${FAKE_ORCA_SHOW_JSON_FILE:-} ]]; then
+            emit_file "$FAKE_ORCA_SHOW_JSON_FILE"
+            exit 0
+        fi
+        if fixture_flag "${FAKE_ORCA_SHOW_GONE_FILE:-}" || fixture_flag "${FAKE_ORCA_GONE_FILE:-}"; then
+            emit_json "$(error_json terminal_gone)"
+            exit 1
+        fi
+        if fixture_flag "${FAKE_ORCA_SHOW_ERROR_FILE:-}"; then
+            fixture_value "${FAKE_ORCA_SHOW_ERROR_CODE:-runtime_unavailable}" \
+                "${FAKE_ORCA_SHOW_ERROR_CODE_FILE:-}"; show_error_code=$REPLY
+            emit_json "$(error_json "$show_error_code")"
             exit 1
         fi
         connected=true
-        [[ -n ${FAKE_ORCA_DISCONNECTED_FILE:-} && -e ${FAKE_ORCA_DISCONNECTED_FILE:-} ]] && connected=false
-        printf '{"id":"mock-show","ok":true,"result":{"terminal":{'
-        printf '"handle":"%s","ptyId":"%s","incarnationId":"%s","orphaned":false,' \
-            "$(json_escape "$handle")" "$(json_escape "$pty")" "$(json_escape "$incarnation")"
-        if [[ -n ${FAKE_ORCA_MISSING_BINDING_FILE:-} && -e ${FAKE_ORCA_MISSING_BINDING_FILE:-} ]]; then
-            printf '"worktreeId":"%s","worktreePath":"%s","tabId":"%s",' \
-                "$(json_escape "$worktree")" "$(json_escape "$worktree_path")" "$(json_escape "$tab")"
-        else
-            printf '"worktreeId":"%s","worktreePath":"%s","tabId":"%s","leafId":"%s",' \
-                "$(json_escape "$worktree")" "$(json_escape "$worktree_path")" \
-                "$(json_escape "$tab")" "$(json_escape "$leaf")"
+        writable=true
+        orphaned=false
+        fixture_flag "${FAKE_ORCA_DISCONNECTED_FILE:-}" && connected=false
+        fixture_flag "${FAKE_ORCA_NOT_WRITABLE_FILE:-}" && writable=false
+        fixture_flag "${FAKE_ORCA_ORPHANED_FILE:-}" && orphaned=true
+        connected_json=$connected
+        writable_json=$writable
+        orphaned_json=$orphaned
+        terminal_json=$(build_agent_json "$connected_json" "$writable_json" "$orphaned_json")
+        if fixture_flag "${FAKE_ORCA_SHOW_NO_PTY_FILE:-}"; then
+            terminal_json=$(jq '.ptyId = null | .incarnationId = null' <<<"$terminal_json")
+        elif fixture_flag "${FAKE_ORCA_SHOW_PTY_ABSENT_FILE:-}"; then
+            terminal_json=$(jq 'del(.ptyId,.incarnationId)' <<<"$terminal_json")
+        elif fixture_flag "${FAKE_ORCA_SHOW_PTY_EMPTY_FILE:-}"; then
+            terminal_json=$(jq '.ptyId = "" | .incarnationId = ""' <<<"$terminal_json")
         fi
-        if [[ -n ${FAKE_ORCA_SHOW_NO_AGENT_FILE:-} && -e ${FAKE_ORCA_SHOW_NO_AGENT_FILE:-} ]]; then
-            # A plain shell show is structurally complete but omits the agent binding.
-            printf '"title":"%s","connected":%s,"writable":true,"executionHostId":"%s"' \
-                "$(json_escape "$title")" "$connected" "$(json_escape "$host")"
-        elif [[ -n ${FAKE_ORCA_SHOW_NULL_AGENT_FILE:-} && -e ${FAKE_ORCA_SHOW_NULL_AGENT_FILE:-} ]]; then
-            printf '"title":"%s","connected":%s,"writable":true,"executionHostId":"%s","agentIdentity":null' \
-                "$(json_escape "$title")" "$connected" "$(json_escape "$host")"
+        fixture_flag "${FAKE_ORCA_SHOW_NO_AGENT_FILE:-}" && terminal_json=$(jq 'del(.agentIdentity)' <<<"$terminal_json")
+        fixture_flag "${FAKE_ORCA_SHOW_NULL_AGENT_FILE:-}" && terminal_json=$(jq '.agentIdentity = null' <<<"$terminal_json")
+        fixture_flag "${FAKE_ORCA_SHOW_EMPTY_AGENT_FILE:-}" && terminal_json=$(jq '.agentIdentity = ""' <<<"$terminal_json")
+        fixture_flag "${FAKE_ORCA_MISSING_BINDING_FILE:-}" && terminal_json=$(jq 'del(.leafId)' <<<"$terminal_json")
+        fixture_flag "${FAKE_ORCA_SHOW_MISSING_HOST_FILE:-}" && terminal_json=$(jq 'del(.executionHostId)' <<<"$terminal_json")
+        fixture_flag "${FAKE_ORCA_SHOW_MISSING_HANDLE_FILE:-}" && terminal_json=$(jq 'del(.handle)' <<<"$terminal_json")
+        fixture_flag "${FAKE_ORCA_SHOW_MISSING_WORKTREE_FILE:-}" && terminal_json=$(jq 'del(.worktreeId)' <<<"$terminal_json")
+        fixture_flag "${FAKE_ORCA_SHOW_MISSING_TAB_FILE:-}" && terminal_json=$(jq 'del(.tabId)' <<<"$terminal_json")
+        fixture_flag "${FAKE_ORCA_SHOW_MISSING_LEAF_FILE:-}" && terminal_json=$(jq 'del(.leafId)' <<<"$terminal_json")
+        fixture_flag "${FAKE_ORCA_WRONG_BINDING_TYPE_FILE:-}" && terminal_json=$(jq '.ptyId = []' <<<"$terminal_json")
+        fixture_flag "${FAKE_ORCA_WRONG_HANDLE_TYPE_FILE:-}" && terminal_json=$(jq '.handle = {}' <<<"$terminal_json")
+        fixture_flag "${FAKE_ORCA_WRONG_CONNECTED_TYPE_FILE:-}" && terminal_json=$(jq '.connected = null' <<<"$terminal_json")
+        fixture_flag "${FAKE_ORCA_WRONG_WRITABLE_TYPE_FILE:-}" && terminal_json=$(jq '.writable = null' <<<"$terminal_json")
+        fixture_flag "${FAKE_ORCA_WRONG_ORPHANED_TYPE_FILE:-}" && terminal_json=$(jq '.orphaned = null' <<<"$terminal_json")
+        if fixture_flag "${FAKE_ORCA_SHOW_MISSING_RUNTIME_FILE:-}"; then
+            runtime_json='null'
         else
-            printf '"title":"%s","connected":%s,"writable":true,"executionHostId":"%s","agentIdentity":"%s"' \
-                "$(json_escape "$title")" "$connected" "$(json_escape "$host")" "$(json_escape "$agent")"
+            runtime_json=$(json_string "$runtime")
         fi
-        printf '}},"_meta":{"runtimeId":"%s"}}\n' "$(json_escape "$runtime")"
+        show_json=$(jq -cn --argjson terminal "$terminal_json" --argjson runtime "$runtime_json" \
+            '{id:"mock-show",ok:true,result:{terminal:($terminal + {
+              paneRuntimeId:"fixture-pane-runtime",rendererGraphEpoch:1,agentWait:null})},
+              _meta:{runtimeId:$runtime}}')
+        if fixture_flag "${FAKE_ORCA_SHOW_MISSING_RUNTIME_FILE:-}"; then
+            show_json=$(jq 'del(._meta.runtimeId)' <<<"$show_json")
+        fi
+        if fixture_flag "${FAKE_ORCA_SHOW_NOT_OK_FILE:-}"; then
+            show_json=$(jq '.ok = false' <<<"$show_json")
+        fi
+        emit_json "$show_json"
         ;;
+
     'terminal send')
         send_handle='' text='' text_set=0 enter=0
         shift 2
@@ -130,16 +719,16 @@ case "${1-} ${2-}" in
             printf 'handle=%s\ttext_set=%s\tenter=%s\ttext=%s\n' \
                 "$send_handle" "$text_set" "$enter" "$text" >>"$FAKE_ORCA_SEND_LOG"
         fi
-        if [[ -n ${FAKE_ORCA_SEND_FAIL_FILE:-} && -e ${FAKE_ORCA_SEND_FAIL_FILE:-} ]]; then
-            printf '{"id":"mock-send","ok":true,"result":{"send":{"handle":"%s","accepted":false,"refusedReason":"mock refusal"}},"_meta":{"runtimeId":"%s"}}\n' \
-                "$(json_escape "$send_handle")" "$(json_escape "$runtime")"
+        if fixture_flag "${FAKE_ORCA_SEND_FAIL_FILE:-}"; then
+            emit_json "$(error_json terminal_not_writable)"
             exit 1
         fi
-        printf '{"id":"mock-send","ok":true,"result":{"send":{"handle":"%s","accepted":true,"bytesWritten":%d}},"_meta":{"runtimeId":"%s"}}\n' \
-            "$(json_escape "$send_handle")" "${#text}" "$(json_escape "$runtime")"
+        printf '{"id":"mock-send","ok":true,"result":{"send":{"handle":%s,"accepted":true,"bytesWritten":%d}}, "_meta":{"runtimeId":%s}}\n' \
+            "$(json_string "$send_handle")" "${#text}" "$(json_string "$runtime")"
         ;;
+
     *)
-        printf '{"id":"mock","ok":false,"error":{"code":"invalid_argument","message":"unsupported mock call"}}\n'
+        emit_json "$(error_json invalid_argument)"
         exit 1
         ;;
 esac

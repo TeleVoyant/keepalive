@@ -115,15 +115,17 @@ Runtime requirements:
 
 - Linux with readable `/proc` metadata;
 - Bash 5 or newer (`set -Eeuo pipefail` is used throughout entry scripts/tests);
-- at least one backend: KDE Konsole with qdbus, or Orca with `orca-ide` plus `jq`;
+- at least one backend: KDE Konsole with qdbus, or Orca with `orca-ide` (its JSON is read by
+  `jq` when installed, otherwise by the built-in POSIX awk reader `lib/orca.awk`);
 - a systemd user manager (systemd 235+) for installation and socket activation, without
   a KDE or graphical-session dependency;
 - `flock`, GNU `timeout`, coreutils/findutils-style utilities, `sed`, `grep`, `sort`, `awk`,
   `readlink`, `tput`, and `stty`;
 - optional `notify-send` and optional Nerd Font glyph support.
 
-The test suite itself is plain Bash with no Bats dependency. Python and `jq` gate only
-their respective optional PTY and Orca tests. ShellCheck is optional in the aggregate
+The test suite itself is plain Bash with no Bats dependency. Python gates only the optional
+PTY tests; Orca tests run on the awk reader when `jq` is absent, and `tests/test_orca_parity.sh`
+runs them under jq and every available awk (gawk, mawk, BusyBox). ShellCheck is optional in the aggregate
 developer check.
 
 ## Source map
@@ -318,6 +320,15 @@ name/pattern without adding another order slot.
     generic string.
 27. Periodic health may use the discovery snapshot; pre-send validation may not.
 28. Event logs are bounded, and repeated gap events are collapsed per episode.
+29. Orca discovery judges the response, not each row: an unknown envelope or a JSON type Orca
+    never emits fails the pass (`schema:<gate>`); an understood but undeliverable row (no PTY,
+    foreign host, colliding incarnation) is skipped and counted. (2026-10-29)
+30. An Orca pane reporting no PTY (code 24) or no agent identity (code 23) is transient and
+    strike-consuming, never immediate identity loss. (2026-10-29)
+31. Orca CLI starts are paced on their own floors: periodic discovery and live health
+    fallback at most every 10 s each; pre-send validation and explicit REFRESH unpaced.
+32. jq is optional. `lib/orca.awk` is the same contract in POSIX awk and may only refuse
+    more than jq, never accept more (MAINTENANCE invariant 52).
 29. Every drawn TUI line erases its own tail; screen output and data output never share
     a `printf` rewrite.
 30. Discovery is bounded, and only a complete backend pass replaces that backend's snapshot.

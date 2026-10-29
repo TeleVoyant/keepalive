@@ -256,7 +256,7 @@ ka_tui_render_row_compact() {
 # The bar needs color; --no-color, NO_COLOR, and a too-narrow terminal all take the box
 # path, so every legacy presentation mode still renders a complete, readable header.
 ka_tui_render_manager_header() {
-    local n=$1 active=$2 paused=$3 available=$4 unavailable=$5 summary now
+    local n=$1 active=$2 paused=$3 available=$4 unavailable=$5 summary counts width now
     printf -v now '%(%H:%M:%S)T' -1
     if ka_tui_bar_supported; then
         ka_tui_bar_begin
@@ -278,16 +278,23 @@ ka_tui_render_manager_header() {
         fi
     fi
 
-    summary=$(ka_icon_label "$KA_I_SERVICE" 'service online')
+    # Built with the REPLY helpers and printf -v: this repaints with every changed frame,
+    # and the four command substitutions it used to take were the frame's only forks.
+    ka_icon_label_set "$KA_I_SERVICE" 'service online'
+    summary=$REPLY
     if ((${KA_TUI_COLS:-80} >= 88)); then
-        summary+=$(printf '   %d AI sessions   %d active   %d paused   %d available   %d unavailable' \
-            "$n" "$active" "$paused" "$available" "$unavailable")
+        printf -v counts '   %d AI sessions   %d active   %d paused   %d available   %d unavailable' \
+            "$n" "$active" "$paused" "$available" "$unavailable"
     else
-        summary+=$(printf '   %d sessions  %dA %dP %dV %dX' "$n" "$active" "$paused" "$available" "$unavailable")
+        printf -v counts '   %d sessions  %dA %dP %dV %dX' "$n" "$active" "$paused" "$available" "$unavailable"
     fi
+    summary+=$counts
     ka_tui_box_top "$KA_I_AI" 'Keep Alive Manager' "$now"
     # Truncated unconditionally: the counts are unbounded, so no fixed threshold is safe.
-    printf '%s %s\033[K\n' "$KA_G_V" "$(ka_tui_truncate "$summary" "$(ka_tui_field_width 2)")"
+    ka_tui_field_width_set 2
+    width=$REPLY
+    ka_tui_truncate_set "$summary" "$width"
+    printf '%s %s\033[K\n' "$KA_G_V" "$REPLY"
     ka_tui_box_bottom
     printf '\033[K\n'
 }

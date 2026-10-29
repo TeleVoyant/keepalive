@@ -117,6 +117,39 @@ intentional because Orca's interface is evolving. Compatible changes stay inside
 adapter and its mock; incompatible discovery schemas fail closed without replacing the
 previous Orca snapshot.
 
+"Incompatible" is judged per response, not per row. The pass fails closed when the
+envelope is not understood (not one JSON object, `ok` not true, no runtime fence, no
+terminal array, a missing or true `truncated` marker) or when any row carries a JSON type
+no Orca release emits. Rows that are understood but not deliverable are skipped instead:
+Orca 1.4.241 legitimately reports a pane with no attached PTY (`ptyId`/`incarnationId`
+null), a foreign or SSH route without `executionHostId`, and split or mirrored panes that
+share one PTY incarnation. Before, any one of those failed every pass and froze the whole
+Orca snapshot for as long as the pane stayed open - on one workstation for 36 hours. Rows
+whose manager IDs collide with different bindings are all skipped rather than one being
+chosen. The adapter reports skipped rows as a count and summary, and a failed pass as
+`schema:<gate>`, without echoing any terminal value.
+
+Orca answers only in JSON. The adapter reads it with `jq` when installed and otherwise with
+`lib/orca.awk`, a POSIX awk reader that gawk, mawk, and BusyBox awk all run, so the backend
+needs nothing beyond `orca-ide` and a base system. The two are one contract: the same gates
+and byte-identical output for every operation, kept together by tests that run against both;
+the awk reader even mirrors jq's nesting limit. They differ only where jq tolerates input that
+is not well-formed JSON - raw bytes that are not valid UTF-8 (including overlong forms and
+encoded surrogates), and numbers with leading zeros - which the awk reader refuses. Orca's
+encoder emits neither, and a difference can only reject a response, never accept another
+identity.
+
+Both readers refuse a response over 4 MiB before parsing (`schema:oversize`), and the awk
+reader runs under the same `KEEPALIVE_ORCA_TIMEOUT` deadline as the CLI call it follows
+(`schema:parse-timeout`). It walks the input line by line, because BusyBox awk's
+per-character access costs time proportional to the string indexed and Orca's output is
+pretty-printed. Median wall time per parse on the development host (one reader process,
+startup included): a real five-terminal 7.8 KB list takes jq 16 ms, mawk 8 ms, gawk 16 ms,
+BusyBox awk 64 ms; a pretty-printed 1001-row 418 KB list takes jq 32 ms, mawk 215 ms, gawk
+365 ms, BusyBox awk 1.4 s. One `orca-ide` start costs roughly 350 ms. BusyBox awk stays slow
+on one enormous string on a single line - a 1 MiB title takes it 28 s - and such a response
+fails closed at the deadline as `schema:parse-timeout`.
+
 ## Target identity
 
 Konsole primary identity:
@@ -147,8 +180,12 @@ The stored binding also includes the runtime-scoped terminal handle, PTY ID, wor
 execution host, tab, leaf, and `agentIdentity`. All must match a live `terminal show`
 response immediately before delivery. Schema drift or runtime unreachability is
 transient; a completed response showing a different runtime/incarnation/binding is
-definitive identity loss. Delivery uses one atomic `terminal send --text ... --enter`
-request.
+definitive identity loss. A completed response that shows the same pane with no attached
+PTY, or with no agent identity, proves no other identity: Orca reports the first while a
+PTY has exited or is not yet attached, and omits the agent both for a plain shell and when
+its agent evidence conflicts. Each is its own transient result. Periodic health counts it
+toward the strike budget, so a momentary gap is ridden out while a pane that stays that
+way ends UNAVAILABLE; a pre-send check with that result skips the send without a strike. Delivery uses one atomic `terminal send --text ... --enter` request.
 
 ### Position-aware classifier contract
 
@@ -239,7 +276,18 @@ client's `REFRESH`, and every CLI command, still runs a complete pass first.
 Repeated Orca failures - a closed Orca app, or a schema the adapter does not yet accept -
 back periodic Orca discovery off exponentially to at most a minute, because every attempt
 starts the Electron-based CLI. The previous snapshot is kept throughout, and any
-successful pass, including a client's `REFRESH`, ends the backoff.
+successful pass, including a client's `REFRESH`, ends the backoff. The journal states such
+an episode when it starts, when its reason changes, and every fifteen minutes while it
+lasts, then reports its end with the number of failed passes.
+
+That CLI start - measured at about 0.35 s of CPU and 110 MiB peak memory on Orca 1.4.241,
+against tens of milliseconds for a Konsole pass - also sets two floors of its own.
+Periodic Orca discovery runs at most every `KEEPALIVE_ORCA_DISCOVERY_INTERVAL` even while
+a client watches, instead of following the three-second attended cadence; a `REFRESH`
+still runs at once. And while there is no fresh Orca snapshot for health to reuse, live
+Orca health checks run at most every `KEEPALIVE_ORCA_LIVE_HEALTH_INTERVAL`, rather than
+one CLI start per target every health pass for the whole outage. Pre-send validation and
+a client's explicit `REFRESH` are always live and are not paced.
 
 A pass is also bounded by `KEEPALIVE_DISCOVERY_BUDGET_MS`. Without it, a degraded bus
 blocks the daemon loop, which then overshoots the suspend gap and silently stops

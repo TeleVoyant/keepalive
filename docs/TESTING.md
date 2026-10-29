@@ -1,11 +1,12 @@
 # Testing
 
 The suite is plain Bash. It needs no Bats or test framework. Python is optional for the
-pseudo-terminal fixtures, and `jq` is optional for the Orca adapter tests; those files
-skip cleanly when their optional dependency is absent. That constraint is deliberate:
+pseudo-terminal fixtures, and that file skips cleanly without it. `jq` is optional too:
+without it the Orca adapter tests run on the built-in awk reader, and with it
+`test_orca_parity.sh` also proves the two readers agree. That constraint is deliberate:
 the tool ships as Bash to hosts that may have very little else installed.
 
-**1519 assertions across 31 files** when Python and `jq` are present (one ownership case
+**1948 assertions across 34 files** when Python and `jq` are present (one ownership case
 skips unless the suite runs as root).
 
 ## Running
@@ -64,12 +65,15 @@ a trap - the committed tests all have one.
 | `test_service_integration.sh` | 47 | A real background daemon, real FIFO, and real client processes against a mocked qdbus: create, configure, send, send failure, send timeout, target loss, and replacement UUID, end to end. |
 | `test_ipc.sh` | 15 | Multiple concurrent request IDs through one FIFO, response routing, timeout behavior, and a request line split across a read timeout being completed rather than dropped. |
 | `test_konsole_mock.sh` | 20 | Mocked Konsole service/path/UUID/PID discovery, strict validation, qdbus timeout classification, and notification deadlines. |
-| `test_orca_mock.sh` | 52 | Orca CLI/schema normalization, exact multi-field identity, non-destructive schema drift, deadlines, atomic delivery, checkpoint validation, transport dispatch, and per-backend snapshot isolation. Skips without `jq`. |
-| `test_orca_service_integration.sh` | 10 | A real Orca-only daemon, FIFO, and public clients against the mock: discover, create, atomic send, transient outage, and sticky incarnation replacement. Skips without `jq`. |
+| `test_orca_mock.sh` | 52 | Orca CLI/schema normalization, exact multi-field identity, non-destructive schema drift, deadlines, atomic delivery, checkpoint validation, transport dispatch, and per-backend snapshot isolation, on whichever JSON reader is selected. |
+| `test_orca_contract.sh` | 129 | The Orca 1.4.241 adapter contract: every list gate and its `schema:<gate>` reason, skipped pty-less/foreign/colliding rows and their counts, identical-duplicate collapse, order preservation, marker-forgery and field-shift safety, show codes 10-24 including absent PTY (24) and agent (23), error-envelope mapping, single-document receipts, the 4 MiB cap, parse timeout, and doctor's reader line. |
+| `test_orca_parity.sh` | 223 | Reruns the contract and mock files under jq and every available awk (system, gawk, mawk, BusyBox), and a differential corpus through both readers: Unicode escapes, raw UTF-8, duplicate keys, number forms, jq's exact nesting limits, 1000/1001 rows, compact versus pretty-printed input; plus reader selection and the awk-only fail-closed refusals. |
+| `test_orca_service_integration.sh` | 23 | A real Orca-only daemon, FIFO, and public clients against the mock: discover, create, atomic send, transient outage, sticky incarnation replacement, a pty-less row that no longer stalls discovery, one warning per failure episode, and paced Orca CLI starts. |
+| `test_orca_episodes.sh` | 45 | Orca discovery cadence floor, live health pacing and its REFRESH bypass, strike accounting for codes 23/24, and episode logging: start, reason change, fifteen-minute reminder, recovery (also after a REFRESH), and skipped-row summaries. |
 | `test_recovery.sh` | 11 | Same-login daemon restart countdown recovery, deferred transient identity validation, and dirty-flush persistence. |
 | `test_recovery_validation.sh` | 18 | Strict checkpoint schema and range validation, symlink rejection, quarantine diagnostics, and event-log preservation. |
-| `test_tui_primitives.sh` | 74 | ASCII and no-icon rendering, first-frame/view-transition/same-view/resize clearing, width-exact frames, safe truncation, control-byte stripping, non-collapsing TSV splitting, 7-bit glyph selection, segment-bar width accounting, and key decoding including unrecognized sequences and Escape pushback. |
-| `test_output_safety.sh` | 80 | Human/JSON/D-Bus escaping, locale-safe UTF-8 truncation, CLI output and UUID validation, Orca schema bounds/fallbacks, and monotonic Konsole discovery deadlines. |
+| `test_tui_primitives.sh` | 87 | ASCII and no-icon rendering, first-frame/view-transition/same-view/resize clearing, width-exact frames, safe truncation, control-byte stripping, non-collapsing TSV splitting, 7-bit glyph selection, segment-bar width accounting, and key decoding including unrecognized sequences and Escape pushback, and a fork-free plain manager header. |
+| `test_output_safety.sh` | 81 | Human/JSON/D-Bus escaping, locale-safe UTF-8 truncation, CLI output and UUID validation, Orca schema bounds/fallbacks, and monotonic Konsole discovery deadlines. |
 | `test_tui_pty.sh` | 16 | The real client driven through a pseudo-terminal. Skips cleanly without `python3`. |
 | `test_failure_propagation.sh` | 27 | Runtime/request/response/index/lock failure propagation, lock-symlink refusal, descriptor error handling, CLI request cleanup, and timeout output. |
 | `test_install_layout.sh` | 7 | Non-root install and uninstall layout against a mocked `systemctl`. |
@@ -80,9 +84,9 @@ a trap - the committed tests all have one.
 | `test_state_hardening.sh` | 46 | Versioned secondary payloads, client-side configuration seeding, dirty flush errors, target symlink refusal, interrupted-message recovery, and index commit safety. |
 | `test_state_delivery.sh` | 110 | CONFIGURE crash/rollback recovery, pending-submit owner ordering, delivery metadata persistence/bounds, and bounded secondary companions. |
 | `test_systemd_units.sh` | 16 | Desktop-neutral socket target, static service dependencies, the systemd 235 directive floor, low-priority scheduling (`Nice`, batch CPU, idle I/O, timer slack, never `SCHED_IDLE`), `KillMode=mixed`, and the absence of cgroup caps and mount-namespace directives. |
-| `test_loop_pacing.sh` | 63 | Millisecond monotonic parsing and bounds, presence-stamp parsing (bare, legacy escape-suffixed, overflow), attended/unattended cadence and per-backend discovery selection, Orca discovery backoff and its reset, a real idle daemon's wakeup budget with prompt IPC, no false gap events for paused-only targets, and graceful stop both idle and mid-delivery. |
+| `test_loop_pacing.sh` | 69 | Millisecond monotonic parsing and bounds, presence-stamp parsing (bare, legacy escape-suffixed, overflow), attended/unattended cadence and per-backend discovery selection, Orca discovery backoff and its reset, a real idle daemon's wakeup budget with prompt IPC, no false gap events for paused-only targets, and graceful stop both idle and mid-delivery. |
 | `test_atomic_io.sh` | 108 | Descriptor-held atomic writes (content, 0600 modes, no debris, subshells, caller noclobber), planted-FIFO and close-time symlink-swap safety, content-compared index publication and tamper repair, startup companion pruning and temp sweeping under validated roots, delete failure, and fork-free `ka_sleep`. |
-| `test_fork_free_helpers.sh` | 101 | `/proc` `_set` helpers against their printing forms, the executable cache (no repeat `readlink`, exec invalidation, bound), discovery running in the caller's shell, dbus-send/qdbus service and session-path parsing, Orca single-`jq` fail-closed handling, multibyte-safe truncation, and the TUI sort cache. |
+| `test_fork_free_helpers.sh` | 100 | `/proc` `_set` helpers against their printing forms, the executable cache (no repeat `readlink`, exec invalidation, bound), discovery running in the caller's shell, dbus-send/qdbus service and session-path parsing, Orca one-reader-process-per-response fail-closed handling, multibyte-safe truncation, and the TUI sort cache. |
 | `test_update_reload.sh` | 83 | The installer's target manifest, lock-descriptor daemon identity, bounded new-daemon wait, and reload report; a real daemon restarted with ACTIVE and PAUSED targets recovering countdowns, rotation, and SERVICE events; installer warnings; the send-gap cap; absolute invocation; and TUI update detection, preflight failure, and row restoration. |
 | `test_function_comments.sh` | 2 | Every function carries a `# Role:` comment, and no function uses a self-referential `local`. |
 

@@ -310,7 +310,8 @@ ka_ipc_handle_request() {
             # bare "refreshed", and list prints it.
             message='refreshed'
             ka_state_refresh_discovery || message+=' (warning: discovery failed; showing the last good snapshot)'
-            ka_state_validate_targets || message+=' (warning: target validation failed)'
+            # Explicitly requested, so a live check is not deferred by the periodic pacing.
+            ka_state_validate_targets live || message+=' (warning: target validation failed)'
             ;;
         CREATE)
             ka_state_create_target "$uuid" "$dir/config" || { rc=$?; message=${KA_LAST_ERROR:-'could not create keep-alive'}; }

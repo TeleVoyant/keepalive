@@ -399,7 +399,47 @@ mkdir "$log_target_dir/state.tsv"
 assert_eq 1 "$(logs_probe log-target)" 'logs refuses a non-regular target state.tsv'
 
 # --- Orca terminal show/list schema and display-name boundaries. ---
-if command -v jq >/dev/null 2>&1; then
+orca_parser=${KEEPALIVE_ORCA_PARSER:-auto}
+if [[ $orca_parser == auto ]]; then
+    if command -v jq >/dev/null 2>&1; then orca_parser='jq'; else orca_parser='awk'; fi
+fi
+if [[ $orca_parser == jq ]] && ! command -v jq >/dev/null 2>&1; then
+    test_skip 'Orca show/list schema tests' 'KEEPALIVE_ORCA_PARSER=jq but jq is not installed'
+else
+    # Role: Apply one bounded show-document mutation with jq or Python when jq is unavailable.
+    orca_safety_json_edit() {
+        local operation=$1 input=$2 output=$3
+        if [[ $orca_parser == jq ]]; then
+            case $operation in
+                long-agent) jq '.result.terminal.agentIdentity = ("x" * 129)' "$input" >"$output" ;;
+                control-agent) jq '.result.terminal.agentIdentity = "codex\u001b"' "$input" >"$output" ;;
+                long-handle) jq '.result.terminal.handle = ("x" * 513)' "$input" >"$output" ;;
+                *) return 2 ;;
+            esac
+            return
+        fi
+        python3 - "$operation" "$input" "$output" <<'PY'
+import json
+import sys
+
+operation, source, target = sys.argv[1:]
+with open(source, encoding='utf-8') as stream:
+    document = json.load(stream)
+if operation == 'long-agent':
+    document['result']['terminal']['agentIdentity'] = 'x' * 129
+elif operation == 'control-agent':
+    document['result']['terminal']['agentIdentity'] = 'codex\x1b'
+elif operation == 'long-handle':
+    document['result']['terminal']['handle'] = 'x' * 513
+else:
+    raise SystemExit(2)
+with open(target, 'w', encoding='utf-8') as stream:
+    json.dump(document, stream, ensure_ascii=False, separators=(',', ':'))
+    stream.write('\n')
+PY
+    }
+
+    export KEEPALIVE_ORCA_PARSER=$orca_parser
     orca_base="$TEST_TMP/orca-show-base.json"
     orca_show="$TEST_TMP/orca-show.json"
     orca_stub="$TEST_TMP/orca-show-stub"
@@ -412,30 +452,39 @@ set -Eeuo pipefail
 cat -- "$FAKE_ORCA_JSON_FILE"
 SH
     chmod 700 "$orca_stub"
-    export KEEPALIVE_ORCA_ENABLED=1 KEEPALIVE_ORCA_CLI="$orca_stub" KEEPALIVE_JQ
-    KEEPALIVE_JQ=$(command -v jq)
+    export KEEPALIVE_ORCA_ENABLED=1 KEEPALIVE_ORCA_CLI="$orca_stub"
+    if [[ $orca_parser == jq ]]; then
+        KEEPALIVE_JQ=${KEEPALIVE_JQ:-$(command -v jq)}
+        export KEEPALIVE_JQ
+    else
+        KEEPALIVE_AWK=${KEEPALIVE_AWK:-$(command -v awk)}
+        export KEEPALIVE_AWK
+    fi
     export KEEPALIVE_ORCA_TIMEOUT=5 FAKE_ORCA_JSON_FILE="$orca_show"
     KA_ORCA_CLI=''; KA_ORCA_JQ=''
-    assert_true 'Orca show test resolves the isolated CLI and jq' ka_orca_find
+    assert_true "Orca show test resolves the isolated CLI and $orca_parser reader" ka_orca_find
 
-    jq '.result.terminal.agentIdentity = ("x" * 129)' "$orca_base" >"$orca_show"
+    orca_safety_json_edit long-agent "$orca_base" "$orca_show"
     assert_eq 22 "$(orca_show_probe)" 'Orca show rejects an overlong agentIdentity as transient schema 22'
-    jq '.result.terminal.agentIdentity = "codex\u001b"' "$orca_base" >"$orca_show"
+    orca_safety_json_edit control-agent "$orca_base" "$orca_show"
     assert_eq 22 "$(orca_show_probe)" 'Orca show rejects a control-bearing agentIdentity as transient schema 22'
-    jq '.result.terminal.handle = ("x" * 513)' "$orca_base" >"$orca_show"
+    orca_safety_json_edit long-handle "$orca_base" "$orca_show"
     assert_eq 22 "$(orca_show_probe)" 'Orca show rejects an overlong terminal handle as transient schema 22'
     assert_true 'Orca schema validation marks show-bound failures transient' ka_orca_validation_is_transient 22
 
     export KEEPALIVE_ORCA_CLI="$TEST_ROOT/tests/fixtures/orca-mock"
     KA_ORCA_CLI=''; KA_ORCA_JQ=''
-    assert_true 'Orca list test resolves the fixture CLI and jq' ka_orca_find
+    assert_true "Orca list test resolves the fixture CLI and $orca_parser reader" ka_orca_find
     huge_title="$TEST_TMP/orca-title-huge"
     : >"$huge_title"
-    for ((title_index = 0; title_index < 65537; title_index += 1)); do printf x >>"$huge_title"; done
+    for ((title_index = 0; title_index < 4097; title_index += 1)); do printf x >>"$huge_title"; done
     export FAKE_ORCA_TITLE_FILE="$huge_title"
     list_rows=$(ka_orca_discover)
-    assert_eq $'#INCOMPLETE\tschema' "$list_rows" \
-        'Orca list fails closed for a 65537-character title'
+    list_row=${list_rows%%$'\n'*}
+    list_marker=${list_rows##*$'\n'}
+    IFS=$'\t' read -r _ _ list_name _ <<<"$list_row"
+    assert_eq 256 "${#list_name}" 'Orca list bounds a title just beyond the 4096-code-point reader retention limit'
+    assert_eq '#COMPLETE' "$list_marker" 'Orca list completes when only display title size is unusual'
 
     medium_title="$TEST_TMP/orca-title-2000"
     : >"$medium_title"
@@ -463,8 +512,6 @@ SH
     assert_eq '/work/project/' "$list_directory" 'Orca empty-title fallback preserves the trailing-slash worktree path'
     unset FAKE_ORCA_TITLE_FILE FAKE_ORCA_PATH_FILE
     export KEEPALIVE_ORCA_ENABLED=0
-else
-    test_skip 'Orca show/list schema tests' 'jq is not installed'
 fi
 
 # --- Konsole discovery deadline must use the controllable monotonic source. ---

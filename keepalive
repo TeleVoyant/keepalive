@@ -590,9 +590,9 @@ ka_cli_set_paused() {
 
 # Role: Run deterministic diagnostics for core dependencies and every terminal backend.
 ka_cli_doctor() {
-    local failures=0 services=0 backends=0 output konsole_setting orca_setting line
+    local failures=0 services=0 backends=0 konsole_setting orca_setting line
     local qdbus_present=0 dbus_send_present=0 bus_state='NOT PROBED' service_output=''
-    local orca_cli='' orca_jq='' candidate
+    local orca_cli='' orca_parser=''
     printf 'Keep Alive doctor %s\n\n' "$KEEPALIVE_VERSION"
     printf '%-30s %s\n' 'Bash >= 5' "$([[ ${BASH_VERSINFO[0]} -ge 5 ]] && printf OK || printf FAIL)"
     [[ ${BASH_VERSINFO[0]} -ge 5 ]] || ((failures += 1))
@@ -656,38 +656,32 @@ ka_cli_doctor() {
         printf '%-30s DISABLED\n' 'Orca backend'
     else
         KA_ORCA_CLI=''
-        KA_ORCA_JQ=''
-        if [[ -n ${KEEPALIVE_ORCA_CLI:-} ]]; then
-            [[ -f $KEEPALIVE_ORCA_CLI && -x $KEEPALIVE_ORCA_CLI ]] && orca_cli=$KEEPALIVE_ORCA_CLI || orca_cli=''
-        else
-            for candidate in orca-ide "${HOME:+$HOME/.local/bin/orca-ide}" /usr/local/bin/orca-ide; do
-                [[ -n $candidate ]] || continue
-                if command -v "$candidate" >/dev/null 2>&1; then
-                    orca_cli=$(command -v "$candidate")
-                    break
-                fi
-            done
-        fi
-        if [[ -n ${KEEPALIVE_JQ:-} ]]; then
-            [[ -f $KEEPALIVE_JQ && -x $KEEPALIVE_JQ ]] && orca_jq=$KEEPALIVE_JQ || orca_jq=''
-        elif command -v jq >/dev/null 2>&1; then
-            orca_jq=$(command -v jq)
+        orca_cli=''
+        orca_parser=''
+        ka_orca_locate_cli && orca_cli=$REPLY
+        if ka_orca_select_parser; then
+            if [[ $KA_ORCA_PARSER == jq ]]; then
+                orca_parser="jq ($KA_ORCA_JQ)"
+            else
+                orca_parser="built-in awk reader ($KA_ORCA_AWK)"
+            fi
         fi
         if [[ -n $orca_cli ]]; then printf '%-30s PRESENT (%s)\n' 'Orca orca-ide' "$orca_cli"; else printf '%-30s MISSING\n' 'Orca orca-ide'; fi
-        if [[ -n $orca_jq ]]; then printf '%-30s PRESENT (%s)\n' 'Orca jq' "$orca_jq"; else printf '%-30s MISSING\n' 'Orca jq'; fi
-        if [[ -n $orca_cli && -n $orca_jq ]]; then
+        if [[ -n $orca_parser ]]; then
+            printf '%-30s %s\n' 'Orca JSON reader' "$orca_parser"
+        else
+            printf '%-30s MISSING (check KEEPALIVE_ORCA_PARSER, KEEPALIVE_JQ, KEEPALIVE_AWK)\n' 'Orca JSON reader'
+        fi
+        if [[ -n $orca_cli && -n $orca_parser ]]; then
             KA_ORCA_CLI=$orca_cli
-            KA_ORCA_JQ=$orca_jq
-            if output=$(ka_orca_exec status --json 2>/dev/null) \
-                && "$orca_jq" -e '.ok == true and .result.runtime.reachable == true' \
-                    >/dev/null 2>&1 <<<"$output"; then
+            if ka_orca_runtime_reachable; then
                 printf '%-30s REACHABLE\n' 'Orca runtime'
                 ((backends += 1))
             else
                 printf '%-30s OFFLINE (agents appear when Orca runs)\n' 'Orca runtime'
             fi
         else
-            printf '%-30s not probed (orca-ide and jq are both required)\n' 'Orca runtime'
+            printf '%-30s not probed (orca-ide and a JSON reader are both required)\n' 'Orca runtime'
         fi
     fi
     if ((backends == 0)); then

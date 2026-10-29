@@ -250,35 +250,51 @@ ka_service_scan_targets() {
 # Role: Choose the backends one periodic discovery pass refreshes, into KA_SVC_DISCOVER.
 # Attended, every enabled backend; unattended, only those whose snapshot health reuses.
 # Orca is skipped while it is backing off after outright failures, unless the most recent
-# attempt - a client's REFRESH included - has since succeeded.
+# attempt - a client's REFRESH included - has since succeeded. It also has its own floor,
+# KEEPALIVE_ORCA_DISCOVERY_INTERVAL: one Orca pass starts the Electron-based CLI, about a
+# third of a second of CPU and 110 MiB, where a Konsole pass costs tens of milliseconds,
+# so following the three-second attended cadence spent roughly a ninth of a core for as
+# long as a manager stayed open. A client's REFRESH still runs an immediate pass.
 ka_service_discovery_backends() {
-    local now=$1 backend
+    local now=$1 backend orca_interval attempt_at
     local -a candidates=()
     KA_SVC_DISCOVER=()
     # A success on any path - a client's REFRESH included - ends the episode, so the next
-    # failure starts again from the shortest delay.
+    # failure starts again from the shortest delay and is reported as a new episode.
     if [[ -z ${KA_ORCA_DISCOVERY_FAILURE-} ]]; then
         KA_ORCA_FAILURES=0
         KA_ORCA_RETRY_AT=0
+        ka_service_end_orca_episode
     fi
+    # Defaulted here rather than trusted: the stamp is owned by the state module.
+    attempt_at=${KA_ORCA_DISCOVERY_ATTEMPT_AT:-0}
     if ((KA_CLIENT_PRESENT == 1)); then
         [[ ${KA_KONSOLE_ENABLED:-1} == 1 ]] && candidates+=(konsole)
         [[ ${KA_ORCA_ENABLED:-0} == 1 ]] && candidates+=(orca)
     else
         candidates=("${KA_SVC_IDLE_DISCOVERY[@]}")
     fi
+    ka_tunable KEEPALIVE_ORCA_DISCOVERY_INTERVAL 10; orca_interval=$REPLY
     for backend in "${candidates[@]}"; do
-        if [[ $backend == orca && -n ${KA_ORCA_DISCOVERY_FAILURE-} ]] && ((now < KA_ORCA_RETRY_AT)); then
-            continue
+        if [[ $backend == orca ]]; then
+            if [[ -n ${KA_ORCA_DISCOVERY_FAILURE-} ]] && ((now < KA_ORCA_RETRY_AT)); then
+                continue
+            fi
+            # A stamp ahead of now predates a monotonic rollback, so it does not defer.
+            if ((attempt_at > 0 && now >= attempt_at && now - attempt_at < orca_interval)); then
+                continue
+            fi
         fi
         KA_SVC_DISCOVER+=("$backend")
     done
     return 0
 }
 
-# Consecutive failed periodic Orca discovery passes, and when the next one may run.
+# Backoff exponent of consecutive failed periodic Orca discovery passes (capped at 6), when
+# the next one may run, and the uncapped failure count reported when an episode ends.
 KA_ORCA_FAILURES=0
 KA_ORCA_RETRY_AT=0
+KA_ORCA_FAILED_PASSES=0
 
 # Role: Back off periodic Orca discovery exponentially, up to a minute, while it keeps failing.
 # Every attempt starts the Electron-based CLI - about a quarter second of CPU - so a closed
@@ -291,6 +307,7 @@ ka_service_note_orca_discovery() {
         KA_ORCA_RETRY_AT=0
         return 0
     fi
+    KA_ORCA_FAILED_PASSES=$((KA_ORCA_FAILED_PASSES + 1))
     ((KA_ORCA_FAILURES < 6)) && KA_ORCA_FAILURES=$((KA_ORCA_FAILURES + 1))
     delay=$((1 << KA_ORCA_FAILURES))
     ((delay > 60)) && delay=60
@@ -324,6 +341,67 @@ ka_service_warn_discovery_incomplete() {
     fi
 }
 
+# What the journal was last told about each backend's discovery, so an unchanged condition
+# is not repeated on every pass.
+KA_KONSOLE_DISCOVERY_WARNED=0
+KA_ORCA_DISCOVERY_WARNED_REASON=''
+KA_ORCA_DISCOVERY_WARNED_AT=0
+KA_ORCA_DISCOVERY_SKIPPED_LOGGED=''
+# How long an unchanged Orca failure stays quiet before it is restated.
+KA_ORCA_DISCOVERY_REMIND_INTERVAL=900
+
+# Role: Close a reported Orca discovery failure episode after any successful pass.
+# Called from the periodic report and before the next periodic pass is planned, so a
+# client's successful REFRESH in between also ends the episode instead of being merged
+# into the next failure.
+ka_service_end_orca_episode() {
+    if [[ -n $KA_ORCA_DISCOVERY_WARNED_REASON ]]; then
+        ka_info "Orca discovery recovered after ${KA_ORCA_FAILED_PASSES} failed pass(es) (last reason=${KA_ORCA_DISCOVERY_WARNED_REASON})"
+        KA_ORCA_DISCOVERY_WARNED_REASON=''
+        KA_ORCA_DISCOVERY_WARNED_AT=0
+    fi
+    KA_ORCA_FAILED_PASSES=0
+}
+
+# Role: Log discovery episodes once per change rather than once per pass.
+# A whole-pass Orca failure is stated when it starts, when its reason changes, and every
+# fifteen minutes while it lasts, and its end is reported with the number of failed passes.
+# The previous rule restated it after any other backend's successful pass, which across a
+# 36-hour episode wrote 1,438 identical warnings a day. Skipped Orca rows are reported when
+# the set changes. Only backends this pass actually attempted are judged.
+ka_service_report_discovery() {
+    local now=$1
+    if [[ " ${KA_SVC_DISCOVER[*]-} " == *' konsole '* ]]; then
+        if [[ " ${KA_DISCOVERY_STALE_BACKENDS-} " == *' Konsole '* ]]; then
+            ((KA_KONSOLE_DISCOVERY_WARNED == 1)) || ka_service_warn_discovery_incomplete Konsole "$now"
+            KA_KONSOLE_DISCOVERY_WARNED=1
+        elif ((KA_KONSOLE_DISCOVERY_WARNED == 1)); then
+            ka_info 'Konsole discovery recovered'
+            KA_KONSOLE_DISCOVERY_WARNED=0
+        fi
+    fi
+    [[ " ${KA_SVC_DISCOVER[*]-} " == *' orca '* ]] || return 0
+    if [[ -n ${KA_ORCA_DISCOVERY_FAILURE-} ]]; then
+        if [[ $KA_ORCA_DISCOVERY_FAILURE != "$KA_ORCA_DISCOVERY_WARNED_REASON" ]] \
+            || ((now < KA_ORCA_DISCOVERY_WARNED_AT \
+                || now - KA_ORCA_DISCOVERY_WARNED_AT >= KA_ORCA_DISCOVERY_REMIND_INTERVAL)); then
+            ka_service_warn_discovery_incomplete Orca "$now"
+            KA_ORCA_DISCOVERY_WARNED_REASON=$KA_ORCA_DISCOVERY_FAILURE
+            KA_ORCA_DISCOVERY_WARNED_AT=$now
+        fi
+        return 0
+    fi
+    ka_service_end_orca_episode
+    if [[ ${KA_ORCA_DISCOVERY_SKIPPED-} != "$KA_ORCA_DISCOVERY_SKIPPED_LOGGED" ]]; then
+        if [[ -n ${KA_ORCA_DISCOVERY_SKIPPED-} ]]; then
+            ka_info "Orca discovery skipped agent rows it cannot bind safely: ${KA_ORCA_DISCOVERY_SKIPPED}; other rows refreshed normally"
+        else
+            ka_info 'Orca discovery no longer skips any agent rows'
+        fi
+        KA_ORCA_DISCOVERY_SKIPPED_LOGGED=${KA_ORCA_DISCOVERY_SKIPPED-}
+    fi
+}
+
 # Role: Run the single-threaded daemon loop that interleaves IPC, timers, health, and discovery.
 #
 # The loop sleeps in the FIFO read until the earliest periodic task is due instead of
@@ -335,7 +413,7 @@ ka_service_warn_discovery_incomplete() {
 ka_service_loop() {
     local control_read=0 timeout wait_ms due now_ms ticking=0
     local now last_tick elapsed last_health last_discovery last_publish last_cleanup last_status
-    local stale_logged=0 clock_warned=0 control_failures=0 last_flush=0 checkpoint_interval
+    local clock_warned=0 control_failures=0 last_flush=0 checkpoint_interval
     local publish_rc=0
     KA_INDEX_STALE=${KA_INDEX_STALE:-0}
     # Resolved once: these are process-wide settings, and validating them here keeps an
@@ -464,19 +542,13 @@ ka_service_loop() {
             ka_service_discovery_backends "$now"
             if ((${#KA_SVC_DISCOVER[@]} > 0)); then
                 # Not wrapped in ka_service_try: a non-zero return here means "the pass
-                # hit its budget", which is a normal signal handled below, not a failure.
-                if ka_state_refresh_discovery "${KA_SVC_DISCOVER[@]}"; then
-                    stale_logged=0
-                    [[ " ${KA_SVC_DISCOVER[*]} " == *' orca '* ]] && ka_service_note_orca_discovery "$now"
-                else
-                    # The previous snapshot is retained. Advance Orca's backoff before
-                    # warning so the message tells the operator when the next attempt is due.
-                    [[ " ${KA_SVC_DISCOVER[*]} " == *' orca '* ]] && ka_service_note_orca_discovery "$now"
-                    if ((stale_logged == 0)); then
-                        ka_service_warn_discovery_incomplete "${KA_DISCOVERY_STALE_BACKENDS:-terminal}" "$now"
-                        stale_logged=1
-                    fi
-                fi
+                # hit its budget" or a backend kept its previous snapshot, which are
+                # normal signals reported below, not failures.
+                ka_state_refresh_discovery "${KA_SVC_DISCOVER[@]}" || true
+                # Advance Orca's backoff before reporting, so a warning can say when the
+                # next attempt is due.
+                [[ " ${KA_SVC_DISCOVER[*]} " == *' orca '* ]] && ka_service_note_orca_discovery "$now"
+                ka_service_report_discovery "$now"
             fi
             last_discovery=$now
         fi
@@ -547,12 +619,16 @@ ka_service_main() {
     fi
     if [[ $orca_setting != 0 ]] && ka_orca_find; then
         KA_ORCA_ENABLED=1
-        ka_info "Orca backend: $KA_ORCA_CLI (JSON: $KA_ORCA_JQ)"
+        if [[ $KA_ORCA_PARSER == jq ]]; then
+            ka_info "Orca backend: $KA_ORCA_CLI (JSON: $KA_ORCA_JQ)"
+        else
+            ka_info "Orca backend: $KA_ORCA_CLI (JSON: built-in awk reader, $KA_ORCA_AWK)"
+        fi
     elif [[ $orca_setting == 1 ]]; then
-        ka_warn 'Orca backend was requested but orca-ide and jq were not both available'
+        ka_warn 'Orca backend was requested but orca-ide or a JSON reader (jq or awk) was not available'
     fi
     if ((KA_KONSOLE_ENABLED == 0 && KA_ORCA_ENABLED == 0)); then
-        ka_error 'no terminal backend is usable (install qdbus for Konsole, or orca-ide plus jq for Orca)'
+        ka_error 'no terminal backend is usable (install qdbus for Konsole, or Orca for orca-ide)'
         return 1
     fi
     ka_classifier_init

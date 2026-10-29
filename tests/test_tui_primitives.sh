@@ -5,6 +5,7 @@ test_env_setup
 source_core
 source "$TEST_ROOT/lib/icons.sh"
 source "$TEST_ROOT/lib/tui/screen.sh"
+source "$TEST_ROOT/lib/tui/tui.sh"
 KA_ICONS_ENABLED=0; KA_COLOR_ENABLED=0; KA_ASCII_MODE=1
 ka_icons_init; ka_tui_style_init
 
@@ -80,6 +81,106 @@ KA_ASCII_MODE=0; KA_ICONS_ENABLED=1; ka_tui_glyphs_init
 assert_eq $'' "$KA_G_PL_SEP" 'icon mode selects the powerline wedge glyph'
 KA_ICONS_ENABLED=0; ka_tui_glyphs_init
 assert_eq '' "$KA_G_PL_SEP" 'no-icons mode keeps segments but drops the wedge'
+
+# The plain manager header is the compatibility path for --no-color and narrow terminals.
+# Keep the helper probes in the caller shell: command substitutions would hide the BASHPID
+# that proves the renderer itself did not fork.
+TUI_HEADER_PID_LOG="$TEST_TMP/header-pids"
+
+# Role: Record the process identity while retaining the icon-label helper contract.
+ka_icon_label_set() {
+    local icon=${1-} text=${2-}
+    printf '%s\n' "$BASHPID" >>"$TUI_HEADER_PID_LOG"
+    if [[ -n $icon ]]; then REPLY="$icon $text"; else REPLY=$text; fi
+}
+
+# Role: Record the process identity while retaining the field-width helper contract.
+ka_tui_field_width_set() {
+    local reserved=${1:-0} minimum=${2:-8} width
+    printf '%s\n' "$BASHPID" >>"$TUI_HEADER_PID_LOG"
+    width=$((${KA_TUI_COLS:-80} - reserved))
+    ((width < minimum)) && width=$minimum
+    REPLY=$width
+}
+
+# Role: Return visible cells after stripping the line-tail erase sequence.
+header_visible_width() {
+    local line=$1
+    line=${line//$'\033[K'/}
+    printf '%d' "${#line}"
+}
+
+# Role: Assert every line in a captured manager header carries the erase-tail contract.
+header_lines_erase() {
+    local path=$1 line
+    while IFS= read -r line; do
+        [[ $line == *$'\033[K' ]] || return 1
+    done <"$path"
+}
+
+# Role: Confirm a captured manager-header middle line ends in the safe ASCII ellipsis.
+header_has_ellipsis() {
+    local path=$1 line
+    line=$(sed -n '2p' "$path")
+    [[ $line == *...$'\033[K' ]]
+}
+
+# Role: Confirm header body lines never exceed the live terminal width, ignoring the blank tail.
+header_width_fits() {
+    local path=$1 cols=$2 line visible
+    while IFS= read -r line; do
+        visible=${line//$'\033[K'/}
+        [[ -z $visible ]] && continue
+        (( ${#visible} <= cols )) || return 1
+    done <"$path"
+}
+
+# Role: Confirm the top and bottom box edges remain exactly the live terminal width.
+header_box_edges_exact() {
+    local path=$1 cols=$2 top bottom
+    top=$(sed -n '1p' "$path")
+    bottom=$(sed -n '3p' "$path")
+    top=${top//$'\033[K'/}
+    bottom=${bottom//$'\033[K'/}
+    test "${#top}" -eq "$cols" && test "${#bottom}" -eq "$cols"
+}
+
+KA_I_SERVICE=''; KA_I_AI=''; KA_COLOR_ENABLED=0; KA_ICONS_ENABLED=0; KA_ASCII_MODE=1
+ka_icons_init; ka_tui_style_init
+KA_TUI_COLS=100
+: >"$TUI_HEADER_PID_LOG"
+header_output="$TEST_TMP/header-wide"
+ka_tui_render_manager_header 3 1 2 4 5 >"$header_output"
+assert_true 'wide plain manager header erases every rendered line' header_lines_erase "$header_output"
+assert_true 'wide plain manager header keeps exact-width box edges' header_box_edges_exact "$header_output" 100
+assert_true 'wide plain manager header body never exceeds its width' header_width_fits "$header_output" 100
+header_middle=$(sed -n '2p' "$header_output")
+assert_true 'wide plain manager header keeps the long-form counts' \
+    grep -Fq '3 AI sessions   1 active   2 paused   4 available' <<<"$header_middle"
+: >"$TUI_HEADER_PID_LOG"
+ka_tui_render_manager_header 123456789 123456789 123456789 123456789 123456789 >"$header_output"
+assert_true 'wide plain manager header truncates an overlong count line safely' \
+    header_has_ellipsis "$header_output"
+assert_true 'wide truncated manager header remains within its width' header_width_fits "$header_output" 100
+assert_true 'wide plain manager header performs helper work without subshell forks' \
+    awk -v pid="$BASHPID" '$1 != pid { bad=1 } END { exit bad }' "$TUI_HEADER_PID_LOG"
+
+KA_TUI_COLS=70
+: >"$TUI_HEADER_PID_LOG"
+header_output="$TEST_TMP/header-narrow"
+ka_tui_render_manager_header 3 1 2 4 5 >"$header_output"
+assert_true 'narrow plain manager header keeps exact-width box edges' header_box_edges_exact "$header_output" 70
+assert_true 'narrow plain manager header body never exceeds its width' header_width_fits "$header_output" 70
+header_middle=$(sed -n '2p' "$header_output")
+assert_true 'narrow plain manager header uses compact counts' \
+    grep -Fq '3 sessions  1A 2P 4V 5X' <<<"$header_middle"
+: >"$TUI_HEADER_PID_LOG"
+ka_tui_render_manager_header 123456789 123456789 123456789 123456789 123456789 >"$header_output"
+assert_true 'narrow plain manager header truncates an overlong count line safely' \
+    header_has_ellipsis "$header_output"
+assert_true 'narrow truncated manager header remains within its width' header_width_fits "$header_output" 70
+assert_true 'narrow plain manager header remains fork-free' \
+    awk -v pid="$BASHPID" '$1 != pid { bad=1 } END { exit bad }' "$TUI_HEADER_PID_LOG"
 
 # Status column padding must come from rendered cells; the icon adds two the word lacks.
 KA_ICONS_ENABLED=0; ka_icons_init

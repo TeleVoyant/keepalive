@@ -123,8 +123,29 @@ Orca binding is rejected/quarantined. `index.tsv` appends backend as column 15 s
 column positions remain stable; the client defaults a missing column to Konsole.
 
 Backend enablement is `auto|1|0` through `KEEPALIVE_KONSOLE_ENABLED` and
-`KEEPALIVE_ORCA_ENABLED`. Orca requires `orca-ide` plus `jq`; bare `orca` is never probed
-on Linux because it commonly names the GNOME screen reader. At least one backend must be
+`KEEPALIVE_ORCA_ENABLED`. Orca requires only `orca-ide`; its JSON is read by `jq` when
+installed and otherwise by `lib/orca.awk` (`KEEPALIVE_ORCA_PARSER=auto|jq|awk`). Bare `orca`
+is never probed on Linux because it commonly names the GNOME screen reader.
+
+2026-10-29 contract changes (all inside `lib/orca.sh` / `lib/orca.awk`):
+
+- List gate order: one document; object; `ok`; `_meta.runtimeId`; `result.terminals` array;
+  boolean `truncated` false; numeric `totalCount` equal to the row count and at most 1000;
+  every row's base types; every candidate's binding types. Each failure is
+  `#INCOMPLETE<TAB>schema:<gate>`; a response over 4 MiB is `schema:oversize`.
+- Candidate rows (connected, writable, not orphaned, non-empty agent) with an absent, empty,
+  or out-of-bounds binding are skipped as `incomplete-binding`; candidates sharing a valid
+  incarnation with any incomplete member or differing bindings are all skipped as
+  `ambiguous-incarnation`; identical duplicates collapse. `#SKIPPED<TAB>n<TAB>detail` precedes
+  `#COMPLETE`, and `state.sh` stores the summary in `KA_ORCA_DISCOVERY_SKIPPED`.
+- `terminal show` projects presence flags for PTY/incarnation and agent: absent PTY returns
+  24, absent agent 23 (both transient and strike-consuming); different non-empty values keep
+  their definitive codes. show/send/status/error all require exactly one JSON document.
+- Cadence: `KA_ORCA_DISCOVERY_ATTEMPT_AT` (stamped per attempt) gates periodic Orca discovery
+  by `KEEPALIVE_ORCA_DISCOVERY_INTERVAL`; `KA_ORCA_LIVE_HEALTH_AT` paces live Orca health
+  fallback by `KEEPALIVE_ORCA_LIVE_HEALTH_INTERVAL`, bypassed by `ka_state_validate_targets
+  live` (IPC REFRESH). `ka_service_report_discovery`/`ka_service_end_orca_episode` log an
+  episode on start, reason change, every 900 s, and recovery. At least one backend must be
 usable for service startup.
 
 ## Process and ownership model

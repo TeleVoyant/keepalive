@@ -13,7 +13,7 @@ Version: **1.1.1** · [Changelog](CHANGELOG.md) · [MIT licensed](LICENSE)
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Process model, identity, state schemas, IPC, scheduler, recovery |
 | [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) | Every environment variable, with defaults and when to change them |
 | [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) | Symptom-first fixes, from `unknown` session names to CPU cost |
-| [`docs/TESTING.md`](docs/TESTING.md) | What the 1519 assertions cover, and how to add one |
+| [`docs/TESTING.md`](docs/TESTING.md) | What the 1948 assertions cover, and how to add one |
 | [`docs/MAINTENANCE.md`](docs/MAINTENANCE.md) | Safety invariants, module map, live checklist, release flow |
 | [`docs/VALIDATION.md`](docs/VALIDATION.md) | Evidence recorded for this release |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Conventions the automated checks enforce |
@@ -74,7 +74,10 @@ Runtime requirements:
 - Bash 5+.
 - at least one managed-terminal backend:
   - **Konsole:** KDE Konsole plus a working `qdbus6`, `qdbus-qt6`, `qdbus`, or compatible qdbus binary;
-  - **Orca:** a running Orca installation exposing `orca-ide`, plus `jq`.
+  - **Orca:** a running Orca installation exposing `orca-ide`. Nothing else: Orca's JSON is
+    read with `jq` when it is installed and otherwise with a built-in POSIX `awk` reader
+    (gawk, mawk, and BusyBox awk all work), which applies the same checks and is stricter
+    only about input that is not well-formed JSON.
 - a systemd user manager (systemd 235 or newer) for normal service/socket activation;
   no particular desktop environment is required.
 - `flock` from util-linux.
@@ -319,6 +322,8 @@ Two limits are worth knowing when working remotely:
 | `KEEPALIVE_KONSOLE_ENABLED` / `KEEPALIVE_ORCA_ENABLED` | Backend selection: `auto`, `1`, or `0` | `auto` / `auto` |
 | `KEEPALIVE_ORCA_TIMEOUT` | Deadline for one Orca CLI operation | `3` |
 | `KEEPALIVE_ORCA_SNAPSHOT_MAX_AGE` | Maximum Orca discovery-snapshot age for periodic health | `35` |
+| `KEEPALIVE_ORCA_DISCOVERY_INTERVAL` | Minimum seconds between periodic Orca discovery passes; each starts the `orca-ide` CLI | `10` |
+| `KEEPALIVE_ORCA_LIVE_HEALTH_INTERVAL` | Minimum seconds between live Orca health checks while no fresh snapshot exists | `10` |
 
 Only a bare `Esc` means back/cancel. Arrow, function, keypad, and other escape
 sequences the client does not recognize are ignored rather than being treated as
@@ -883,7 +888,7 @@ Every Bash function is expected to have an adjacent `# Role:` comment. A test en
 
 - Orca's CLI contract may change while the product evolves. The adapter fails closed and is intentionally isolated, but a new incompatible Orca release can temporarily make that backend unavailable until `lib/orca.sh` is updated.
 - qdbus calls are subprocess-based rather than a persistent native D-Bus connection; appropriate for a small number of interactive terminals, but not hundreds of targets.
-- Orca operations are also subprocess-based and require `jq`; the daemon does not link to private Orca internals.
+- Orca operations are also subprocess-based (`orca-ide`, plus `jq` or the built-in `awk` reader); the daemon does not link to private Orca internals.
 - Discovery is polling-based (default 3 seconds) rather than native D-Bus signal subscription.
 - AI classification is best-effort and extensible, not mathematically exhaustive.
 - Simple Bash string-length truncation cannot perfectly model every complex Unicode grapheme/cell-width case. `--no-icons`/`--ascii` provide compatibility paths.

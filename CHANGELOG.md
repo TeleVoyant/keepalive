@@ -5,6 +5,47 @@ All notable changes to Keep Alive Manager are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Orca 1.4.241 compatibility, Orca without jq, and Orca CLI cost.
+
+### Added
+
+- **Orca works out of the box.** `jq` is no longer required: without it, Orca's JSON is read
+  by a built-in POSIX awk reader (`lib/orca.awk`; gawk, mawk, and BusyBox awk) that applies
+  the same checks and produces the same results, refusing only malformed input jq tolerates. `jq` is still used when installed;
+  `KEEPALIVE_ORCA_PARSER=auto|jq|awk` and `KEEPALIVE_AWK` choose explicitly, and `doctor`
+  names the reader in use. Responses over 4 MiB are refused by either reader, and the awk
+  reader runs under the Orca deadline.
+
+### Fixed
+
+- **Orca discovery no longer fails whole passes on one pane.** An agent pane with no
+  attached PTY, a foreign or SSH route without an execution host, or split/mirrored panes
+  sharing one PTY each made every `terminal list` pass report `reason=schema` and froze the
+  Orca snapshot; on one workstation that lasted 36 hours (about 1,440 failed passes a day).
+  Such rows are now skipped and counted, colliding manager IDs are all skipped rather than
+  one chosen, and the pass still fails closed for an unknown envelope or a JSON type no Orca
+  release emits. The list's `totalCount` must also match the rows returned.
+- **Single-document Orca responses.** `terminal show`, a send receipt, and the status probe
+  now require exactly one JSON document; with several, the first or last used to decide.
+- **No false Orca identity loss.** A `terminal show` reporting no attached PTY or no agent
+  identity is now a transient, strike-consuming result (codes 24 and 23) instead of an
+  immediate sticky `UNAVAILABLE`; a different non-empty value is still definitive.
+
+### Changed
+
+- **Orca CLI cost:** periodic Orca discovery runs at most every
+  `KEEPALIVE_ORCA_DISCOVERY_INTERVAL` (10 s) instead of the 3 s attended cadence, and live
+  Orca health checks without a fresh snapshot at most every
+  `KEEPALIVE_ORCA_LIVE_HEALTH_INTERVAL` (10 s). Each `orca-ide` start costs about 0.35 s of
+  CPU and 110 MiB.
+- **Diagnostics:** an incomplete Orca pass names its gate (`schema:<gate>`); the warning is
+  logged when an episode starts, changes, or every fifteen minutes rather than once a
+  minute, and recovery is reported. `doctor`'s Orca lookup and status probe now live in
+  the Orca adapter.
+- **TUI:** the plain manager header no longer forks four subshells per frame.
+
 ## [1.1.1] - 2026-10-02
 
 
@@ -274,3 +315,4 @@ consolidated here.
 [1.0.0]: https://github.com/TeleVoyant/keepalive/releases/tag/v1.0.0
 
 [1.1.1]: https://github.com/TeleVoyant/keepalive/releases/tag/v1.1.1
+[Unreleased]: https://github.com/TeleVoyant/keepalive/compare/v1.1.1...HEAD

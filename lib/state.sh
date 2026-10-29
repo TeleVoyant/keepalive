@@ -5,6 +5,13 @@
 # Longest last-delivery detail kept: enough to recognize the message in list/detail views.
 KA_LAST_DELIVERY_DETAIL_MAX=256
 
+# Monotonic second of the last health pass that made a live Orca call and of the last Orca
+# discovery attempt, complete or not (0: none yet), and the adapter's summary of agent rows
+# the last complete Orca discovery pass skipped.
+KA_ORCA_LIVE_HEALTH_AT=0
+KA_ORCA_DISCOVERY_ATTEMPT_AT=0
+KA_ORCA_DISCOVERY_SKIPPED=''
+
 # Role: Initialize all in-memory target and discovery collections used by the daemon.
 ka_state_init_arrays() {
     declare -ga KA_T_UUIDS=()
@@ -696,12 +703,17 @@ ka_state_refresh_orca_discovery() {
     local -A n_agent=() n_name=() n_dir=() n_handle=() n_pty=() n_incarnation=()
     local -A n_worktree=() n_runtime=() n_host=() n_tab=() n_leaf=()
     local complete=0 uuid agent name directory handle pty incarnation worktree runtime host tab leaf key
-    local incomplete_reason='no-marker'
+    local incomplete_reason='no-marker' skipped=''
 
+    # Stamped for the service loop's Orca cadence floor; a client's REFRESH counts too. An
+    # unreadable clock leaves the old stamp, which can only let the next pass run sooner.
+    ka_now_monotonic && KA_ORCA_DISCOVERY_ATTEMPT_AT=$REPLY
     while IFS=$'\t' read -r uuid agent name directory handle pty incarnation worktree runtime host tab leaf; do
         case $uuid in
             '#COMPLETE') complete=1; continue ;;
             '#INCOMPLETE') complete=0; incomplete_reason=${agent:-unknown}; continue ;;
+            # Adapter diagnostics: agent rows it could not use, as a count and a summary.
+            '#SKIPPED') skipped="$agent (${name:-unspecified})"; continue ;;
             '') continue ;;
         esac
         [[ -n ${n_agent[$uuid]+x} ]] || n_uuids+=("$uuid")
@@ -718,6 +730,7 @@ ka_state_refresh_orca_discovery() {
         return 1
     fi
     KA_ORCA_DISCOVERY_FAILURE=''
+    KA_ORCA_DISCOVERY_SKIPPED=$skipped
     ka_now_monotonic && KA_DISCOVERY_STAMP_ORCA=$REPLY
     ka_state_clear_discovery_backend orca
     for key in "${n_uuids[@]}"; do
@@ -1238,13 +1251,29 @@ ka_state_validate_from_discovery() {
 # Role: Validate every non-unavailable monitored target and update last-seen metadata.
 # Transient failures are debounced rather than ignored: a backend that never comes back
 # still ends in UNAVAILABLE, but a momentary outage does not destroy identity immediately.
+# An optional `live` argument - a client's explicit REFRESH - skips the Orca live pacing.
 ka_state_validate_targets() {
-    local uuid rc reason limit strikes backend seen_at failed=0
+    local force=${1-} uuid rc reason limit strikes backend seen_at failed=0 now=0 orca_live=1
+    local orca_live_used=0 orca_live_interval
     ((${#KA_T_UUIDS[@]} > 0)) || return 0
     # Both read once per pass with builtins: this runs every health interval, and each
     # command substitution here used to fork, per pass and per target respectively.
     ka_tunable KEEPALIVE_VALIDATION_STRIKES 5; limit=$REPLY
     printf -v seen_at '%(%F %T)T' -1
+    # A live Orca check starts the Electron-based CLI, about a third of a second of CPU
+    # and 110 MiB per target, and health only needs one while discovery has no fresh
+    # snapshot: Orca closed, or its responses failing. At the two-second health cadence
+    # that cost ran for the whole episode, so live Orca health is paced separately. Sends
+    # are unaffected; pre-send validation is always live.
+    ka_tunable KEEPALIVE_ORCA_LIVE_HEALTH_INTERVAL 10; orca_live_interval=$REPLY
+    if ka_now_monotonic; then
+        now=$REPLY
+        # A stamp ahead of now predates a monotonic rollback and proves nothing.
+        if [[ $force != live ]] && ((KA_ORCA_LIVE_HEALTH_AT > 0 && now >= KA_ORCA_LIVE_HEALTH_AT \
+            && now - KA_ORCA_LIVE_HEALTH_AT < orca_live_interval)); then
+            orca_live=0
+        fi
+    fi
     for uuid in "${KA_T_UUIDS[@]}"; do
         [[ ${KA_T_STATUS[$uuid]} != UNAVAILABLE ]] || continue
         # Prefer the snapshot; fall back to a live call only for targets discovery
@@ -1253,10 +1282,13 @@ ka_state_validate_targets() {
             rc=0
         elif rc=$?; ((rc != 1)); then
             :
-        elif ka_transport_validate_target "$uuid"; then
-            rc=0
         else
-            rc=$?
+            if [[ ${KA_T_BACKEND[$uuid]:-konsole} == orca ]]; then
+                # Not due: skipping neither clears nor adds a strike.
+                ((orca_live == 1)) || continue
+                orca_live_used=1
+            fi
+            if ka_transport_validate_target "$uuid"; then rc=0; else rc=$?; fi
         fi
         if ((rc == 0)); then
             KA_T_LAST_SEEN[$uuid]=$seen_at
@@ -1280,6 +1312,7 @@ ka_state_validate_targets() {
             fi
         fi
     done
+    ((orca_live_used == 0)) || KA_ORCA_LIVE_HEALTH_AT=$now
     return "$failed"
 }
 

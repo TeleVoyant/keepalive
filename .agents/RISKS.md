@@ -1,5 +1,40 @@
 # Observed Risks, Gaps, and Open Questions
 
+## Resolved on 2026-10-29: Orca 1.4.241 schema failures, jq dependency, Orca CLI cost
+
+Reported: "occasionally incompatible Orca parsing". Evidence (live journal, read-only): 2,292
+`reason=schema` discovery warnings since 2026-10-02, sporadic (1-4/hour, coinciding with
+session attach churn) until 2026-10-27 ~17:00 EAT, then **every pass for 36 hours** (60/hour
+at the backoff cap) until 2026-10-29 05:28. The failing JSON was never retained, so the
+exact field is unproven; the strongest candidate is a restored/reattached Codex pane in a
+non-durable PTY-binding transition. Orca 1.4.241's own source (read from the installed
+bundle) emits `ptyId`/`incarnationId` null for a pane without an attached PTY, omits
+`executionHostId` for foreign/SSH routes, and lets split/mirrored panes share one PTY
+incarnation; the old gate failed the whole pass on any of them. Live 1.4.241 output today
+(61 list + 20 show samples) passes both old and new adapters byte-identically.
+
+Fixed: row-tolerant gate with named failure reasons, code 23/24 for absent agent/PTY
+instead of immediate loss, totalCount gate, single-document show/send/status/error, episode
+logging (was 1,438 identical warnings a day), Orca discovery floor (attended 3 s -> 10 s;
+each `orca-ide` start measured at ~0.35 s CPU and ~113 MiB peak), live Orca health pacing
+during outages, fork-free plain TUI header, and an optional-jq design: `lib/orca.awk` reads
+the same contract with POSIX awk (gawk/mawk/BusyBox), refusing only malformed input jq
+tolerates (raw invalid/overlong UTF-8, leading-zero numbers). Two independent awk reviews
+(436 differential comparisons, then 324+112 after fixes, across jq 1.7, gawk, gawk --posix,
+mawk and BusyBox awk) found no case where awk accepts what jq refuses.
+
+Accepted residuals:
+
+- BusyBox awk is superlinear on a huge single-line response (3.6 MB compact title: >60 s);
+  it is bounded by the Orca deadline and fails closed (`schema:parse-timeout`). Orca's real
+  output is pretty-printed and parses linearly (644 KB, 1001 rows: 1.8 s on BusyBox).
+- A future Orca that renamed `agentIdentity` in `terminal show` would read as code 23 and
+  end monitored Orca targets UNAVAILABLE after the strike budget (previously immediately).
+- The live checklist items 38-42 (disposable Orca agent delivery, restart, outage) were not
+  re-run for this change set; mocks and the read-only live capture are the evidence.
+- Accidental side effect during research: one passive SQLite `wal_checkpoint` ran against
+  `~/.config/orca/agent-session-journal.db` (no rows changed).
+
 ## Resolved on 2026-10-02: final hardening and documentation round
 
 The eight 2026-10-01 audits and the follow-up proofreading/fix rounds were rechecked in
@@ -162,8 +197,10 @@ Mitigation now in place:
 
 1. `lib/orca.sh` is the sole CLI/schema/error-code adapter, exposing a normalized
    `terminal-v1` contract through `lib/transport.sh`.
-2. List responses are schema-gated before any row is emitted. A missing binding field,
-   truncation, parse error, timeout, or command failure produces `#INCOMPLETE`.
+2. List responses are schema-gated before any row is emitted. Truncation, a parse error, an
+   unknown envelope or field type, a timeout, or a command failure produces `#INCOMPLETE`.
+   Since 2026-10-29 a merely absent binding field skips that row instead (see the
+   2026-10-29 section): on Orca 1.4.241 it failed every pass for 36 hours.
 3. Discovery snapshots commit per backend, so an Orca failure retains prior Orca rows
    without blocking a healthy Konsole commit.
 4. A structurally unfamiliar `terminal show` response is transient. Only a completed,
