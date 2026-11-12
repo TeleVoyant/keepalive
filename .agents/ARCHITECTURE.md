@@ -177,7 +177,7 @@ IPC cleanup. `flock -n` on `manager.lock` prevents two daemon instances from
 owning the same runtime state.
 
 Clients read the atomic `index.tsv`, target checkpoint files, and logs. They never
-directly change authoritative target fields. The configuration wizard does build a
+directly change authoritative target fields. The settings editor does build a
 request from profile/target files client-side; the daemon validates and applies it.
 
 ## Daemon startup
@@ -337,7 +337,8 @@ uses the live path.
 
 The secondary prompt is a nudge, not a second keep-alive: `ka_scheduler_tick` fires it
 only while `KA_T_SECONDARY_DONE` is 0, and a successful automatic delivery sets that to 1.
-`CONFIGURE` clears it along with the countdowns, so reconfiguring re-arms the nudge. A
+`CONFIGURE` changes it only when the prompt's own enabled, interval, or message value changes:
+an armed countdown is kept (capped if shortened) and a fired prompt re-arms. A
 manual `SEND_SECONDARY` always delivers and deliberately does not consume the one-shot.
 
 `secondary_done` is persisted in `state.tsv` but deliberately **optional** in the loader's
@@ -572,7 +573,8 @@ Details:
 
 - `CREATE` requires a currently discovered UUID and daemon-valid configuration.
 - `CONFIGURE` works for `ACTIVE`/`PAUSED`, preserves status, replaces settings and
-  messages, resets both countdowns, and sets `main_index=0`.
+  messages only if they changed, and keeps countdown state (main capped at a shorter
+  interval; `main_index=0` only for a changed rotation; secondary per its own settings).
 - Pause/resume freezes values exactly; elapsed time is only subtracted from
   `ACTIVE` records.
 - Delivery-mode toggle and main reset are rejected for `UNAVAILABLE`.
@@ -614,8 +616,8 @@ Operations:
 |---|---|
 | `PING` | Liveness response only. |
 | `REFRESH` | Rediscover and validate monitored targets; answer `OK` with a warning and keep the last good snapshot if either pass fails. |
-| `CREATE` | Create `ACTIVE` target from discovery and update profile. |
-| `CONFIGURE` | Replace selected target settings/reset timers and update profile. |
+| `CREATE` | Create `ACTIVE` target from discovery; update the profile unless `profile_update=0`. |
+| `CONFIGURE` | Apply target settings keeping countdown state; update the profile unless `profile_update=0`. |
 | `DELETE` | Remove selected target directory, arrays, and log. |
 | `TOGGLE_PAUSE` | `ACTIVE` ↔ `PAUSED`. |
 | `TOGGLE_MODE` | `MESSAGE_ENTER` ↔ `ENTER_ONLY`. |
@@ -672,8 +674,8 @@ Optional notifications use the same bounded pattern and remain best-effort.
 
 ```text
 TUI loads AVAILABLE row
-  -> copies persistent profile to runtime wizard temp
-  -> edits six steps locally
+  -> copies persistent profile to the settings editor's runtime scratch
+  -> edits fields in any order; adds the Save as default choice (profile_update)
   -> copies config into CREATE request directory
   -> signals FIFO
 daemon
@@ -682,7 +684,7 @@ daemon
   -> creates target arrays as ACTIVE/full timers/index 0
   -> copies numbered messages
   -> saves target checkpoint
-  -> updates global profile
+  -> updates global profile unless profile_update=0
   -> logs CREATED
   -> publishes index and responds OK
 TUI reloads row as ACTIVE
@@ -768,7 +770,7 @@ symptom. Seccomp/prctl-based directives are safe and are what the unit uses.
 `FUNCNAME` stack. First draw, a different renderer, or `WINCH` emits `HOME` plus
 `ED 2` before content; a repeat frame emits only `HOME`. `ka_tui_frame_end` retains
 `ED 0` to erase unused content below the completed frame. This central rule covers
-manager, detail, logs, delete confirmation, and each wizard step without coupling
+manager, detail, logs, delete confirmation, the settings list and its field screens without coupling
 navigation code to terminal cleanup.
 
 `ka_tui_frame_begin` is also the only place terminal size is refreshed, via one
@@ -781,7 +783,7 @@ navigation code to terminal cleanup.
 `ka_tui_frame_begin` positions the cursor and `ka_tui_frame_end` emits `ED 0`, which
 clears only from the cursor downward. Neither erases the tail of a line the new frame
 overwrites with shorter content, so every drawn line ends with `EL 0` instead. Any change
-in frame height, such as a new log event or an added wizard message, otherwise leaves the
+in frame height, such as a new log event or a message added in the rotation editor, otherwise leaves the
 previous line's tail visible beside the new text.
 
 The rewrite applies to screen-drawing `printf` format strings only.

@@ -86,7 +86,9 @@ assert_true 'a recognized AI session is discovered before the TUI assertions' \
 # which made these assertions intermittently report a timeout.
 tui_exit() {
     local keys=$1 settle=${2:-0.3} result
-    result=$(python3 "$DRIVER" 110 40 "$settle" "@navigate,${keys}" -- "$TEST_ROOT/keepalive" 2>&1 >/dev/null |
+    # The second manager frame is an output barrier after startup, so the first real
+    # action is not sent during the client's initial terminal-mode transition.
+    result=$(python3 "$DRIVER" 110 40 "$settle" "@navigate,@navigate,${keys}" -- "$TEST_ROOT/keepalive" 2>&1 >/dev/null |
         sed -n 's/^exit=//p')
     # Retry only a plain exit timeout, and only once. Bash's `read -n1` reconfigures the
     # terminal for every keystroke, and tcsetattr can discard input arriving in that
@@ -100,7 +102,7 @@ tui_exit() {
     # client shows up as WAIT-TIMEOUT on the following redraw wait, which is never retried,
     # and a genuinely broken quit key times out on both attempts.
     if [[ $result == TIMEOUT || $result == START-TIMEOUT:* ]]; then
-        result=$(python3 "$DRIVER" 110 40 "$settle" "@navigate,${keys}" -- "$TEST_ROOT/keepalive" 2>&1 >/dev/null |
+        result=$(python3 "$DRIVER" 110 40 "$settle" "@navigate,@navigate,${keys}" -- "$TEST_ROOT/keepalive" 2>&1 >/dev/null |
             sed -n 's/^exit=//p')
     fi
     printf '%s' "$result"
@@ -129,31 +131,144 @@ assert_eq 0 "$(tui_exit 'r,@navigate,q')" 'a refresh request returns to the mana
 # Escape followed immediately by another key must keep both; the second used to be lost.
 assert_eq 0 "$(tui_exit 'ESC,q' 0.02)" 'Escape and a fast following key are both delivered'
 
-# A cancelled wizard is normal navigation, not a client failure. Under `set -e` the
-# non-zero return used to escape the loop body and terminate the TUI.
-assert_eq 0 "$(tui_exit '@navigate,1,@a add,ESC,@navigate,q')" \
-    'cancelling the wizard at step one returns to the manager'
-assert_eq 0 "$(tui_exit '@navigate,1,@a add,ENTER,@Main interval,ENTER,@Secondary prompt,ESC,@Main interval,ESC,@a add,ESC,@navigate,q')" \
-    'backing out through wizard steps returns to the manager'
+# Role: Drive a PTY to a checked capture barrier and render its final screen for assertions.
+capture_tui_screen() {
+    local name=$1 cols=$2 rows=$3 keys=$4 rc=0
+    shift 4
+    python3 "$DRIVER" "$cols" "$rows" 0.12 "$keys" -- "$@" \
+        >"$TEST_TMP/$name.raw" 2>"$TEST_TMP/$name.status" || rc=$?
+    assert_eq 0 "$rc" "$name PTY capture driver exits successfully"
+    assert_eq CAPTURED "$(sed -n 's/^exit=//p' "$TEST_TMP/$name.status")" \
+        "$name PTY capture stops at its output barrier"
+    python3 "$TEST_ROOT/tests/fixtures/vt-render.py" "$TEST_TMP/$name.raw" "$cols" "$rows" \
+        >"$TEST_TMP/$name.screen"
+}
 
-# The rendered screen, not the byte stream, is what shows stale tails. Adding a wizard
-# message grows the frame by a line, so every line below it is redrawn with different
-# content; the key-hint footer used to appear twice.
-VT="$TEST_ROOT/tests/fixtures/vt-render.py"
-capture="$TEST_TMP/wizard-add.cap"
-capture_status="$TEST_TMP/wizard-add.status"
-# Wait for each screen instead of guessing with sleeps, or the typed message races the
-# wizard's first draw and lands nowhere. CAPTURE stops the child after the final barrier,
-# so this assertion never waits for the driver's normal 40-second timeout.
-capture_rc=0
-python3 "$DRIVER" 100 30 0.4 '@navigate,1,@a add,a,@New message,hello world,ENTER,@hello world,CAPTURE' \
-    -- "$TEST_ROOT/keepalive" >"$capture" 2>"$capture_status" || capture_rc=$?
-assert_eq 0 "$capture_rc" 'wizard capture driver exits successfully'
-assert_eq CAPTURED "$(sed -n 's/^exit=//p' "$capture_status")" \
-    'wizard capture driver reports a checked CAPTURED status'
-screen=$(python3 "$VT" "$capture" 100 30)
-assert_eq 1 "$(grep -c 'a add' <<<"$screen")" 'the wizard key hint is drawn exactly once after adding a message'
-assert_eq 1 "$(grep -c 'hello world' <<<"$screen")" 'the newly added message appears exactly once'
-assert_eq 0 "$(grep -c 'New message:' <<<"$screen")" 'the prompt line is erased once the frame redraws'
+# Role: Check captured terminal output by display cells after removing ANSI control sequences.
+rendered_lines_fit() {
+    local path=$1 cols=$2
+    python3 - "$path" "$cols" <<'PY'
+import pathlib
+import re
+import sys
+import unicodedata
+
+ansi = re.compile(r'\x1b\[[0-?]*[ -/]*[@-~]')
+path, limit = sys.argv[1], int(sys.argv[2])
+for number, raw in enumerate(pathlib.Path(path).read_text().splitlines(), 1):
+    line = ansi.sub('', raw).replace('\x1b(B', '')
+    width = sum(
+        0 if unicodedata.combining(char) or unicodedata.category(char) in {'Mn', 'Me', 'Cf'}
+        else 2 if unicodedata.east_asian_width(char) in {'W', 'F'} else 1
+        for char in line
+    )
+    if width > limit:
+        print(f'line {number} is {width} cells, terminal is {limit}: {line!r}', file=sys.stderr)
+        sys.exit(1)
+PY
+}
+
+# Role: Read one field from the isolated daemon checkpoint after a successful Configure request.
+target_state_value() {
+    local field=$1
+    awk -F '\t' -v field="$field" '$1 == field { print $2; found=1; exit } END { if (!found) exit 1 }' \
+        "$XDG_RUNTIME_DIR/keepalive/targets/$FAKE_UUID/state.tsv"
+}
+
+# Opening Create from AVAILABLE shows all six fields at the supported minimum size.
+capture_tui_screen create_52 52 20 '@j/k move,@j/k move,1,@Settings,@s save,CAPTURE' "$TEST_ROOT/keepalive"
+screen="$TEST_TMP/create_52.screen"
+for field in 'Messages' 'Main interval' 'Secondary prompt' 'Notifications' 'Delivery' 'Save as default'; do
+    assert_contains "$screen" "$field" "Create settings list includes $field"
+done
+assert_true 'default 52x20 Create output has no wrapped or overrun lines' \
+    rendered_lines_fit "$TEST_TMP/create_52.raw" 52
+
+# The same list remains within the terminal width across the presentation tiers.
+capture_tui_screen create_ascii 52 20 \
+    '@j/k move,@j/k move,1,@Settings,@s save,CAPTURE' "$TEST_ROOT/keepalive" --ascii
+capture_tui_screen create_no_icons 52 20 \
+    '@j/k move,@j/k move,1,@Settings,@s save,CAPTURE' "$TEST_ROOT/keepalive" --no-icons
+capture_tui_screen create_no_color 52 20 \
+    '@j/k move,@j/k move,1,@Settings,@s save,CAPTURE' env NO_COLOR=1 "$TEST_ROOT/keepalive"
+for style in ascii no_icons no_color; do
+    assert_true "$style 52x20 Create output has no wrapped or overrun lines" \
+        rendered_lines_fit "$TEST_TMP/create_$style.raw" 52
+    for field in 'Messages' 'Main interval' 'Secondary prompt' 'Notifications' 'Delivery' 'Save as default'; do
+        assert_contains "$TEST_TMP/create_$style.screen" "$field" \
+            "$style 52x20 settings list includes $field"
+    done
+done
+
+# At 52x19 the editor reports its minimum size instead of drawing a partial frame.
+capture_tui_screen too_small 52 19 \
+    '@j/k move,@j/k move,1,@Terminal too small,CAPTURE' "$TEST_ROOT/keepalive"
+assert_contains "$TEST_TMP/too_small.screen" 'Terminal too small.' 'short editor shows the size notice'
+assert_contains "$TEST_TMP/too_small.screen" 'Resize to at least 52x20' 'size notice gives the editor minimum'
+
+# Esc without edits returns immediately; a field's Esc returns to the same list unchanged.
+assert_eq 0 "$(tui_exit '1,@Settings,ESC,@navigate,q')" \
+    'Esc closes an unchanged Create editor without a discard prompt'
+capture_tui_screen digit_main 110 40 '@navigate,@navigate,1,@Settings,2,@Main interval,CAPTURE' "$TEST_ROOT/keepalive"
+assert_contains "$TEST_TMP/digit_main.screen" 'Main interval' 'digit 2 opens the Main interval field editor'
+assert_eq 0 "$(tui_exit '1,@Settings,2,@Main interval,ESC,@Settings,ESC,@navigate,q')" \
+    'Esc in Main interval returns unchanged to the list, then closes without confirmation'
+
+# A changed row displays its original and new values; n keeps editing and y discards.
+capture_tui_screen profile_marker 110 40 \
+    '@navigate,@navigate,1,@Settings,6,@no,CAPTURE' "$TEST_ROOT/keepalive"
+assert_contains "$TEST_TMP/profile_marker.screen" 'yes → no, this keep-alive only' \
+    'Save as default shows before and after values'
+assert_contains "$TEST_TMP/profile_marker.screen" '*' 'changed field has a marker'
+assert_eq 0 "$(tui_exit '1,@Settings,6,@no,ESC,@Unsaved changes,n,@Settings,ESC,@Unsaved changes,y,@navigate,q')" \
+    'n keeps an edited list open and y discards its edits'
+
+# Create with a changed interval and enabled secondary prompt, using the default profile policy.
+assert_eq 0 "$(tui_exit '1,@Settings,2,@Main interval,2,ENTER,@Settings,3,@Secondary prompt,2,ENTER,@Secondary message,ENTER,@Secondary interval in minutes,ENTER,@Settings,s,@Keep-alive created.,@navigate,q')" \
+    's creates the keep-alive and shows its success toast'
+assert_eq 900 "$(cat "$XDG_CONFIG_HOME/keepalive/profile/main_interval")" \
+    'Create saves the edited interval to the default profile when selected'
+assert_eq 1 "$(cat "$XDG_CONFIG_HOME/keepalive/profile/secondary_enabled")" \
+    'Create saves the enabled secondary setting to the default profile'
+
+# Adding a message still leaves one key hint and one copy of the message on screen.
+# Exercise the same field sub-editor from Configure after Create has made the target ACTIVE.
+capture_tui_screen message_add 100 30 \
+    '@navigate,@navigate,1,@ACTIVE,c,@Settings,1,@Main message rotation,a,@New message,hello world,ENTER,@hello world,CAPTURE' \
+    "$TEST_ROOT/keepalive"
+screen=$(cat "$TEST_TMP/message_add.screen")
+assert_eq 1 "$(grep -c 'a add' <<<"$screen" || true)" 'message editor key hint is drawn exactly once'
+assert_eq 1 "$(grep -c 'hello world' <<<"$screen" || true)" 'new message is drawn exactly once'
+assert_eq 0 "$(grep -c 'New message:' <<<"$screen" || true)" 'message prompt is erased after adding a message'
+
+# A longer Configure interval must preserve the running countdown instead of resetting it.
+assert_eq 0 "$(tui_exit '1,@ACTIVE,c,@Settings,2,@Main interval,4,ENTER,@Custom interval in minutes,30,@30,ENTER,@Settings,6,@no,s,@Settings saved.,@Timers,ESC,@navigate,q')" \
+    'Configure from detail saves and returns with the updated toast'
+assert_eq 1800 "$(target_state_value main_interval)" 'Configure stores the longer main interval'
+remaining=$(target_state_value main_remaining)
+assert_true 'longer interval preserves the smaller current main countdown' test "$remaining" -gt 800
+assert_true 'preserved countdown is below the new full interval' test "$remaining" -lt 1800
+assert_eq 900 "$(cat "$XDG_CONFIG_HOME/keepalive/profile/main_interval")" \
+    'Save as default off leaves the profile unchanged during Configure'
+
+# Configure shows both live rows and previews a cap before saving a shorter main interval.
+capture_tui_screen configure_cap 110 40 \
+    '@navigate,@navigate,1,@ACTIVE,c,@Settings,2,@Main interval,4,ENTER,@Custom interval in minutes,1,@1,ENTER,@capped at 01:00,@s save,CAPTURE' \
+    "$TEST_ROOT/keepalive"
+assert_contains "$TEST_TMP/configure_cap.screen" 'MAIN' 'Configure list shows the main countdown row'
+assert_contains "$TEST_TMP/configure_cap.screen" 'SECONDARY' 'Configure list shows the enabled secondary countdown row'
+assert_contains "$TEST_TMP/configure_cap.screen" 'capped at 01:00 on save' 'shorter interval previews the main countdown cap'
+
+# Saving that cap is accepted, leaves remaining time at or below the cap, and keeps the secondary timer.
+assert_eq 0 "$(tui_exit '1,@ACTIVE,c,@Settings,2,@Main interval,4,ENTER,@Custom interval in minutes,1,@1,ENTER,@capped at 01:00,6,@no,s,@Settings saved.,@Timers,ESC,@navigate,q')" \
+    'shorter Configure save shows the success toast and returns to the manager'
+assert_eq 60 "$(target_state_value main_interval)" 'shorter Configure stores a one-minute main interval'
+remaining=$(target_state_value main_remaining)
+assert_true 'main countdown is capped at the new interval' test "$remaining" -gt 0
+assert_true 'main countdown does not exceed the new interval' test "$remaining" -le 60
+assert_eq 600 "$(target_state_value secondary_interval)" 'unchanged secondary interval stays configured'
+assert_eq 0 "$(target_state_value secondary_done)" 'unchanged secondary one-shot remains armed'
+assert_eq 900 "$(cat "$XDG_CONFIG_HOME/keepalive/profile/main_interval")" \
+    'Save as default off remains honored by the shorter Configure save'
 
 test_finish

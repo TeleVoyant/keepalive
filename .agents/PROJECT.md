@@ -26,7 +26,7 @@ currently recognized AI session plus retained monitored records in four states:
 - `PAUSED`: monitored with both timers frozen.
 - `UNAVAILABLE`: the original identity failed validation; retained until delete.
 
-An `AVAILABLE` row enters a six-step wizard. Existing records have a detail screen
+An `AVAILABLE` row opens the settings editor (every field on one screen, edited in any order). Existing records have a detail screen
 for manual sends, pause/resume, main-timer reset, delivery-mode toggle,
 reconfiguration, logs, and deletion. Deletion removes manager state and that
 target's runtime log only; it never kills the AI process or closes Konsole.
@@ -60,9 +60,10 @@ keepalive --service                        internal daemon entrypoint
 ## Default profile
 
 There is exactly one persistent default profile. A create or configure operation
-applies the submitted values to the selected target and then updates that global
-profile. CLI configure accepts `--no-profile` to keep the persistent profile unchanged
-(and `--profile` to state the default explicitly). Other already-monitored targets do not change.
+applies the submitted values to the selected target and, by default, updates that global
+profile; the request's `profile_update=0` opts out for either. The TUI's "Save as default"
+field sets it, and CLI configure accepts `--no-profile` (and `--profile` to state the
+default explicitly); CLI create always updates the profile. Other already-monitored targets do not change.
 
 CLI-configured intervals are integer seconds in the inclusive range `1..999999999`;
 message scalar limits count UTF-8 code points, independent of the caller's locale.
@@ -79,8 +80,9 @@ Defaults:
 | Notifications | `0` |
 | Delivery mode | `MESSAGE_ENTER` |
 
-Reconfiguring an existing target resets both of that target's countdowns and its
-main rotation index. Pausing preserves remaining durations. Manual main sends
+Reconfiguring an existing target keeps its countdown state (since 2026-11-12): ACTIVE
+timers carry on, PAUSED ones stay frozen, the main remaining time is capped only if the
+interval shrinks, and the rotation restarts only when the logical messages change. Pausing preserves remaining durations. Manual main sends
 reset the main timer; manual secondary sends reset only the secondary timer.
 
 ## Delivery rules
@@ -93,7 +95,8 @@ reset the main timer; manual secondary sends reset only the secondary timer.
 - `ENTER_ONLY` never consumes the queued main message.
 - Secondary delivery never resets or subtracts the main countdown.
 - The secondary prompt is a **one-shot nudge**: it fires automatically at most once per
-  arming, and re-arms only when the target is reconfigured. Manual secondary sends always
+  arming. A configure leaves it alone unless its enabled, interval, or message value changes;
+  then an armed countdown is kept (capped if shortened) and a fired one re-arms. Manual secondary sends always
   work and do not consume the one-shot.
 - Detail-view `e` sends a single Enter now and returns the target to `MESSAGE_ENTER`; it
   never sends a new queued message. When a pending MAIN submit is owed, completing it
@@ -149,7 +152,7 @@ developer check.
 | `lib/ipc.sh` | FIFO signal plus filesystem request/response protocol. |
 | `lib/service.sh` | Lock, startup/recovery, daemon loop, health/discovery cadence. |
 | `lib/tui/screen.sh` | Terminal lifecycle, cached size, view-aware clearing, key decoding, glyph/palette sets, width-exact frame rules, segment bars, sanitizing truncation. |
-| `lib/tui/wizard.sh` | Six-step create/configure request builder plus scratch-directory lifecycle. |
+| `lib/tui/wizard.sh` | Settings editor (one list, field sub-editors, live countdowns) building create/configure requests, plus scratch-directory lifecycle. |
 | `lib/tui/tui.sh` | Manager/detail/log rendering, index decoding, single-pass checkpoint reads, change-driven repaint, client action loops. |
 | `systemd/*` | User FIFO socket activation and daemon supervision. |
 | `scripts/install.sh` | Per-user installed tree, symlink, units, socket enablement. |
@@ -335,7 +338,7 @@ name/pattern without adding another order slot.
 31. A message delivered without its submit is completed, never re-sent.
 32. Every session-managed runtime candidate must be absolute, owned, and non-symlinked;
     the predictable `/tmp` fallback receives additional creation/hardening checks.
-33. The secondary prompt fires once per arming; only CONFIGURE re-arms it.
+33. The secondary prompt fires once per arming; only a CONFIGURE that changes its own settings re-arms it.
 34. `e` is a one-shot action, not a mode toggle; `E` is the persistent mode change.
 35. Resolve the runtime base by precedence and record the source; never assume
     `XDG_RUNTIME_DIR` is set, or a client outside a PAM session addresses the wrong directory.

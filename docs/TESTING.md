@@ -6,7 +6,7 @@ without it the Orca adapter tests run on the built-in awk reader, and with it
 `test_orca_parity.sh` also proves the two readers agree. That constraint is deliberate:
 the tool ships as Bash to hosts that may have very little else installed.
 
-**1948 assertions across 34 files** when Python and `jq` are present (one ownership case
+**2331 assertions across 36 files** when Python and `jq` are present (one ownership case
 skips unless the suite runs as root).
 
 ## Running
@@ -60,9 +60,9 @@ a trap - the committed tests all have one.
 | `test_io_hardening.sh` | 63 | Bounded no-follow scalar reads, read-only profile/configuration handling, event-log symlink safety, deferred index publication, and paced stale-index retries. |
 | `test_classifier.sh` | 117 | Position-aware native/wrapper corpus for every built-in, launcher option/payload negatives, existing-file script selection, process ancestry, CRLF-tolerant pattern files, and refusal of a pattern that cannot compile. |
 | `test_profile.sh` | 12 | Default profile creation, updates, literal message storage, canonical contiguous message numbering. |
-| `test_state.sh` | 41 | Mutation-free rejection of malformed CREATE/CONFIGURE, the create/pause/resume/unavailable/delete lifecycle, legacy checkpoint compatibility, transient health timeouts, independent log cleanup, and new-UUID no-reattach behavior. |
+| `test_state.sh` | 44 | Mutation-free rejection of malformed CREATE/CONFIGURE, the create/pause/resume/unavailable/delete lifecycle, legacy checkpoint compatibility, transient health timeouts, independent log cleanup, and new-UUID no-reattach behavior. The one-shot secondary stays fired across an unchanged configure and re-arms when its own settings change. |
 | `test_scheduler.sh` | 54 | Main rotation, Enter-only queue preservation, main and secondary transport failures, validation timeouts, timer independence, suspend-gap and backward-clock preservation, one-shot secondary, and owed-submit retry. |
-| `test_service_integration.sh` | 47 | A real background daemon, real FIFO, and real client processes against a mocked qdbus: create, configure, send, send failure, send timeout, target loss, and replacement UUID, end to end. |
+| `test_service_integration.sh` | 95 | A real background daemon, real FIFO, and real client processes against a mocked qdbus: create, configure, send, send failure, send timeout, target loss, and replacement UUID, end to end. CLI configure keeping, capping, and publishing countdowns and the rotation index, the new help text, and CREATE with and without updating the default profile. |
 | `test_ipc.sh` | 15 | Multiple concurrent request IDs through one FIFO, response routing, timeout behavior, and a request line split across a read timeout being completed rather than dropped. |
 | `test_konsole_mock.sh` | 20 | Mocked Konsole service/path/UUID/PID discovery, strict validation, qdbus timeout classification, and notification deadlines. |
 | `test_orca_mock.sh` | 52 | Orca CLI/schema normalization, exact multi-field identity, non-destructive schema drift, deadlines, atomic delivery, checkpoint validation, transport dispatch, and per-backend snapshot isolation, on whichever JSON reader is selected. |
@@ -74,7 +74,9 @@ a trap - the committed tests all have one.
 | `test_recovery_validation.sh` | 18 | Strict checkpoint schema and range validation, symlink rejection, quarantine diagnostics, and event-log preservation. |
 | `test_tui_primitives.sh` | 87 | ASCII and no-icon rendering, first-frame/view-transition/same-view/resize clearing, width-exact frames, safe truncation, control-byte stripping, non-collapsing TSV splitting, 7-bit glyph selection, segment-bar width accounting, and key decoding including unrecognized sequences and Escape pushback, and a fork-free plain manager header. |
 | `test_output_safety.sh` | 81 | Human/JSON/D-Bus escaping, locale-safe UTF-8 truncation, CLI output and UUID validation, Orca schema bounds/fallbacks, and monotonic Konsole discovery deadlines. |
-| `test_tui_pty.sh` | 16 | The real client driven through a pseudo-terminal. Skips cleanly without `python3`. |
+| `test_tui_pty.sh` | 84 | The real client driven through a pseudo-terminal: key classes that once exited it, the settings editor for Create and Configure (field selection, sub-editor back-out, change markers, discard confirmation, save toasts, live countdown rows, the cap preview, Save as default), VT-rendered key-hint and message redraws, and 52x20 rendering in every presentation mode. Skips cleanly without `python3`. |
+| `test_configure_timers.sh` | 159 | Countdown-preserving CONFIGURE: the main cap (shorter, longer, equal; ACTIVE and PAUSED), logical rotation equality (final LF, CR, count, order), the pending-owner matrix, the secondary arming table, mode/notification-only saves, the CONFIG event text, crash after the state-first checkpoint, and the profile-update policy for CREATE and CONFIGURE. |
+| `test_tui_editor.sh` | 80 | Settings-editor helpers without a daemon: field descriptions and unambiguous change signatures, dirty detection, effect previews for every change, the monotonic live countdown and its gap rule, a fork-free hint, and width-exact `ESC[K`-terminated frames at 52 and 120 columns. |
 | `test_failure_propagation.sh` | 27 | Runtime/request/response/index/lock failure propagation, lock-symlink refusal, descriptor error handling, CLI request cleanup, and timeout output. |
 | `test_install_layout.sh` | 7 | Non-root install and uninstall layout against a mocked `systemctl`. |
 | `test_install_lifecycle.sh` | 25 | Manager-scoped XDG paths, graphical-link migration, installed-tree updates, active-daemon restart, transactional rollback, and profile retention. |
@@ -82,7 +84,7 @@ a trap - the committed tests all have one.
 | `test_portability.sh` | 39 | Unsafe runtime rejection, `/run/user` fallback, absolute config rules, D-Bus address escaping, and HOME-free informational modes. |
 | `test_runtime_hardening.sh` | 63 | Runtime-component symlink refusal, ownership/mode repair, permission failure propagation, and atomic destination safety. |
 | `test_state_hardening.sh` | 46 | Versioned secondary payloads, client-side configuration seeding, dirty flush errors, target symlink refusal, interrupted-message recovery, and index commit safety. |
-| `test_state_delivery.sh` | 110 | CONFIGURE crash/rollback recovery, pending-submit owner ordering, delivery metadata persistence/bounds, and bounded secondary companions. |
+| `test_state_delivery.sh` | 135 | CONFIGURE crash/rollback recovery, pending-submit owner ordering, delivery metadata persistence/bounds, and bounded secondary companions. Rollback after a failed message copy or profile update restores the old timers, index, and owner in one checkpoint. |
 | `test_systemd_units.sh` | 16 | Desktop-neutral socket target, static service dependencies, the systemd 235 directive floor, low-priority scheduling (`Nice`, batch CPU, idle I/O, timer slack, never `SCHED_IDLE`), `KillMode=mixed`, and the absence of cgroup caps and mount-namespace directives. |
 | `test_loop_pacing.sh` | 69 | Millisecond monotonic parsing and bounds, presence-stamp parsing (bare, legacy escape-suffixed, overflow), attended/unattended cadence and per-backend discovery selection, Orca discovery backoff and its reset, a real idle daemon's wakeup budget with prompt IPC, no false gap events for paused-only targets, and graceful stop both idle and mid-delivery. |
 | `test_atomic_io.sh` | 108 | Descriptor-held atomic writes (content, 0600 modes, no debris, subshells, caller noclobber), planted-FIFO and close-time symlink-swap safety, content-compared index publication and tamper repair, startup companion pruning and temp sweeping under validated roots, delete failure, and fork-free `ka_sleep`. |

@@ -12,9 +12,11 @@ send_log="$TEST_TMP/send.log"
 send_fail_file="$TEST_TMP/send.fail"
 qdbus_hang_file="$TEST_TMP/qdbus.hang"
 service_log="$TEST_TMP/service.log"
+monotonic_file="$TEST_TMP/monotonic.clock"
 old_uuid='aaaaaaaa-1111-4222-8333-bbbbbbbbbbbb'
 new_uuid='cccccccc-4444-4555-8666-dddddddddddd'
 printf '%s\n' "$old_uuid" >"$uuid_file"
+printf '1000.000 0.000\n' >"$monotonic_file"
 
 cat >"$bin/claude" <<'FAKEAI'
 #!/usr/bin/env bash
@@ -38,7 +40,20 @@ service_env() {
         "HOME=$HOME" "XDG_CONFIG_HOME=$XDG_CONFIG_HOME" "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" "XDG_STATE_HOME=$XDG_STATE_HOME" \
         "KEEPALIVE_QDBUS=$TEST_ROOT/tests/fixtures/qdbus-mock" "FAKE_PID_FILE=$pid_file" "FAKE_UUID_FILE=$uuid_file" \
         "FAKE_SEND_LOG=$send_log" "FAKE_SEND_FAIL_FILE=$send_fail_file" "FAKE_QDBUS_HANG_FILE=$qdbus_hang_file" \
-        "KEEPALIVE_QDBUS_TIMEOUT=1" "KEEPALIVE_DISCOVERY_INTERVAL=1" "KEEPALIVE_HEALTH_INTERVAL=1" "PATH=/usr/bin:/bin"
+        "KEEPALIVE_MONOTONIC_FILE=$monotonic_file" "KEEPALIVE_SUSPEND_GAP=30" \
+        "KEEPALIVE_QDBUS_TIMEOUT=1" "KEEPALIVE_DISCOVERY_INTERVAL=1" "KEEPALIVE_HEALTH_INTERVAL=1" "TZ=UTC" "PATH=/usr/bin:/bin"
+}
+
+# Role: Set an exact monotonic second so the real daemon's timer transitions are deterministic.
+set_test_clock() {
+    local seconds=$1
+    printf '%s.000 0.000\n' "$seconds" >"$monotonic_file"
+}
+
+# Role: Wake the FIFO service twice after moving its clock so the published index includes its timer tick.
+sync_service_clock() {
+    run_keepalive refresh >/dev/null
+    run_keepalive refresh >/dev/null
 }
 
 # Role: Start a recognized fake Claude process in the requested project directory and wait for its PID file.
@@ -70,6 +85,46 @@ target_field() {
     run_test_user awk -F '\t' -v wanted="$field" '$1 == wanted { print $2; exit }' "$state_file"
 }
 
+# Role: Read a selected target's main countdown or next-main field from the published index.
+published_index_field() {
+    local uuid=$1 field=$2 column
+    case $field in
+        main_remaining) column=6 ;;
+        next_main) column=16 ;;
+        *) return 2 ;;
+    esac
+    run_test_user awk -F '\t' -v wanted="$uuid" -v col="$column" '$1 == wanted { print $col; exit }' \
+        "$XDG_RUNTIME_DIR/keepalive/index.tsv"
+}
+
+# Role: Assert index and list JSON agree on one main countdown and its published wall-clock deadline.
+assert_main_publication() {
+    local uuid=$1 expected=$2 label=$3 json row index_remaining index_next json_remaining json_next
+    local next_epoch='' now_epoch delta rc=0
+    json=$(run_keepalive list --json)
+    row=$(grep -F -- "\"uuid\":\"$uuid\"" <<<"$json") || row=''
+    index_remaining=$(published_index_field "$uuid" main_remaining)
+    index_next=$(published_index_field "$uuid" next_main)
+    json_remaining=$(sed -nE 's/.*"main_remaining":([0-9]+).*/\1/p' <<<"$row")
+    json_next=$(sed -nE 's/.*"next_main_at":"([^"]*)".*/\1/p' <<<"$row")
+    assert_eq "$expected" "$index_remaining" "$label index.tsv main_remaining"
+    assert_eq "$expected" "$json_remaining" "$label keepalive list --json main_remaining"
+    assert_eq "$index_next" "$json_next" "$label list JSON next_main matches index.tsv"
+    if [[ $index_next =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9]{2}:[0-9]{2}:[0-9]{2}$ ]]; then
+        next_epoch=$(TZ=UTC date -d "$index_next" +%s 2>/dev/null) || rc=1
+    else
+        rc=1
+    fi
+    if [[ $next_epoch =~ ^[0-9]+$ ]]; then
+        now_epoch=$(TZ=UTC date +%s)
+        delta=$((next_epoch - now_epoch))
+        ((delta <= expected + 2 && delta >= expected - 30)) || rc=1
+    else
+        rc=1
+    fi
+    assert_eq 0 "$rc" "$label next_main is consistent with main_remaining"
+}
+
 # Role: Read the versioned secondary message referenced by one target checkpoint.
 target_secondary_message() {
     local uuid=$1 companion
@@ -85,25 +140,26 @@ profile_field() {
 
 # Role: Submit a CREATE request through production IPC without driving the interactive wizard.
 create_target_via_ipc() {
-    local uuid=$1 helper="$TEST_TMP/create-helper.sh"
+    local uuid=$1 profile_update=$2 main_interval=$3 helper="$TEST_TMP/create-helper.sh"
     cat >"$helper" <<'HELPER'
 #!/usr/bin/env bash
 set -Eeuo pipefail
-ROOT=$1; UUID=$2
+ROOT=$1; UUID=$2; PROFILE_UPDATE=$3; MAIN_INTERVAL=$4
 source "$ROOT/lib/common.sh"; source "$ROOT/lib/xdg.sh"; source "$ROOT/lib/profile.sh"; source "$ROOT/lib/ipc.sh"
 ka_xdg_init; ka_ensure_runtime_dirs; ka_profile_init_defaults
 id=$(ka_ipc_new_request CREATE "$UUID")
 req=$(ka_ipc_request_dir "$id")
 mkdir -p "$req/config"
 ka_profile_copy_to_request "$req/config"
-ka_write_scalar "$req/config/main_interval" 120
+ka_write_scalar "$req/config/main_interval" "$MAIN_INTERVAL"
+ka_write_scalar "$req/config/profile_update" "$PROFILE_UPDATE"
 ka_ipc_signal_request "$id"
 ka_ipc_wait_response "$id"
 HELPER
     chmod +x "$helper"
     local -a envs=() item
     while IFS= read -r -d '' item; do envs+=("$item"); done < <(service_env)
-    run_test_user env "${envs[@]}" bash "$helper" "$TEST_ROOT" "$uuid"
+    run_test_user env "${envs[@]}" bash "$helper" "$TEST_ROOT" "$uuid" "$profile_update" "$main_interval"
 }
 
 # Role: Stop background service/AI processes created by this integration test.
@@ -130,12 +186,21 @@ service_wrapper=$!
 for i in {1..80}; do [[ -p $XDG_RUNTIME_DIR/keepalive/control.fifo ]] && break; sleep 0.05; done
 assert_true 'background daemon creates control FIFO' test -p "$XDG_RUNTIME_DIR/keepalive/control.fifo"
 
+help_output=$(run_keepalive --help)
+rc=0; [[ $help_output == *'Countdowns are kept'* ]] || rc=1
+assert_eq 0 "$rc" 'keepalive --help explains that countdowns are kept'
+
 list=$(run_keepalive list)
 rc=0; [[ $list == *Claude* && $list == *Avela* && $list == *AVAILABLE* ]] || rc=1
 assert_eq 0 "$rc" 'public client sees mocked Claude session as AVAILABLE'
 
-response=$(create_target_via_ipc "$old_uuid")
+profile_path="$XDG_CONFIG_HOME/keepalive/profile"
+profile_snapshot="$TEST_TMP/profile-before-create"
+cp -a -- "$profile_path" "$profile_snapshot"
+response=$(create_target_via_ipc "$old_uuid" 0 120)
 assert_eq $'OK\tok' "$response" 'CREATE request crosses real FIFO/service process boundary'
+assert_true 'CREATE profile_update=0 leaves persistent profile bytes unchanged' \
+    diff -qr -- "$profile_path" "$profile_snapshot"
 list=$(run_keepalive list)
 rc=0; [[ $list == *Avela* && $list == *ACTIVE* ]] || rc=1
 assert_eq 0 "$rc" 'created target becomes ACTIVE in another client process'
@@ -184,6 +249,12 @@ uuid2_file="$TEST_TMP/uuid2"
 delete_response=$(run_keepalive delete "$old_uuid")
 assert_eq 'ok' "$delete_response" 'CLI delete removes an existing keep-alive'
 
+response=$(create_target_via_ipc "$old_uuid" 1 321)
+assert_eq $'OK\tok' "$response" 'CREATE with profile_update=1 succeeds through real IPC'
+assert_eq 321 "$(profile_field main_interval)" 'CREATE profile_update=1 updates the persistent profile'
+delete_response=$(run_keepalive delete "$old_uuid")
+assert_eq 'ok' "$delete_response" 'profile-update CREATE target can be deleted before the CLI create case'
+
 create_response=$(run_keepalive create "$old_uuid")
 assert_eq 'ok' "$create_response" 'CLI create builds a keep-alive from the saved profile'
 list=$(run_keepalive list)
@@ -195,7 +266,7 @@ configure_response=$(run_keepalive configure "$old_uuid" \
     --main-interval 123 --secondary-enabled 1 --secondary-interval 77 \
     --secondary-message 'custom nudge' --notifications 1 --delivery-mode enter-only)
 assert_eq ok "$configure_response" \
-    'CLI configure crosses the real FIFO/service process boundary'
+    'CLI configure prints generic success across the real FIFO/service process boundary'
 assert_eq 123 "$(target_field "$old_uuid" main_interval)" 'configure stores the requested main interval'
 assert_eq 1 "$(target_field "$old_uuid" secondary_enabled)" 'configure stores secondary enablement'
 assert_eq 77 "$(target_field "$old_uuid" secondary_interval)" 'configure stores the secondary interval'
@@ -232,6 +303,64 @@ assert_eq ok \
     '--profile explicitly selects the default profile behavior'
 assert_eq 125 "$(profile_field main_interval)" '--profile updates the persistent profile'
 
+# Advance the injected clock by seven seconds, then change notifications alone. The
+# target started at 123 seconds, so this leaves a value that a mistaken reset would change.
+set_test_clock 1007
+sync_service_clock
+assert_eq 116 "$(published_index_field "$old_uuid" main_remaining)" \
+    'controlled clock decrements the active main countdown before configure'
+notify_response=$(run_keepalive configure "$old_uuid" --notifications 0 --no-profile)
+assert_eq ok "$notify_response" 'notifications-only configure keeps generic CLI success'
+assert_main_publication "$old_uuid" 116 'notifications-only configure keeps the running countdown'
+assert_eq 0 "$(target_field "$old_uuid" notifications)" 'notifications-only configure stores its requested change'
+
+# Move the fake clock three more seconds and change only delivery mode.
+set_test_clock 1010
+sync_service_clock
+assert_eq 113 "$(published_index_field "$old_uuid" main_remaining)" \
+    'controlled clock continues the main countdown between configure calls'
+mode_response=$(run_keepalive configure "$old_uuid" --delivery-mode message-enter --no-profile)
+assert_eq ok "$mode_response" 'delivery-mode-only configure keeps generic CLI success'
+assert_main_publication "$old_uuid" 113 'delivery-mode-only configure keeps the running countdown'
+assert_eq MESSAGE_ENTER "$(target_field "$old_uuid" mode)" 'delivery-mode-only configure stores its requested change'
+
+# A manual send advances the index; explicitly resave the same logical messages and
+# confirm both that index and the remaining main time carry through the real daemon.
+response=$(run_test_user env "${ENV_ARGS[@]}" bash "$helper_toggle" "$TEST_ROOT" SEND_MAIN "$old_uuid")
+assert_eq $'OK\tok' "$response" 'manual send prepares a nonzero main rotation index'
+assert_eq 1 "$(target_field "$old_uuid" main_index)" 'successful main send advances main_index before configure'
+set_test_clock 1014
+sync_service_clock
+rotation_remaining=$(published_index_field "$old_uuid" main_remaining)
+assert_true 'controlled clock leaves the main countdown below its 123-second interval' \
+    test "$rotation_remaining" -lt 123
+same_rotation_response=$(run_keepalive configure "$old_uuid" \
+    --message 'first prompt' --message 'second prompt' --no-profile)
+assert_eq ok "$same_rotation_response" 'unchanged-message configure prints generic success'
+assert_eq 1 "$(target_field "$old_uuid" main_index)" 'unchanged message rotation keeps main_index'
+assert_main_publication "$old_uuid" "$rotation_remaining" 'unchanged message rotation keeps the main countdown'
+
+changed_rotation_response=$(run_keepalive configure "$old_uuid" \
+    --message 'replacement first' --message 'replacement second' --no-profile)
+assert_eq ok "$changed_rotation_response" 'changed-message configure prints generic success'
+assert_eq 0 "$(target_field "$old_uuid" main_index)" 'changed message rotation resets main_index'
+assert_main_publication "$old_uuid" "$rotation_remaining" 'changed message rotation keeps the main countdown'
+
+# A longer interval does not postpone the countdown already running. Reset at the long
+# interval, then shorten below that remaining time to exercise the cap in a second save.
+lengthen_response=$(run_keepalive configure "$old_uuid" --main-interval 999999999 --no-profile)
+assert_eq ok "$lengthen_response" 'main-interval lengthening prints generic success'
+assert_eq 999999999 "$(target_field "$old_uuid" main_interval)" 'lengthening stores the longer interval'
+assert_main_publication "$old_uuid" "$rotation_remaining" 'lengthening keeps the existing remaining time'
+assert_eq ok "$(run_keepalive reset "$old_uuid")" 'reset fills the long countdown before the cap case'
+before_cap=$(published_index_field "$old_uuid" main_remaining)
+assert_true 'shorter interval for the cap case is below its current remaining time' \
+    test "$before_cap" -gt 900000000
+cap_response=$(run_keepalive configure "$old_uuid" --main-interval 900000000 --no-profile)
+assert_eq ok "$cap_response" 'main-interval shortening prints generic success'
+assert_eq 900000000 "$(target_field "$old_uuid" main_interval)" 'shortening stores the shorter interval'
+assert_main_publication "$old_uuid" 900000000 'shortening caps the main countdown at the new interval'
+
 assert_eq 'ok' "$(run_keepalive pause "$old_uuid")" 'CLI pause freezes the target'
 assert_eq 'already paused' "$(run_keepalive pause "$old_uuid")" 'CLI pause is idempotent'
 assert_eq 'ok' "$(run_keepalive resume "$old_uuid")" 'CLI resume restarts the countdown'
@@ -251,7 +380,6 @@ assert_eq 'keepalive: ERROR: session already has a keep-alive (state: ACTIVE)' "
 
 # Kill original AI: service must retain target as sticky UNAVAILABLE.
 kill "$KA_FAKE_AI_PID" 2>/dev/null || true
-sleep 2
 list=$(run_keepalive list)
 rc=0; [[ $list == *Avela* && $list == *UNAVAILABLE* ]] || rc=1
 assert_eq 0 "$rc" 'lost original AI process becomes sticky UNAVAILABLE'
@@ -259,7 +387,6 @@ assert_eq 0 "$rc" 'lost original AI process becomes sticky UNAVAILABLE'
 # New process in same directory gets a different UUID and must remain a separate AVAILABLE row.
 printf '%s\n' "$new_uuid" >"$uuid_file"
 start_fake_ai
-sleep 2
 list=$(run_keepalive list)
 old_count=$(grep -c 'Avela' <<<"$list" || true)
 assert_eq 2 "$old_count" 'old unavailable and replacement available Avela rows coexist'

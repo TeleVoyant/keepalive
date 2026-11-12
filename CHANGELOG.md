@@ -11,6 +11,13 @@ Orca 1.4.241 compatibility, Orca without jq, and Orca CLI cost.
 
 ### Added
 
+- **Settings editor.** Creating or configuring a keep-alive opens one screen listing every
+  setting instead of a fixed six-step sequence: pick any field with the arrows or its
+  number, change it, and press `s` to save. Changed fields are marked, the target's
+  countdowns stay live on screen, the screen says what saving will do to them, and `Esc`
+  asks before discarding edits. A new "Save as default" field chooses whether the default
+  profile is updated, for creating as well as configuring; validation messages from the
+  field screens are now shown on those screens.
 - **Orca works out of the box.** `jq` is no longer required: without it, Orca's JSON is read
   by a built-in POSIX awk reader (`lib/orca.awk`; gawk, mawk, and BusyBox awk) that applies
   the same checks and produces the same results, refusing only malformed input jq tolerates. `jq` is still used when installed;
@@ -35,6 +42,14 @@ Orca 1.4.241 compatibility, Orca without jq, and Orca CLI cost.
 
 ### Changed
 
+- **Saving configuration keeps countdowns** (TUI and `keepalive configure`). ACTIVE timers
+  carry on and PAUSED ones stay frozen. The main countdown keeps its remaining time, capped
+  at a shorter new interval. The rotation restarts at message 1, and an owed Enter is
+  dropped, only if the messages changed. The secondary prompt keeps its countdown and
+  one-shot state unless its own settings changed; then an armed prompt keeps counting
+  (capped) and a fired or newly enabled one starts a fresh arming. Notifications and delivery
+  mode never touch a timer. Previously every save restarted both countdowns and the
+  rotation and re-armed the secondary prompt.
 - **Orca CLI cost:** periodic Orca discovery runs at most every
   `KEEPALIVE_ORCA_DISCOVERY_INTERVAL` (10 s) instead of the 3 s attended cadence, and live
   Orca health checks without a fresh snapshot at most every

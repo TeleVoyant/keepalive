@@ -13,7 +13,7 @@ Only the daemon writes authoritative target state. This is the central concurren
 ## Terminal rendering
 
 The client enters the terminal's alternate screen and tracks the active renderer
-as a view identity. The first frame, a change between manager/detail/wizard/log
+as a view identity. The first frame, a change between manager/detail/settings-editor/log
 renderers, or a `WINCH` resize emits a home plus full visible-screen erase before
 drawing. Repeated frames from the same renderer only return home, and the frame
 footer erases unused cells below the new content. This removes differently shaped
@@ -315,7 +315,8 @@ timer, health, discovery, publication, and cleanup anchors.
 
 Secondary events are checked before main when both become due on the same tick. The
 secondary prompt is one-shot: it fires once and then records `secondary_done` rather than
-repeating until reconfigured.
+repeating. Only a change to the secondary's own settings (enabled, interval, or message)
+re-arms it; saving any other change leaves a fired prompt fired.
 
 ### Loop pacing
 
@@ -401,8 +402,18 @@ secondary completion consumes `secondary_done`, and STALE completion never advan
 replacement rotation. The one-shot `e` Enter completes an owed owner when present; with
 no owner it sends only Enter and leaves the queued message untouched.
 
-CONFIGURE marks any owed owner `STALE`, resets the replacement index to zero, and commits
-that checkpoint before swapping the new `messages/` directory. If the daemon stops between
+CONFIGURE keeps countdown state: ACTIVE timers carry on and PAUSED ones stay frozen. The
+main countdown keeps its remaining time,
+capped at the new interval (a 30-minute timer is never 56 minutes from firing, and a
+longer interval never postpones a send already under way). An unchanged rotation - compared
+as logical messages, ignoring one final newline - keeps its index and owner and is not
+rewritten. A changed one marks any owed owner `STALE`, resets the replacement index to
+zero, and commits that checkpoint before swapping the new `messages/` directory. The
+secondary keeps its countdown and one-shot state unless its own settings changed: then an
+armed prompt keeps counting (capped at the new interval), a fired or newly enabled one
+starts a fresh arming, a disabled one is simply not armed (enabling it later starts a full
+interval), and an owed secondary submit becomes `STALE`. Delivery
+mode and notifications never touch a timer. If the daemon stops between
 those commits, restart sees a valid replacement state and the STALE Enter cannot advance
 its new rotation; this ordering prevents the old owner/index from being paired with new
 message files. Rollback restores the prior owner with the prior rotation.

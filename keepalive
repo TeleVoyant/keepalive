@@ -68,8 +68,11 @@ Configure options (intervals are seconds; repeat --message for a rotation):
   --message TEXT  --main-interval SECONDS  --secondary-enabled 0|1
   --secondary-interval SECONDS  --secondary-message TEXT  --notifications 0|1
   --delivery-mode message-enter|enter-only  --profile | --no-profile
-Options not supplied keep the target's current values. The profile is updated by
-  default, like the TUI wizard; use --no-profile to change only this target.
+Options not supplied keep the target's current values. Countdowns are kept: ACTIVE ones
+  carry on, PAUSED ones stay frozen, and the main one is capped at a shorter new interval.
+  The rotation restarts only if messages change; the secondary keeps its state unless its
+  own settings change. The profile is updated by default, as by the TUI's "Save as
+  default"; use --no-profile to change only this target.
 
 Presentation controls affect only the current TUI client. They never change daemon state.
 NO_COLOR=1 is also honored.

@@ -142,6 +142,18 @@ assert_eq STALE "${KA_T_PENDING_SUBMIT[$crash_uuid]}" \
     'CONFIGURE crash checkpoint marks the old owed submit STALE'
 assert_eq 0 "${KA_T_MAIN_INDEX[$crash_uuid]}" \
     'CONFIGURE crash checkpoint resets the replacement rotation index'
+assert_true 'CONFIGURE crash checkpoint keeps main index within stored rotation' \
+    test "${KA_T_MAIN_INDEX[$crash_uuid]}" -lt "$(ka_state_message_count "$crash_uuid")"
+assert_eq ACTIVE "${KA_T_STATUS[$crash_uuid]}" \
+    'CONFIGURE crash checkpoint preserves the target status'
+assert_true 'CONFIGURE crash checkpoint keeps main remaining within interval' \
+    test "${KA_T_MAIN_REMAIN[$crash_uuid]}" -le "${KA_T_MAIN_INTERVAL[$crash_uuid]}"
+assert_true 'CONFIGURE crash checkpoint keeps secondary remaining within interval' \
+    test "${KA_T_SECONDARY_REMAIN[$crash_uuid]}" -le "${KA_T_SECONDARY_INTERVAL[$crash_uuid]}"
+assert_eq 10 "${KA_T_MAIN_REMAIN[$crash_uuid]}" \
+    'CONFIGURE crash checkpoint preserves the in-flight main countdown'
+assert_eq 7 "${KA_T_SECONDARY_REMAIN[$crash_uuid]}" \
+    'CONFIGURE crash checkpoint stores the changed disabled secondary interval'
 assert_eq 0 "$(find "$KA_QUARANTINE_DIR" -mindepth 1 -maxdepth 1 -print | wc -l)" \
     'CONFIGURE crash checkpoint is not quarantined'
 DELIVERIES=()
@@ -157,6 +169,16 @@ assert_eq 1 "${KA_T_MAIN_INDEX[$crash_uuid]}" \
 # A failed message-copy commit must restore the previous rotation and pending owner.
 rollback_uuid='82000000-0000-4000-8000-000000000082'
 seed_target "$rollback_uuid" 1 MAIN 0
+KA_T_STATUS[$rollback_uuid]=PAUSED
+KA_T_MODE[$rollback_uuid]=ENTER_ONLY
+KA_T_NOTIFY[$rollback_uuid]=1
+KA_T_MAIN_INTERVAL[$rollback_uuid]=18
+KA_T_MAIN_REMAIN[$rollback_uuid]=7
+KA_T_SECONDARY_ENABLED[$rollback_uuid]=1
+KA_T_SECONDARY_INTERVAL[$rollback_uuid]=12
+KA_T_SECONDARY_REMAIN[$rollback_uuid]=4
+KA_T_SECONDARY_DONE[$rollback_uuid]=1
+KA_T_SECONDARY_MESSAGE[$rollback_uuid]='old-nudge'
 ka_state_target_dir "$rollback_uuid"
 rollback_target_dir=$REPLY
 ka_write_scalar "$rollback_target_dir/messages/001" old-one
@@ -167,7 +189,22 @@ KA_T_PENDING_SUBMIT[$rollback_uuid]=MAIN
 ka_state_save_target "$rollback_uuid"
 rollback_request="$TEST_TMP/rollback-request"
 make_request "$rollback_request" replacement-one replacement-two
+ka_write_scalar "$rollback_request/profile_update" 0
 COMMIT_CALLS=0
+# Instrument only this CONFIGURE transaction so the assertion distinguishes the two
+# intended state commits from a redundant second restore save.
+saved_state_writer="$TEST_TMP/state-writer-original.sh"
+declare -f ka_state_save_target \
+    | sed '1s/^ka_state_save_target/ka_state_save_target_uninstrumented/' > "$saved_state_writer"
+# shellcheck disable=SC1090
+source "$saved_state_writer"
+COUNT_STATE_SAVES=0
+STATE_SAVE_COUNT=0
+# Role: Count state checkpoints around the injected rollback and delegate to production.
+ka_state_save_target() {
+    if ((COUNT_STATE_SAVES == 1)); then STATE_SAVE_COUNT=$((STATE_SAVE_COUNT + 1)); fi
+    ka_state_save_target_uninstrumented "$@"
+}
 # Role: Fail the first rotation commit, then allow the rollback copy to commit.
 ka_commit_staged_dir() {
     local staged=$1
@@ -179,9 +216,17 @@ ka_commit_staged_dir() {
     rm -rf -- "$destination"
     mv -T -- "$staged" "$destination"
 }
+COUNT_STATE_SAVES=1
 assert_false 'CONFIGURE reports a failed message-copy commit' \
     ka_state_configure_target "$rollback_uuid" "$rollback_request"
+COUNT_STATE_SAVES=0
 assert_eq 2 "$COMMIT_CALLS" 'CONFIGURE invokes the rollback message copy after failure'
+assert_eq 2 "$STATE_SAVE_COUNT" 'CONFIGURE writes one apply checkpoint and one restore checkpoint'
+assert_eq PAUSED "${KA_T_STATUS[$rollback_uuid]}" 'rollback restores the old PAUSED status'
+assert_eq ENTER_ONLY "${KA_T_MODE[$rollback_uuid]}" 'rollback restores the old delivery mode'
+assert_eq 1 "${KA_T_NOTIFY[$rollback_uuid]}" 'rollback restores the old notification setting'
+assert_eq 18 "${KA_T_MAIN_INTERVAL[$rollback_uuid]}" 'rollback restores the old main interval'
+assert_eq 7 "${KA_T_MAIN_REMAIN[$rollback_uuid]}" 'rollback restores the old main remaining'
 assert_eq old-one "$(ka_state_message_at "$rollback_uuid" 0)" \
     'rollback restores old message line 1'
 assert_eq old-two "$(ka_state_message_at "$rollback_uuid" 1)" \
@@ -190,6 +235,11 @@ assert_eq 1 "${KA_T_MAIN_INDEX[$rollback_uuid]}" \
     'rollback restores the old rotation index'
 assert_eq MAIN "${KA_T_PENDING_SUBMIT[$rollback_uuid]}" \
     'rollback restores the old pending-submit owner'
+assert_eq 1 "${KA_T_SECONDARY_ENABLED[$rollback_uuid]}" 'rollback restores old secondary enabled'
+assert_eq 12 "${KA_T_SECONDARY_INTERVAL[$rollback_uuid]}" 'rollback restores old secondary interval'
+assert_eq 4 "${KA_T_SECONDARY_REMAIN[$rollback_uuid]}" 'rollback restores old secondary remaining'
+assert_eq 1 "${KA_T_SECONDARY_DONE[$rollback_uuid]}" 'rollback restores old fired one-shot marker'
+assert_eq old-nudge "${KA_T_SECONDARY_MESSAGE[$rollback_uuid]}" 'rollback restores old secondary message'
 ka_state_init_arrays
 assert_true 'rollback checkpoint reloads after the failed copy' \
     ka_state_load_target_dir "$(target_dir "$rollback_uuid")"
@@ -197,6 +247,14 @@ assert_eq MAIN "${KA_T_PENDING_SUBMIT[$rollback_uuid]}" \
     'rollback persists the old pending-submit owner'
 assert_eq 1 "${KA_T_MAIN_INDEX[$rollback_uuid]}" \
     'rollback persists the old rotation index'
+assert_eq PAUSED "${KA_T_STATUS[$rollback_uuid]}" 'reloaded rollback persists old PAUSED status'
+assert_eq 18 "${KA_T_MAIN_INTERVAL[$rollback_uuid]}" 'reloaded rollback persists old main interval'
+assert_eq 7 "${KA_T_MAIN_REMAIN[$rollback_uuid]}" 'reloaded rollback persists old main remaining'
+assert_eq 1 "${KA_T_SECONDARY_ENABLED[$rollback_uuid]}" 'reloaded rollback persists old secondary enabled'
+assert_eq 12 "${KA_T_SECONDARY_INTERVAL[$rollback_uuid]}" 'reloaded rollback persists old secondary interval'
+assert_eq 4 "${KA_T_SECONDARY_REMAIN[$rollback_uuid]}" 'reloaded rollback persists old secondary remaining'
+assert_eq 1 "${KA_T_SECONDARY_DONE[$rollback_uuid]}" 'reloaded rollback persists old secondary done'
+assert_eq old-nudge "${KA_T_SECONDARY_MESSAGE[$rollback_uuid]}" 'reloaded rollback persists old secondary message'
 source "$TEST_ROOT/lib/common.sh"
 
 # Pending-submit owners are event-specific: same-kind events submit once, cross-kind events

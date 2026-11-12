@@ -1,5 +1,47 @@
 # Development and Operations Memory
 
+## Settings-editor round — 2026-11-12 (uncommitted on top of `0040a8a`)
+
+Trigger: the user found configuration editing clumsy and asked for a redesign: pick any
+setting to change while the countdown keeps running in the background, and resume the
+countdown where it was after saving. Their open question - a 30-minute interval while 56
+minutes remain - was settled as a cap: the countdown becomes 30 minutes; a longer interval
+never extends it.
+
+What changed:
+
+- `lib/state.sh`: `ka_state_apply_request_configuration` keeps countdown state instead of
+  resetting it (main cap; rotation compared logically by `ka_state_rotation_unchanged` and
+  only rewritten when changed; secondary arming table; owed-submit owners kept unless their
+  text changed); `KA_STATE_CONFIG_EFFECT` feeds the CONFIG event; rollback restores the old
+  owner in one checkpoint; `ka_state_request_profile_policy` makes CREATE honor
+  `profile_update=0` as CONFIGURE already did.
+- `lib/tui/wizard.sh`: the six-step wizard became a settings list (`ka_tui_run_wizard`) with
+  the old step screens as field sub-editors, per-field signatures against a pristine copy
+  for change markers and the discard prompt, effect previews mirroring the daemon rules, a
+  Save as default toggle, and a live countdown extrapolated on the monotonic clock with the
+  daemon's suspend-gap rule (time in a field screen is not a gap). Submit keeps the scratch
+  copy until the daemon accepts, so a refusal leaves the edits in place.
+
+How the round ran: Orca orchestration, Codex `gpt-6-luna` at `max`, at most five workers.
+Two research workers (daemon semantics with a rule-by-rule validation; TUI primitives
+inventory), lead implementation, three proofreaders (daemon, editor in a real PTY, every
+doc string), fixes, then four test writers with disjoint file ownership
+(`test_configure_timers.sh` 159, `test_tui_editor.sh` 80, `test_tui_pty.sh` 84,
+`test_service_integration.sh` 95, plus updates to `test_state.sh`/`test_state_delivery.sh`).
+
+Lessons from this round:
+
+- A rotation must be compared as logical messages: the TUI writes every message with a
+  final LF and the stored copy has none, so a byte comparison calls every no-op save a
+  change.
+- A display countdown extrapolated between index publications must use the same monotonic
+  clock and gap rule as the daemon, or a suspend shows time the daemon never subtracts.
+- The detail view prints a literal `Status` only in its no-color header; PTY barriers must
+  wait on text every presentation tier draws (a worker's no-color sandbox hid this).
+- `orca orchestration send` to a finished worker starts a follow-up Task on the same
+  context, which is how the reviewers were reused as test writers.
+
 ## Orca 1.4.241 round — 2026-10-29 (uncommitted on top of `67611b8`)
 
 Trigger: the user saw "occasionally incompatible Orca parsing" after Orca updated to 1.4.241,
@@ -437,7 +479,7 @@ systemctl --user try-restart keepalive.service
 | `test_orca_service_integration.sh` | Real FIFO/service/client lifecycle against a mocked Orca-only runtime. |
 | `test_tui_primitives.sh` | ASCII progress/urgency, icon-free state, view-aware clear and resize sequences, width-exact frame rules, truncation safety and control stripping, non-collapsing TSV split, 7-bit glyph set, status cell width, segment-bar width/fallback, and key decoding (arrows, page/home/end, unrecognized sequences, Escape pushback). |
 | `test_function_comments.sh` | Adjacent `# Role:` convention, and no self-referential `local` declaration. |
-| `test_tui_pty.sh` | The real client driven through `pty.fork()`: key classes that once exited it, wizard cancel from step one and from a later step, Escape pushback, and a VT-rendered screen check that no key-hint line is drawn twice. Skips cleanly without `python3`. |
+| `test_tui_pty.sh` | The real client driven through `pty.fork()`: key classes that once exited it, settings-editor close and field-screen back-out, Escape pushback, and a VT-rendered screen check that no key-hint line is drawn twice. Skips cleanly without `python3`. |
 | `test_install_layout.sh` | Non-root install/uninstall with mocked systemctl. |
 | `test_install_lifecycle.sh` | Manager XDG agreement, migration, installed-tree upgrade, restart, rollback, and uninstall retention with a stateful systemctl mock. |
 | `test_portability.sh` | Runtime-path safety/fallback, HOME/config validation, D-Bus escaping, and early informational modes. |
@@ -558,8 +600,8 @@ The suite cannot see layout, key handling, or `set -e` escapes. Check all of:
 3. Exercise `ACTIVE`, `PAUSED`, and `UNAVAILABLE`, which render different blocks.
 4. Confirm no user action can return non-zero into a loop body.
 5. Drive the real client through a pseudo-terminal: arrows, function keys, keypad,
-   `Esc`, `Esc` followed immediately by another key, wizard cancel from step 1 and
-   from a later step. The client must never exit except on `q`/`Esc` at the manager.
+   `Esc`, `Esc` followed immediately by another key, settings-editor `Esc` with and without
+   edits, and backing out of a field screen. The client must never exit except on `q`/`Esc` at the manager.
 6. Confirm no scratch file survives an interrupted client.
 
 A minimal Python pty driver is enough: `pty.fork()`, `TIOCSWINSZ` for the size, write

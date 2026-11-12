@@ -19,13 +19,14 @@ maintainer or coding agent needs in order to continue safely.
   GitHub release "Keep Alive Manager 1.1.1" carries `keepalive-1.1.1.tar.gz` and
   `SHA256SUMS`; it was published from the tag with the release workflow's own steps after
   the tag's workflow run stopped at validation (see DEVELOPMENT.md, release lessons).
-- `master` is at `67611b8` = `v1.1.1` plus the release-workflow UTF-8 locale fix
-  (`418e2e6`) and an `.agents/` notes refresh. Uncommitted on top (2026-10-29): a root
-  `CLAUDE.md` (Claude Code orientation; keep it consistent with these notes and `docs/`) and
-  the **Orca 1.4.241 round** - row-tolerant Orca discovery with named failure gates, codes
-  23/24, single-document responses, paced Orca CLI starts, quieter episode logging, and
-  `lib/orca.awk` so Orca works without `jq`. Recorded under `[Unreleased]` in CHANGELOG.md,
-  in RISKS.md (Resolved on 2026-10-29) and DEVELOPMENT.md; not yet installed on this host. GitHub CI is green on `7b723f9` and `418e2e6` (8 jobs: ShellCheck, Ubuntu, Debian, Fedora, Arch, non-root
+- `master` is at `0040a8a` = `v1.1.1`, the release-workflow UTF-8 locale fix (`418e2e6`), an
+  `.agents/` notes refresh (`67611b8`), and the **Orca 1.4.241 round** (`0040a8a`, 2026-10-29):
+  a root `CLAUDE.md`, row-tolerant Orca discovery with named failure gates, codes 23/24,
+  single-document responses, paced Orca CLI starts, quieter episode logging, and
+  `lib/orca.awk` so Orca works without `jq`. Uncommitted on top (2026-11-12): the
+  **settings-editor round** - one-screen TUI settings editor with live countdowns, and
+  countdown-preserving CONFIGURE (DEVELOPMENT.md has the details). Both rounds are under
+  `[Unreleased]` in CHANGELOG.md and neither is installed on this host yet. GitHub CI is green on `7b723f9` and `418e2e6` (8 jobs: ShellCheck, Ubuntu, Debian, Fedora, Arch, non-root
   Debian, Bash 5.0 and 5.1) - the first green CI since before 1.1.0.
 - Previous releases: `v1.1.0` at `cf27db4`, `v1.0.0` at `2ea6951`; Orca integration at
   `ea3d6f3`.
@@ -40,8 +41,8 @@ maintainer or coding agent needs in order to continue safely.
   **2026-10-02 fix round**, which adds scheduler ownership, IPC/profile/output safety,
   CLI configure/status, release tooling, and final classifier/discovery hardening. Measured
   results are in RISKS.md; method and safety rules in DEVELOPMENT.md.
-- Tests: 34 files, 1948 assertions, all passing (`./tests/run.sh`; dev-check is the final gate)
-  as of the uncommitted 2026-10-29 Orca round; 1.1.1 itself shipped with 31 files and 1519.
+- Tests: 36 files, 2331 assertions (`./tests/run.sh`; dev-check is the final gate) as of the
+  2026-11-12 settings-editor round; 1.1.1 itself shipped with 31 files and 1519.
 - Installed on the development host from the release tree (2026-10-02); the live
   daemon runs 1.1.1. The update reloaded the one ACTIVE Orca keep-alive with its countdown,
   discovery found the same five AVAILABLE sessions as 1.1.0, `doctor` passed with both
@@ -70,7 +71,7 @@ these notes deliberately do not duplicate it:
 - [`../docs/CONFIGURATION.md`](../docs/CONFIGURATION.md): every environment knob with its
   default and the reasoning for it.
 - [`../docs/TROUBLESHOOTING.md`](../docs/TROUBLESHOOTING.md): symptom-first diagnosis.
-- [`../docs/TESTING.md`](../docs/TESTING.md): what each of the 1948 assertions covers and
+- [`../docs/TESTING.md`](../docs/TESTING.md): what each of the 2331 assertions covers and
   the conventions for adding one.
 - [`../CONTRIBUTING.md`](../CONTRIBUTING.md): the conventions the automated checks
   enforce.

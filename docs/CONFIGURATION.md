@@ -4,7 +4,7 @@ Keep Alive Manager is configured in two independent ways, and it matters which o
 are reaching for.
 
 **Per-keep-alive settings** - messages, intervals, delivery mode, notifications - are
-owned by the daemon and edited through the TUI wizard or the CLI. They live in each
+owned by the daemon and edited through the TUI settings editor or the CLI. They live in each
 target's runtime state and in the persistent profile at
 `${XDG_CONFIG_HOME:-$HOME/.config}/keepalive`. Nothing in
 this document changes them.
@@ -53,8 +53,8 @@ set -g status-right '#(keepalive status --json 2>/dev/null | jq -r "\"KA \(.targ
 contiguous main-message rotation; pass `--main-interval`, `--secondary-enabled`,
 `--secondary-interval`, `--secondary-message`, `--notifications`, and
 `--delivery-mode` for individual settings. Intervals must be `1..999999999` seconds.
-Omitted fields are copied from the target checkpoint, timers reset as with the wizard, and
-the persistent default profile is updated unless `--no-profile` is supplied (`--profile`
+Omitted fields are copied from the target checkpoint; saving keeps the countdowns: ACTIVE ones carry on and PAUSED ones stay frozen. The main countdown keeps its remaining time, capped at a shorter new interval. The rotation restarts at message 1, and an owed Enter is dropped, only if the messages changed (ignoring one final newline). The secondary prompt keeps its countdown and one-shot state unless its own settings change; then an armed prompt keeps counting (capped at a shorter interval), and one that already fired, or is newly enabled, starts a fresh arming. Notifications and delivery mode never touch a timer. The
+persistent default profile is updated unless `--no-profile` is supplied (`--profile`
 explicitly selects the default behavior).
 
 ## Terminal backends

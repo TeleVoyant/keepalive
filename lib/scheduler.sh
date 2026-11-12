@@ -515,7 +515,7 @@ ka_scheduler_tick() {
 
         # Secondary intentionally preempts main when both timers become due together.
         # It is a one-shot nudge: after it has fired for this arming it stays quiet until
-        # the target is reconfigured, rather than repeating every interval.
+        # its own settings are changed, rather than repeating every interval.
         if [[ ${KA_T_SECONDARY_ENABLED[$uuid]} == 1 ]] && ((KA_T_SECONDARY_REMAIN[$uuid] <= 0)) \
             && ((${KA_T_SECONDARY_DONE[$uuid]:-0} == 0)); then
             ka_scheduler_send_secondary "$uuid" AUTO || true

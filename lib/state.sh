@@ -810,10 +810,50 @@ ka_state_copy_request_messages() {
     ka_commit_staged_dir "$staged" "$target_dir/messages"
 }
 
+# Role: Report whether a request's main-message rotation equals the target's stored one.
+# Compared as logical messages: the bounded scalar reader drops one optional final LF, which
+# the TUI adds when it saves and the stored copy lacks, so an unchanged rotation is not
+# mistaken for a new one. Count, order, and every byte otherwise count; a CR stays content.
+# Anything that cannot be read is reported as changed, which is the safe direction.
+ka_state_rotation_unchanged() {
+    local uuid=$1 request_dir=$2 target_dir max_len i stored had_nullglob=0
+    local -a requested=() kept=()
+    ka_state_target_dir "$uuid"; target_dir=$REPLY
+    ka_state_validate_runtime_dir "$target_dir/messages" || return 1
+    ka_tunable KEEPALIVE_MAX_MESSAGE_LENGTH 2000; max_len=$REPLY
+    shopt -q nullglob && had_nullglob=1
+    shopt -s nullglob
+    requested=("$request_dir/messages"/[0-9][0-9][0-9])
+    kept=("$target_dir/messages"/[0-9][0-9][0-9])
+    ((had_nullglob == 1)) || shopt -u nullglob
+    ((${#requested[@]} > 0 && ${#requested[@]} == ${#kept[@]})) || return 1
+    for i in "${!requested[@]}"; do
+        [[ ${requested[$i]##*/} == "${kept[$i]##*/}" ]] || return 1
+        ka_request_read_scalar "${kept[$i]}" "$max_len" || return 1
+        stored=$REPLY
+        ka_request_read_scalar "${requested[$i]}" "$max_len" || return 1
+        [[ $REPLY == "$stored" ]] || return 1
+    done
+    return 0
+}
+
 # Role: Apply one validated request to a target and durably checkpoint the new settings.
+#
+# Countdowns keep running through a reconfiguration; only what the change makes
+# meaningless restarts. The main countdown keeps its remaining time, capped at the new
+# interval (a 30-minute timer is never 56 minutes from firing, and a longer interval
+# never postpones a send already under way). The rotation position and any owed Enter
+# survive unless the rotation itself changed. The secondary prompt keeps its countdown
+# and one-shot state unless its own settings changed: then an armed prompt keeps counting
+# (capped), and a fired or newly enabled one starts a fresh arming. A disabled prompt is
+# never armed: it stores its full interval and a cleared one-shot marker for whenever it is
+# enabled again. Delivery mode and notifications never touch a timer. KA_STATE_CONFIG_EFFECT says what happened.
 ka_state_apply_request_configuration() {
     local uuid=$1 request_dir=$2 target_dir secondary_message pending_submit
     local mode notifications main_interval secondary_enabled secondary_interval max_len
+    local rotation_changed=1 secondary_changed=0 main_remaining secondary_remaining secondary_done
+    local -a effects=()
+    KA_STATE_CONFIG_EFFECT=''
     ka_state_target_dir "$uuid"; target_dir=$REPLY
     ka_request_read_scalar "$request_dir/delivery_mode" 64 || return 1
     mode=$REPLY
@@ -830,26 +870,72 @@ ka_state_apply_request_configuration() {
     ka_request_read_scalar "$request_dir/secondary_message" "$max_len" || return 1
     secondary_message=$REPLY
 
+    ka_state_rotation_unchanged "$uuid" "$request_dir" && rotation_changed=0
+    if [[ $secondary_enabled != "${KA_T_SECONDARY_ENABLED[$uuid]}" \
+        || $secondary_interval != "${KA_T_SECONDARY_INTERVAL[$uuid]}" \
+        || $secondary_message != "${KA_T_SECONDARY_MESSAGE[$uuid]-}" ]]; then
+        secondary_changed=1
+    fi
+
+    main_remaining=${KA_T_MAIN_REMAIN[$uuid]}
+    if ((main_remaining > main_interval)); then
+        main_remaining=$main_interval
+        effects+=('main countdown capped at the new interval')
+    fi
+    secondary_remaining=${KA_T_SECONDARY_REMAIN[$uuid]}
+    secondary_done=${KA_T_SECONDARY_DONE[$uuid]:-0}
+    if ((secondary_changed == 1)); then
+        if [[ $secondary_enabled == 1 && ${KA_T_SECONDARY_ENABLED[$uuid]} == 1 && $secondary_done != 1 ]]; then
+            if ((secondary_remaining > secondary_interval)); then
+                secondary_remaining=$secondary_interval
+                effects+=('secondary countdown capped at the new interval')
+            fi
+        else
+            secondary_remaining=$secondary_interval
+            [[ $secondary_enabled == 1 ]] && effects+=('secondary prompt armed')
+        fi
+        secondary_done=0
+    fi
+
+    # An owed Enter completes the text it belongs to, so it is kept only while that text is.
     ka_state_pending_submit_value "$uuid"
     pending_submit=$REPLY
-    [[ $pending_submit == 0 ]] && pending_submit=0 || pending_submit=STALE
+    case $pending_submit in
+        0|STALE) ;;
+        SECONDARY_AUTO|SECONDARY_MANUAL)
+            if ((rotation_changed == 1 || secondary_changed == 1)); then pending_submit=STALE; fi
+            ;;
+        *)
+            if ((rotation_changed == 1)); then pending_submit=STALE; fi
+            ;;
+    esac
+    if ((rotation_changed == 1)); then
+        KA_T_MAIN_INDEX[$uuid]=0
+        effects+=('rotation restarts at message 1')
+    fi
+    ((${#effects[@]} > 0)) || effects=('countdowns kept')
+    KA_STATE_CONFIG_EFFECT=${effects[0]}
+    local effect
+    for effect in "${effects[@]:1}"; do KA_STATE_CONFIG_EFFECT+="; $effect"; done
+
     KA_T_PENDING_SUBMIT[$uuid]=$pending_submit
     KA_T_MODE[$uuid]=$mode
     KA_T_NOTIFY[$uuid]=$notifications
     KA_T_MAIN_INTERVAL[$uuid]=$main_interval
-    KA_T_MAIN_REMAIN[$uuid]=$main_interval
-    KA_T_MAIN_INDEX[$uuid]=0
+    KA_T_MAIN_REMAIN[$uuid]=$main_remaining
     KA_T_SECONDARY_ENABLED[$uuid]=$secondary_enabled
     KA_T_SECONDARY_INTERVAL[$uuid]=$secondary_interval
-    KA_T_SECONDARY_REMAIN[$uuid]=$secondary_interval
-    KA_T_SECONDARY_DONE[$uuid]=0
+    KA_T_SECONDARY_REMAIN[$uuid]=$secondary_remaining
+    KA_T_SECONDARY_DONE[$uuid]=$secondary_done
     KA_T_SECONDARY_MESSAGE[$uuid]=$secondary_message
     # Commit the checkpoint (index 0, any owed submit STALE) before swapping messages/.
     # A daemon killed between the two then restarts with a valid pair - index 0 exists in
     # every rotation and a STALE Enter never advances it - instead of the old index and
     # owner applied to the new rotation, which skips a line or quarantines the target.
-    # The restore path keeps the opposite order for the same reason.
+    # The restore path keeps the opposite order for the same reason. An unchanged rotation
+    # is not rewritten at all, so its index and owner stay paired with the same messages.
     ka_state_save_target "$uuid" || return 1
+    ((rotation_changed == 1)) || return 0
     ka_state_copy_request_messages "$request_dir" "$target_dir"
 }
 
@@ -858,12 +944,14 @@ ka_state_restore_configuration() {
     local uuid=$1 request_dir=$2 mode=$3 notifications=$4 main_interval=$5
     local main_remaining=$6 main_index=$7 secondary_enabled=$8 secondary_interval=$9
     shift 9
-    local secondary_remaining=$1 secondary_done=$2 secondary_message=$3 target_dir pending_submit
+    local secondary_remaining=$1 secondary_done=$2 secondary_message=$3 pending_submit=$4
+    local target_dir
     ka_state_target_dir "$uuid"; target_dir=$REPLY
+    # The old messages go back first; the one checkpoint below then pairs them with their
+    # old index and owner. Killed in between, the checkpoint on disk is still valid against
+    # them: after a changed rotation it holds index 0 and no live owner, and after an
+    # unchanged one its kept index and owner already belong to these same messages.
     ka_state_copy_request_messages "$request_dir" "$target_dir" || return 1
-    ka_state_pending_submit_value "$uuid"
-    pending_submit=$REPLY
-    [[ $pending_submit == 0 ]] && pending_submit=0 || pending_submit=STALE
     KA_T_PENDING_SUBMIT[$uuid]=$pending_submit
     KA_T_MODE[$uuid]=$mode
     KA_T_NOTIFY[$uuid]=$notifications
@@ -906,12 +994,31 @@ ka_state_message_at() {
     cat -- "$file"
 }
 
+# Role: Read a request's optional default-profile policy into REPLY (0 or 1).
+# An absent profile_update keeps the historical default of updating the profile.
+ka_state_request_profile_policy() {
+    local request_dir=$1
+    REPLY=1
+    [[ -e $request_dir/profile_update || -L $request_dir/profile_update ]] || return 0
+    ka_request_read_scalar "$request_dir/profile_update" 64 || {
+        ka_error 'profile update policy is missing or not a regular file'
+        return 1
+    }
+    [[ $REPLY == 0 || $REPLY == 1 ]] || {
+        ka_error 'profile update policy must be 0 or 1'
+        return 1
+    }
+}
+
 # Role: Create a new ACTIVE keep-alive from a currently AVAILABLE discovered session.
 ka_state_create_target() {
     local uuid=$1 request_dir=$2
     ka_state_has_target "$uuid" && { ka_error 'target already has a keep-alive'; return 1; }
     [[ -n ${KA_D_TYPE[$uuid]+x} ]] || { ka_error 'selected terminal session is no longer available'; return 1; }
     ka_profile_validate_request "$request_dir" || return 1
+    local profile_update
+    ka_state_request_profile_policy "$request_dir" || return 1
+    profile_update=$REPLY
 
     local target_dir main_interval secondary_interval max_len
     ka_state_target_dir "$uuid"; target_dir=$REPLY
@@ -981,7 +1088,7 @@ ka_state_create_target() {
         ka_error 'could not save target runtime state'
         return 1
     fi
-    if ! ka_profile_update_from_request "$request_dir"; then
+    if ((profile_update == 1)) && ! ka_profile_update_from_request "$request_dir"; then
         ka_state_delete_target "$uuid" || true
         [[ -n ${KA_LAST_ERROR:-} ]] || ka_error 'could not update the persistent profile'
         return 1
@@ -990,26 +1097,18 @@ ka_state_create_target() {
 }
 
 # Role: Reconfigure one existing target and optionally update the single global profile.
-# Applying configuration deliberately resets that target's main/secondary countdowns. An
-# absent profile_update field preserves the wizard's historical default of updating it.
+# Countdowns keep running through it; ka_state_apply_request_configuration says which
+# ones a change restarts or caps. An absent profile_update field preserves the historical
+# default of updating the profile.
 ka_state_configure_target() {
     local uuid=$1 request_dir=$2
     ka_state_has_target "$uuid" || { ka_error 'unknown keep-alive target'; return 1; }
     [[ ${KA_T_STATUS[$uuid]} != UNAVAILABLE ]] || { ka_error 'unavailable targets cannot be reconfigured'; return 1; }
     ka_profile_validate_request "$request_dir" || return 1
 
-    local profile_update=1
-    if [[ -e $request_dir/profile_update || -L $request_dir/profile_update ]]; then
-        ka_request_read_scalar "$request_dir/profile_update" 64 || {
-            ka_error 'profile update policy is missing or not a regular file'
-            return 1
-        }
-        profile_update=$REPLY
-        [[ $profile_update == 0 || $profile_update == 1 ]] || {
-            ka_error 'profile update policy must be 0 or 1'
-            return 1
-        }
-    fi
+    local profile_update
+    ka_state_request_profile_policy "$request_dir" || return 1
+    profile_update=$REPLY
 
     local rollback_dir failure
     local old_mode=${KA_T_MODE[$uuid]} old_notifications=${KA_T_NOTIFY[$uuid]}
@@ -1020,7 +1119,7 @@ ka_state_configure_target() {
     local old_secondary_remaining=${KA_T_SECONDARY_REMAIN[$uuid]}
     local old_secondary_done=${KA_T_SECONDARY_DONE[$uuid]:-0}
     local old_secondary_message=${KA_T_SECONDARY_MESSAGE[$uuid]-}
-    # Applying a configuration marks any owed submit STALE; a rollback restores the old
+    # Applying a configuration may mark an owed submit STALE; a rollback restores the old
     # rotation, so it must restore the owner too or its completion would stop advancing it.
     local old_pending_submit=${KA_T_PENDING_SUBMIT[$uuid]:-0}
     rollback_dir=$(mktemp -d "$KA_RUNTIME_DIR/configure.staged.XXXXXX") \
@@ -1035,11 +1134,9 @@ ka_state_configure_target() {
         if ! ka_state_restore_configuration "$uuid" "$rollback_dir" \
             "$old_mode" "$old_notifications" "$old_main_interval" "$old_main_remaining" \
             "$old_main_index" "$old_secondary_enabled" "$old_secondary_interval" \
-            "$old_secondary_remaining" "$old_secondary_done" "$old_secondary_message"; then
+            "$old_secondary_remaining" "$old_secondary_done" "$old_secondary_message" \
+            "$old_pending_submit"; then
             failure+='; restoring the previous target configuration also failed'
-        else
-            KA_T_PENDING_SUBMIT[$uuid]=$old_pending_submit
-            ka_state_save_target "$uuid" || ka_state_mark_dirty "$uuid"
         fi
         rm -rf -- "$rollback_dir"
         ka_error "$failure"
@@ -1050,18 +1147,16 @@ ka_state_configure_target() {
         if ! ka_state_restore_configuration "$uuid" "$rollback_dir" \
             "$old_mode" "$old_notifications" "$old_main_interval" "$old_main_remaining" \
             "$old_main_index" "$old_secondary_enabled" "$old_secondary_interval" \
-            "$old_secondary_remaining" "$old_secondary_done" "$old_secondary_message"; then
+            "$old_secondary_remaining" "$old_secondary_done" "$old_secondary_message" \
+            "$old_pending_submit"; then
             failure+='; restoring the previous target configuration also failed'
-        else
-            KA_T_PENDING_SUBMIT[$uuid]=$old_pending_submit
-            ka_state_save_target "$uuid" || ka_state_mark_dirty "$uuid"
         fi
         rm -rf -- "$rollback_dir"
         ka_error "$failure"
         return 1
     fi
     rm -rf -- "$rollback_dir"
-    ka_log_event "$uuid" CONFIG 'configuration updated; countdowns reset' OK
+    ka_log_event "$uuid" CONFIG "configuration updated; ${KA_STATE_CONFIG_EFFECT:-countdowns kept}" OK
 }
 
 # Role: Permanently remove one keep-alive runtime record and its independent event history.

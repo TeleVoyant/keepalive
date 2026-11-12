@@ -1,5 +1,25 @@
 # Observed Risks, Gaps, and Open Questions
 
+## Resolved on 2026-11-12: saving configuration restarted every timer
+
+Before: every CONFIGURE (TUI or CLI) set both countdowns to their full intervals, rewound
+the rotation to message 1, re-armed a fired secondary, and marked any owed Enter STALE -
+even for a notifications-only change - and the TUI forced a six-step walk to reach any one
+setting. Now saving keeps countdown state (rules in docs/ARCHITECTURE.md, Pending-submit
+ownership) and the TUI edits any field from one list with live countdowns.
+
+Accepted residuals:
+
+- The editor's live countdown can be about a second off: it counts locally from the last
+  index publication it noticed, which a watched daemon refreshes every second and an
+  unwatched one every fifteen.
+- With three save effects at once, the second preview line holds two of them and may be
+  truncated on a narrow terminal; the change markers still show every changed field.
+- Digits open their field directly rather than only selecting it (the footer says so).
+- CLI `create` has no `--no-profile`; it always updates the profile (with the profile's own
+  values, so the profile does not change).
+- Live checklist item 47 (editor on a real ACTIVE target) has not been run on a desktop.
+
 ## Resolved on 2026-10-29: Orca 1.4.241 schema failures, jq dependency, Orca CLI cost
 
 Reported: "occasionally incompatible Orca parsing". Evidence (live journal, read-only): 2,292
@@ -713,8 +733,8 @@ real change rather than four times a second.
   decoding is tested from byte streams, but no committed test drives a real pty.
 - `ka_tui_prompt_line` uses a blocking `read` with no timeout and no cancel key, so
   a user inside a custom-value prompt must press Enter to leave it.
-- `q` closes the manager, detail, and log views but not the wizard, where only `Esc`
-  cancels. This is what the on-screen hints say, but it is an inconsistency.
+- `q` and `Esc` both close the settings editor (asking first when edits are unsaved); its
+  footer advertises only `Esc`. The field screens still take only `Esc`.
 
 ## Mitigated through 2026-09-30: directory replacement commits through staged swaps
 
@@ -1168,8 +1188,8 @@ The 2026-08-22 overhaul resolved the layout, clearing, glyph, sanitizing, key
 decoding, and leak items previously listed here. What remains:
 
 - Unicode cell width is still approximated by character count.
-- No committed test drives the manager/detail/wizard/log loops through a real
-  pseudo-terminal; see "Remaining TUI gaps" above.
+- `tests/test_tui_pty.sh` drives the real client through a pseudo-terminal; review it for
+  remaining gaps in settings editing, saving, and discarding.
 - The wizard's custom-value prompt cannot be cancelled without pressing Enter.
 
 ## Semantics that deserve explicit decisions/tests

@@ -13,7 +13,7 @@ Version: **1.1.1** · [Changelog](CHANGELOG.md) · [MIT licensed](LICENSE)
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Process model, identity, state schemas, IPC, scheduler, recovery |
 | [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) | Every environment variable, with defaults and when to change them |
 | [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) | Symptom-first fixes, from `unknown` session names to CPU cost |
-| [`docs/TESTING.md`](docs/TESTING.md) | What the 1948 assertions cover, and how to add one |
+| [`docs/TESTING.md`](docs/TESTING.md) | What the 2331 assertions cover, and how to add one |
 | [`docs/MAINTENANCE.md`](docs/MAINTENANCE.md) | Safety invariants, module map, live checklist, release flow |
 | [`docs/VALIDATION.md`](docs/VALIDATION.md) | Evidence recorded for this release |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Conventions the automated checks enforce |
@@ -28,7 +28,7 @@ Version: **1.1.1** · [Changelog](CHANGELOG.md) · [MIT licensed](LICENSE)
 - Keep unavailable targets visible until the user explicitly deletes them.
 - Make every keep-alive's event history independent and runtime-only; logs follow the
   selected runtime directory (normally removed at full logout/reboot).
-- Keep one persistent default profile. Saving configuration updates the selected keep-alive and the profile, but **never mutates other active keep-alives**.
+- Keep one persistent default profile. Creating or configuring a keep-alive updates it by default (the editor's "Save as default" field and `configure --no-profile` opt out), but **never mutates other active keep-alives**.
 - Support Nerd Font UI icons while providing `--no-icons`, `--no-color`, and `--ascii` client modes.
 - Keep the implementation maintainable Bash: focused modules, comments describing every function's role, data-only state files, and isolated mock-backed tests.
 
@@ -263,8 +263,7 @@ keepalive delete <uuid>
 and `--delivery-mode message-enter|enter-only`. Intervals are integer seconds in the
 range `1..999999999`; messages are bounded by the configured message limit and are
 stored as data. Omitted settings are copied from
-the target's current checkpoint, and configuration resets that target's timers as
-the TUI wizard does. It updates the one persistent profile by default; pass
+the target's current checkpoint, and saving keeps the countdowns: ACTIVE ones carry on and PAUSED ones stay frozen. The main countdown keeps its remaining time, capped at a shorter new interval. The rotation restarts at message 1, and an owed Enter is dropped, only if the messages changed (ignoring one final newline). The secondary prompt keeps its countdown and one-shot state unless its own settings change; then an armed prompt keeps counting (capped at a shorter interval), and one that already fired, or is newly enabled, starts a fresh arming. Notifications and delivery mode never touch a timer. It updates the one persistent profile by default; pass
 `--no-profile` to change only the selected target (`--profile` makes the default
 explicit). A refusal from the daemon is printed with terminal controls sanitized and
 returns non-zero.
@@ -333,7 +332,7 @@ swallowed.
 ### Rendering
 
 The alternate-screen renderer fully clears the visible terminal on first draw,
-between manager/detail/wizard/log views, and after resize. Steady redraws within
+between manager/detail/settings-editor/log views, and after resize. Steady redraws within
 one view reuse the screen to avoid visible flashing, and a frame is only redrawn
 when the published index, the selection, or the clock actually changes — an idle
 manager does not repaint continuously.
@@ -364,7 +363,7 @@ r           reset main timer
 p           pause/resume target
  e          send one Enter now, then resume MESSAGE + ENTER
  E          switch to ENTER ONLY from now on
-c           guided configuration wizard
+c           settings editor
 l           full independent event log
 d           delete this keep-alive record (never kills AI/Konsole)
 Esc         back to manager
@@ -386,16 +385,23 @@ Esc          back
 
 A recognized but unmanaged AI session appears as green **AVAILABLE**. Select it with arrows + Enter or `1`–`9`.
 
-The guided six-step form configures:
+One settings screen lists everything, and any field can be changed in any order: select it
+with the arrows and Enter, or press its number.
 
 1. ordered main message rotation;
 2. main interval (25/15/5 minutes or custom);
 3. optional secondary prompt and interval;
 4. desktop notifications;
 5. whole-target delivery mode (`MESSAGE + ENTER` or `ENTER ONLY`);
-6. review and explicit save.
+6. whether saving also makes these settings the default profile.
 
-The new keep-alive starts ACTIVE with full countdowns.
+Changed fields are marked with `*`, and `s` saves. Esc closes the screen, asking first if
+anything changed. The new keep-alive starts ACTIVE with full countdowns.
+
+The same screen edits an existing keep-alive (`c` in its detail view). Its countdowns stay
+on screen and keep ticking while you edit (a PAUSED one stays frozen), and saving keeps
+them: the screen says beforehand what a change will do to them, for example that 56
+minutes left would be capped at a new 30-minute interval.
 
 The daemon accepts main-message rotations only in canonical contiguous form
 (`001`, `002`, ... with no gaps or empty slots). Malformed request data is rejected
@@ -408,7 +414,7 @@ There is exactly one persistent profile.
 When a keep-alive is created or configured:
 
 - the selected target receives the submitted settings;
-- the global profile is updated to those settings by default (`configure --no-profile` opts out);
+- the global profile is updated to those settings by default; the editor's "Save as default" field opts out for creating and configuring, and `configure --no-profile` for the CLI;
 - all other already-active keep-alives remain unchanged;
 - a future new keep-alive starts from the latest profile values.
 
@@ -506,7 +512,7 @@ gracefully so the socket can start the updated one.
 
 An open manager TUI notices the update on its own: once the installed command resolves
 to new code and the daemon has restarted onto it, the TUI restarts itself in place and
-returns to the row that was selected. It never does this mid-wizard, and a TUI started
+returns to the row that was selected. It never does this while a settings editor is open, and a TUI started
 from a checkout that the update did not touch keeps running as it is.
 
 ## Target identity and no automatic reattachment
@@ -861,7 +867,7 @@ keepalive-manager/
 │   ├── service.sh            daemon lifecycle/event loop
 │   └── tui/
 │       ├── screen.sh         terminal primitives/colors/bars/keys
-│       ├── wizard.sh         guided create/configure flow
+│       ├── wizard.sh         settings editor for create/configure
 │       └── tui.sh            manager/detail/log screens
 ├── systemd/
 │   ├── keepalive.socket

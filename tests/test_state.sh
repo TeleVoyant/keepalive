@@ -116,12 +116,26 @@ assert_eq 0 "${KA_T_STRIKES[$uuid]}" 'a successful validation clears accumulated
 unset KEEPALIVE_VALIDATION_STRIKES
 source "$TEST_ROOT/lib/konsole.sh"
 
-# The one-shot secondary re-arms when the target is reconfigured, alongside the countdowns.
+# An unchanged configuration keeps the one-shot secondary's fired state.
 KA_T_SECONDARY_DONE[$uuid]=1
+unchanged_recfg="$TEST_TMP/unchanged-rearm"
+ka_state_copy_target_to_request "$uuid" "$unchanged_recfg"
+ka_write_scalar "$unchanged_recfg/profile_update" 0
+old_secondary_remaining=${KA_T_SECONDARY_REMAIN[$uuid]}
+ka_state_configure_target "$uuid" "$unchanged_recfg"
+assert_eq 1 "${KA_T_SECONDARY_DONE[$uuid]}" 'unchanged configuration preserves the fired one-shot secondary'
+assert_eq "$old_secondary_remaining" "${KA_T_SECONDARY_REMAIN[$uuid]}" \
+    'unchanged configuration preserves the secondary countdown'
+
+# Newly enabling the secondary changes its settings, so it starts a fresh one-shot countdown.
 recfg="$TEST_TMP/rearm"
 ka_state_copy_target_to_request "$uuid" "$recfg"
+ka_write_scalar "$recfg/profile_update" 0
+ka_write_scalar "$recfg/secondary_enabled" 1
+ka_write_scalar "$recfg/secondary_interval" 45
 ka_state_configure_target "$uuid" "$recfg"
-assert_eq 0 "${KA_T_SECONDARY_DONE[$uuid]}" 'reconfiguring re-arms the one-shot secondary'
+assert_eq 0 "${KA_T_SECONDARY_DONE[$uuid]}" 'changing secondary settings re-arms the one-shot secondary'
+assert_eq 45 "${KA_T_SECONDARY_REMAIN[$uuid]}" 'newly enabled secondary starts at its interval'
 
 # secondary_done and backend are deliberately optional so older Konsole checkpoints load.
 ka_state_save_target "$uuid"

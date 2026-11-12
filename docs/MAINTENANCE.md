@@ -52,7 +52,11 @@ Do not merge changes that weaken these rules:
     must not erase another backend's rows.
 30. Complete a partially delivered message; never re-send it.
 31. Verify the runtime base before use when it is not an XDG runtime directory.
-32. The secondary prompt fires once per arming; only reconfiguration re-arms it.
+32. The secondary prompt fires once per arming. Saving configuration leaves it alone unless
+    its enabled, interval, or message value changed; then an armed countdown is kept (capped
+    if shortened) and a fired or newly enabled prompt starts a fresh arming. More generally,
+    saving keeps countdown state: never reset a timer whose settings did not change, and cap
+    (never extend) a countdown whose interval shrank.
 33. Never write `local a=$1 b="$a..."`: bash expands every assignment word before creating
     any of them. `tests/test_function_comments.sh` enforces this.
 34. Resolve the runtime base by precedence; never assume `XDG_RUNTIME_DIR` is set.
@@ -228,22 +232,27 @@ On a real systemd user session (and on KDE as well when validating Konsole):
 14. Test `--no-icons`, `NO_COLOR=1`, and `--ascii` from another terminal emulator.
 15. Temporarily block the session bus/helper and confirm timeout failures do not make a valid target sticky UNAVAILABLE.
 16. Corrupt a disposable runtime checkpoint and confirm it moves to `quarantine/` with a reason rather than loading.
-17. Navigate manager → detail → logs/wizard → back and resize each view; confirm no previous-view cells remain.
+17. Navigate manager → detail → logs/settings editor → back and resize each view; confirm no previous-view cells remain.
 18. Confirm `keepalive list` shows real project directory names rather than `unknown`/`?`; a regression here means the service unit gained a mount-namespace directive.
 19. Press Right/Left arrow, a function key, and a keypad key in the manager; the client must ignore them and stay open.
-20. Open the wizard and cancel with `Esc` from step 1 and from a later step; the manager must return, not exit.
+20. Open the settings editor and press `Esc` with no changes; it must close at once. Then
+    change a field, return to the list, and press `Esc`; it must ask, `n` must keep the edits,
+    and `y` must discard them. `Esc` inside a field screen returns to the list unchanged. No
+    path may exit the client.
 21. Resize the terminal from very wide down to 52 columns in each view; no line may wrap and no border may overrun.
-22. Compare the default, `--no-icons`, `NO_COLOR=1`, and `--ascii` renderings of the manager, target detail, and every wizard step.
-23. Create a keep-alive through the wizard using a **custom** message and a custom interval; both must be accepted and stored verbatim.
+22. Compare the default, `--no-icons`, `NO_COLOR=1`, and `--ascii` renderings of the manager, target detail, the settings editor, and each field screen (Save as default toggles in place).
+23. Create a keep-alive through the settings editor using a **custom** message and a custom interval; both must be accepted and stored verbatim.
+    Repeat with Save as default off: the keep-alive gets the edits and the default profile stays unchanged.
 24. Drive the full lifecycle from the CLI: `create`, `configure`, `pause`, `resume`, `send`, `reset`, `mode`, `delete`, and `list --json`.
 25. Confirm `systemctl --user stop keepalive.service` logs no `Failed with result`.
-26. Press `r` repeatedly in target detail and add a message in the wizard; no key-hint line may appear twice.
+26. Press `r` repeatedly in target detail and add a message in the settings editor; no key-hint line may appear twice.
 27. Re-run the installer while the daemon is active with an ACTIVE and a PAUSED target and
     the manager TUI open; it must restart the service, print `Reloaded 2 running
     keep-alive(s)`, keep both countdowns, and the TUI must restart itself on the same row.
 28. Press `e` in target detail: one Enter must be sent and delivery must return to MESSAGE+ENTER.
 29. Press `E`: delivery must stay ENTER ONLY until `e` or a reconfigure changes it.
-30. Enable the secondary prompt and let it fire; it must not fire a second time until reconfigured.
+30. Enable the secondary prompt and let it fire; saving an unrelated change must leave it fired, and
+    only changing one of its own settings may arm it again (see invariant 32).
 31. Run `env -u XDG_RUNTIME_DIR keepalive status` and `keepalive doctor`; both must find the running daemon and name the runtime source.
 32. Kill the daemon with SIGKILL, leaving its FIFO behind, then run a client; it must time out rather than hang.
 33. Start the daemon with a deliberately invalid knob such as `KEEPALIVE_HEALTH_INTERVAL=2s`; it must warn once and keep running on the default.
@@ -272,6 +281,12 @@ On a real systemd user session (and on KDE as well when validating Konsole):
     (`grep ctxt /proc/<pid>/status` before and after); voluntary context switches must
     grow by roughly a dozen, not hundreds. Attach the TUI and confirm `clients.seen`
     holds bare digits and the AVAILABLE rows refresh within a few seconds.
+47. Open the settings editor on an ACTIVE keep-alive with more than 30 minutes left: its countdown
+    must keep ticking on screen. Change only notifications and save; the countdown must lose
+    only the time that passed. Shorten the main interval below the remaining time and save;
+    the countdown must be capped at the new interval, as the editor said beforehand. Lengthen
+    it; the countdown must carry on from where it was. Let the secondary fire, then save an
+    unrelated change; it must stay fired until one of its own settings changes.
 
 ## Cutting a release
 
