@@ -4,8 +4,8 @@ This directory is a durable, evidence-based handoff for future work on this
 repository.
 
 It records the repository understanding produced from a full source, test, documentation,
-service-unit, and history review, most recently refreshed for the 2026-10-02 uncommitted
-fix round on top of the current release.
+service-unit, and history review, most recently refreshed for the 2026-11-12
+settings-editor round (committed and installed 2026-11-13).
 
 It does **not** contain hidden model instructions, private chain-of-thought, secrets,
 or transient platform state. It contains the useful project context another
@@ -19,15 +19,16 @@ maintainer or coding agent needs in order to continue safely.
   GitHub release "Keep Alive Manager 1.1.1" carries `keepalive-1.1.1.tar.gz` and
   `SHA256SUMS`; it was published from the tag with the release workflow's own steps after
   the tag's workflow run stopped at validation (see DEVELOPMENT.md, release lessons).
-- `master` is at `0040a8a` = `v1.1.1`, the release-workflow UTF-8 locale fix (`418e2e6`), an
-  `.agents/` notes refresh (`67611b8`), and the **Orca 1.4.241 round** (`0040a8a`, 2026-10-29):
-  a root `CLAUDE.md`, row-tolerant Orca discovery with named failure gates, codes 23/24,
+- `master` = `v1.1.1`, the release-workflow UTF-8 locale fix (`418e2e6`), an `.agents/`
+  notes refresh (`67611b8`), the **Orca 1.4.241 round** (`0040a8a`, 2026-10-29: a root
+  `CLAUDE.md`, row-tolerant Orca discovery with named failure gates, codes 23/24,
   single-document responses, paced Orca CLI starts, quieter episode logging, and
-  `lib/orca.awk` so Orca works without `jq`. Uncommitted on top (2026-11-12): the
-  **settings-editor round** - one-screen TUI settings editor with live countdowns, and
-  countdown-preserving CONFIGURE (DEVELOPMENT.md has the details). Both rounds are under
-  `[Unreleased]` in CHANGELOG.md and neither is installed on this host yet. GitHub CI is green on `7b723f9` and `418e2e6` (8 jobs: ShellCheck, Ubuntu, Debian, Fedora, Arch, non-root
-  Debian, Bash 5.0 and 5.1) - the first green CI since before 1.1.0.
+  `lib/orca.awk` so Orca works without `jq`), and the **settings-editor round** (`54fcc26`,
+  2026-11-12: one-screen TUI settings editor with live countdowns, and countdown-preserving
+  CONFIGURE; DEVELOPMENT.md has the details). Both rounds are under `[Unreleased]` in
+  CHANGELOG.md; the version string is still 1.1.1. GitHub CI is green on `7b723f9` and
+  `418e2e6` (8 jobs: ShellCheck, Ubuntu, Debian, Fedora, Arch, non-root Debian, Bash 5.0
+  and 5.1) - the first green CI since before 1.1.0.
 - Previous releases: `v1.1.0` at `cf27db4`, `v1.0.0` at `2ea6951`; Orca integration at
   `ea3d6f3`.
 - Product version: `1.1.1`
@@ -43,8 +44,10 @@ maintainer or coding agent needs in order to continue safely.
   results are in RISKS.md; method and safety rules in DEVELOPMENT.md.
 - Tests: 36 files, 2331 assertions (`./tests/run.sh`; dev-check is the final gate) as of the
   2026-11-12 settings-editor round; 1.1.1 itself shipped with 31 files and 1519.
-- Installed on the development host from the release tree (2026-10-02); the live
-  daemon runs 1.1.1. The update reloaded the one ACTIVE Orca keep-alive with its countdown,
+- Installed on the development host from `54fcc26` (2026-11-13): the installer reloaded
+  both ACTIVE Orca keep-alives with their countdowns continuing (secondary state kept),
+  quarantine stayed empty, and `doctor` passed with both backends reachable. Earlier, the
+  1.1.1 install (2026-10-02) reloaded the one ACTIVE Orca keep-alive with its countdown,
   discovery found the same five AVAILABLE sessions as 1.1.0, `doctor` passed with both
   backends reachable, and the daemon measured 0.20% CPU over 60 s (1.1.0: 0.30%) and
   about 11 MB RSS (1.1.0: 8.7 MB).

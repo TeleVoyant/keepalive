@@ -1,6 +1,6 @@
 # Development and Operations Memory
 
-## Settings-editor round — 2026-11-12 (uncommitted on top of `0040a8a`)
+## Settings-editor round — 2026-11-12 (committed as `54fcc26`, installed 2026-11-13)
 
 Trigger: the user found configuration editing clumsy and asked for a redesign: pick any
 setting to change while the countdown keeps running in the background, and resume the
@@ -42,7 +42,7 @@ Lessons from this round:
 - `orca orchestration send` to a finished worker starts a follow-up Task on the same
   context, which is how the reviewers were reused as test writers.
 
-## Orca 1.4.241 round — 2026-10-29 (uncommitted on top of `67611b8`)
+## Orca 1.4.241 round — 2026-10-29 (committed as `0040a8a`)
 
 Trigger: the user saw "occasionally incompatible Orca parsing" after Orca updated to 1.4.241,
 asked for keepalive to be brought up to date and made cheaper to run, and then for Orca to
