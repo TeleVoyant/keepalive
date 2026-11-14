@@ -40,7 +40,7 @@ run_no_jq_probe() {
         KEEPALIVE_ORCA_ENABLED=1 KEEPALIVE_ORCA_PARSER=auto bash "$probe" >"$output" 2>&1
 }
 
-# Role: Generate compact, pretty-printed, and boundary synthetic JSON files for the differential corpus.
+# Role: Generate compact, pretty-printed, duplicate-key, and boundary JSON files for reader checks.
 build_corpus() {
     local directory=$1 base row shell index deep
     mkdir -p "$directory"
@@ -143,8 +143,8 @@ long_title["result"]["totalCount"] = 1
 )
 PY
     printf '{"id":"corpus-list","ok":true,"result":{"terminals":[{"handle":"term-codex","ptyId":"pty-good","ptyId":null,"incarnationId":"inc","worktreeId":"wt","worktreePath":"/work","executionHostId":"local","tabId":"tab","leafId":"leaf","agentIdentity":"codex","title":"dup","connected":true,"writable":true,"orphaned":false}],"truncated":false,"totalCount":1},"_meta":{"runtimeId":"runtime-corpus"}}\n' >"$directory/list-duplicate-keys.json"
-    # jq 1.7 counts the envelope object in its depth ceiling; use 253/254 for
-    # total documents of roughly 255/256, and 256 for the deliberately too-deep case.
+    # The shared counter includes enclosing objects and object-member key slots.
+    # These payloads cover nesting around the same 256-slot ceiling for both readers.
     for deep_spec in 255:253 256:254 257:256; do
         IFS=: read -r deep_label deep_depth <<<"$deep_spec"
         deep=0
@@ -154,8 +154,7 @@ PY
             "$deep" >"$directory/deep-$deep_label.json"
     done
     # These extra members are deliberately unread by the adapter. Their nesting still
-    # exercises the parser stack around jq 1.7's exact 256-entry refusal boundary while
-    # the list row itself remains valid and projectable.
+    # exercises the shared 256-slot refusal boundary while the list row remains projectable.
     python3 - "$directory" <<'PY'
 import json
 import pathlib
@@ -177,6 +176,67 @@ for kind, depths in (("array", range(248, 257)), ("object", range(122, 129))):
             json.dumps(document, ensure_ascii=False, separators=(",", ":")) + "\n",
             encoding="utf-8",
         )
+PY
+    python3 - "$directory" <<'PY'
+import json
+import pathlib
+import sys
+
+directory = pathlib.Path(sys.argv[1])
+valid = json.loads((directory / "list-valid.json").read_text(encoding="utf-8"))
+row = valid["result"]["terminals"][0]
+one_row = dict(valid)
+one_row["result"] = dict(valid["result"], terminals=[row], totalCount=1)
+one_row_text = json.dumps(one_row, ensure_ascii=False, separators=(",", ":"))
+(directory / "list-one-row-valid.json").write_text(one_row_text + "\n", encoding="utf-8")
+
+# The old value exceeds 256 stack slots. jq 1.8 keeps only the later duplicate,
+# while the streaming awk parser sees and refuses both values.
+deep = "0"
+for _ in range(255):
+    deep = "[" + deep + "]"
+row_text = json.dumps(row, ensure_ascii=False, separators=(",", ":"))
+duplicate_row_text = row_text.replace(
+    '{"handle":', '{"shadow":' + deep + ',"shadow":0,"handle":', 1
+)
+if duplicate_row_text == row_text:
+    raise RuntimeError("could not insert the repeated shadow member")
+row_array = json.dumps([row], ensure_ascii=False, separators=(",", ":"))
+duplicate_array = "[" + duplicate_row_text + "]"
+duplicate_document = one_row_text.replace(row_array, duplicate_array, 1)
+if duplicate_document == one_row_text:
+    raise RuntimeError("could not build the one-row repeated-key response")
+(directory / "list-duplicate-deep-key.json").write_text(
+    duplicate_document + "\n", encoding="utf-8"
+)
+PY
+    python3 - "$directory" <<'PY'
+import json
+import pathlib
+import sys
+
+directory = pathlib.Path(sys.argv[1])
+
+# Role: Build an unread value with the requested number of nested array containers.
+def nested_arrays(depth):
+    value = None
+    for _ in range(depth):
+        value = [value]
+    return value
+
+samples = {
+    "show": "show-valid.json",
+    "send": "send-valid.json",
+    "status": "status-reachable.json",
+    "error": "error-stale.json",
+}
+for operation, filename in samples.items():
+    document = json.loads((directory / filename).read_text(encoding="utf-8"))
+    document["unreadDeep"] = nested_arrays(255)
+    (directory / f"deep-{operation}.json").write_text(
+        json.dumps(document, ensure_ascii=False, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
 PY
     python3 - "$directory/oversize.json" <<'PY'
 import pathlib
@@ -218,6 +278,66 @@ assert_probe_parity() {
     fi
 }
 
+# Role: Verify the jq depth guard works even when jq's native parser accepts an over-limit document.
+assert_jq_depth_guard() {
+    local binary=$1 input=$2
+    local native_output="$TEST_TMP/native-depth.out" guard_output="$TEST_TMP/guard-depth.out"
+    local KA_ORCA_JQ=$binary native_rc=0 guard_rc=0
+    if "$binary" -n '[inputs] | length' <"$input" >"$native_output" 2>/dev/null; then
+        assert_eq 0 "$native_rc" 'jq native parser accepts the unique-key over-limit document'
+        assert_eq 1 "$(<"$native_output")" 'jq native parser reads exactly one depth probe document'
+    else
+        native_rc=$?
+        test_skip 'ka_orca_jq shared depth guard independent of jq native limit' \
+            "native jq refuses the document first (status $native_rc)"
+        return
+    fi
+    if ka_orca_jq -r 'ka_orca_read_documents | length' \
+        <"$input" >"$guard_output" 2>/dev/null; then guard_rc=0; else guard_rc=$?; fi
+    assert_true 'ka_orca_jq rejects unique-key over-limit input under a permissive native jq' \
+        test "$guard_rc" -ne 0
+    assert_eq '' "$(<"$guard_output")" 'ka_orca_jq emits no result for a guarded depth refusal'
+}
+
+# Role: Ensure awk refusal is never paired with a complete marker when jq refuses the duplicate-key input.
+duplicate_key_reader_direction_is_safe() {
+    local jq_output=$1 awk_output=$2 refusal_output=$3
+    if files_equal "$jq_output" "$refusal_output"; then
+        if grep -Fq '#COMPLETE' "$awk_output"; then return 1; fi
+    fi
+    return 0
+}
+
+# Role: Confirm the duplicate-key document yields the permitted jq result and a conservative awk refusal.
+assert_duplicate_key_depth() {
+    local jq_binary=$1 awk_binary=$2 input=$3 baseline_input=$4
+    local jq_output="$TEST_TMP/duplicate-depth-jq.out" jq_rc="$TEST_TMP/duplicate-depth-jq.rc"
+    local awk_output="$TEST_TMP/duplicate-depth-awk.out" awk_rc="$TEST_TMP/duplicate-depth-awk.rc"
+    local baseline_output="$TEST_TMP/duplicate-depth-baseline.out" baseline_rc="$TEST_TMP/duplicate-depth-baseline.rc"
+    local refusal_output="$TEST_TMP/duplicate-depth-refusal.out"
+    printf '#INCOMPLETE\tschema:not-json\n' >"$refusal_output"
+    run_probe_once jq "$jq_binary" list "$input" "$jq_output" "$jq_rc"
+    run_probe_once awk "$awk_binary" list "$input" "$awk_output" "$awk_rc"
+    run_probe_once jq "$jq_binary" list "$baseline_input" "$baseline_output" "$baseline_rc"
+    assert_eq 0 "$(<"$awk_rc")" 'awk duplicate-key depth result is normalized in-band'
+    assert_eq $'#INCOMPLETE\tschema:not-json' "$(<"$awk_output")" \
+        'awk refuses an earlier over-limit duplicate-key value'
+    assert_eq 0 "$(<"$jq_rc")" 'jq duplicate-key depth result is normalized in-band'
+    assert_eq 0 "$(<"$baseline_rc")" 'jq baseline one-row response is normalized in-band'
+    if files_equal "$jq_output" "$refusal_output"; then
+        assert_true 'jq emits the shared schema refusal when it cannot parse the earlier value' true
+    elif files_equal "$jq_output" "$baseline_output"; then
+        assert_true 'jq 1.8 projects the row after replacing the earlier duplicate value' \
+            grep -Fq '#COMPLETE' "$jq_output"
+        assert_eq 1 "$(grep -Ec '^[^#]' "$jq_output")" 'jq 1.8 emits exactly the projected row'
+    else
+        printf 'unexpected jq duplicate-key output:\n'; od -An -tx1c "$jq_output"
+        assert_true 'jq emits only the permitted duplicate-key outcome' false
+    fi
+    assert_true 'awk never accepts a duplicate-key input that jq refuses' \
+        duplicate_key_reader_direction_is_safe "$jq_output" "$awk_output" "$refusal_output"
+}
+
 # Role: Compare compact and pretty-printed JSON through one selected reader.
 assert_format_identity() {
     local parser=$1 binary=$2 operation=$3 compact=$4 pretty=$5 label=$6
@@ -235,7 +355,7 @@ assert_format_identity() {
     fi
 }
 
-# Role: Check the jq 1.7 observable result at one nested-member depth boundary.
+# Role: Check the observable result at one shared 256-slot nested-member boundary.
 assert_depth_boundary() {
     local input=$1 label=$2 expected=$3
     local output="$TEST_TMP/depth-boundary.out" rcfile="$TEST_TMP/depth-boundary.rc"
@@ -245,8 +365,35 @@ assert_depth_boundary() {
         assert_false "$label has no schema refusal under jq" grep -Fq '#INCOMPLETE' "$output"
     else
         assert_eq 0 "$(<"$rcfile")" "$label returns a normalized parser result under jq"
-        assert_eq $'#INCOMPLETE\tschema:not-json' "$(<"$output")" "$label refuses at the jq depth boundary"
+        assert_eq $'#INCOMPLETE\tschema:not-json' "$(<"$output")" "$label refuses at the shared depth boundary"
     fi
+}
+
+# Role: Verify the awk reader accepts and refuses at its default 256 slots and honors an override.
+assert_awk_depth_controls() {
+    local binary=$1 accepted_input=$2 refused_input=$3
+    local low_output="$TEST_TMP/awk-low-depth.out" default_output="$TEST_TMP/awk-default-depth.out"
+    local high_output="$TEST_TMP/awk-over-default-depth.out" rc
+    if "$binary" -v op=list -v max_depth=8 -f "$KA_ORCA_AWK_PROGRAM" \
+        <"$accepted_input" >"$low_output" 2>/dev/null; then rc=0; else rc=$?; fi
+    assert_eq 2 "$rc" 'orca.awk refuses a normally accepted document at max_depth=8'
+    assert_eq '' "$(<"$low_output")" 'orca.awk emits no partial output after the max_depth=8 refusal'
+    if "$binary" -v op=list -f "$KA_ORCA_AWK_PROGRAM" \
+        <"$accepted_input" >"$default_output" 2>/dev/null; then rc=0; else rc=$?; fi
+    assert_eq 0 "$rc" 'orca.awk accepts the near-boundary document with its default depth'
+    assert_eq $'#COMPLETE' "$(<"$default_output")" 'orca.awk defaults to the shared 256-slot limit'
+    if "$binary" -v op=list -f "$KA_ORCA_AWK_PROGRAM" \
+        <"$refused_input" >"$high_output" 2>/dev/null; then rc=0; else rc=$?; fi
+    assert_eq 2 "$rc" 'orca.awk default refuses a document beyond 256 parser-stack slots'
+    assert_eq '' "$(<"$high_output")" 'orca.awk emits no partial output beyond its default depth'
+}
+
+# Role: Build a valid list envelope with a caller-selected number of arrays in one unique member.
+build_stack_document() {
+    local path=$1 depth=$2 nested=0 index
+    for ((index = 0; index < depth; index += 1)); do nested="[$nested]"; done
+    printf '{"id":"depth-check","deep":%s,"ok":true,"result":{"terminals":[],"truncated":false,"totalCount":0},"_meta":{"runtimeId":"runtime-check"}}\n' \
+        "$nested" >"$path"
 }
 
 # Role: Assert that the sole documented awk-only refusal cannot leak rows or a marker.
@@ -411,9 +558,24 @@ else
     assert_true 'missing lib/orca.awk disables the awk path' false
 fi
 
-# Differential corpus. Raw-invalid-UTF8 is the only documented awk-only refusal boundary;
-# every other envelope, including the jq 1.7 depth boundary, must have identical bytes
-# and return statuses.
+depth_near_limit="$TEST_TMP/depth-near-limit.json"
+depth_over_limit="$TEST_TMP/depth-over-limit.json"
+build_stack_document "$depth_near_limit" 253
+build_stack_document "$depth_over_limit" 256
+if [[ -n $SYSTEM_AWK ]]; then
+    assert_awk_depth_controls "$SYSTEM_AWK" "$depth_near_limit" "$depth_over_limit"
+else
+    test_skip 'orca.awk shared depth limit and max_depth override' 'awk is not installed'
+fi
+if [[ -n $JQ_BIN ]]; then
+    assert_jq_depth_guard "$JQ_BIN" "$depth_over_limit"
+else
+    test_skip 'ka_orca_jq shared depth guard independent of jq native limit' 'jq is not installed'
+fi
+
+# Differential corpus. Raw-invalid-UTF8 and a deep earlier value overwritten by a repeated
+# key are documented awk-only refusal boundaries; all other cases must have identical bytes
+# and return statuses under the shared 256-slot cap.
 if command -v python3 >/dev/null 2>&1 && [[ -n $JQ_BIN && -n $SYSTEM_AWK ]]; then
     corpus="$TEST_TMP/corpus"
     build_corpus "$corpus"
@@ -479,6 +641,8 @@ SH
         'compact and pretty list documents'
     assert_probe_parity list "$corpus/list-multi-document.json" 'multi-document list corpus'
     assert_probe_parity list "$corpus/list-duplicate-keys.json" 'duplicate-key list corpus'
+    assert_duplicate_key_depth "$JQ_BIN" "$SYSTEM_AWK" \
+        "$corpus/list-duplicate-deep-key.json" "$corpus/list-one-row-valid.json"
     assert_probe_parity show "$corpus/show-valid.json" 'valid show corpus'
     assert_probe_parity show "$corpus/show-no-pty.json" 'no-PTY show corpus'
     assert_probe_parity show "$corpus/show-no-agent.json" 'no-agent show corpus'
@@ -516,6 +680,10 @@ SH
     done
     for depth in 125 126 127 128; do
         assert_depth_boundary "$corpus/deep-row-object-$depth.json" "nested object depth $depth" refused
+    done
+    for operation in show send status error; do
+        assert_probe_parity "$operation" "$corpus/deep-$operation.json" \
+            "deep $operation response at the shared parser-stack cap"
     done
     for operation in list show send status error; do
         assert_probe_parity "$operation" "$corpus/oversize.json" "oversize $operation corpus"

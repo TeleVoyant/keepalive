@@ -45,7 +45,10 @@ Module layering (details in `docs/MAINTENANCE.md#module-responsibilities`):
   and error mapping stays inside `orca.sh`**, because Orca's interface is volatile. It normalizes
   everything to a `terminal-v1` contract. Orca's JSON is read with `jq` when installed, otherwise
   with `orca.awk` (POSIX awk). **The jq programs in `orca.sh` and `orca.awk` are one contract**:
-  change both together and keep their output byte-identical.
+  change both together and keep their output byte-identical. Nesting is capped by
+  `KA_ORCA_MAX_PARSE_STACK` (256 parser-stack slots; an object key takes a slot), which the
+  jq reader enforces itself because jq 1.8 raised its own limit to 10000; never rely on the
+  installed jq's limit.
 - One odd Orca row must never fail a whole discovery pass: understood-but-undeliverable rows
   (no PTY, foreign host, shared incarnation) are skipped and counted; only an unknown envelope or
   a JSON type Orca never emits fails closed (`schema:<gate>`).

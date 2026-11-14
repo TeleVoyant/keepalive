@@ -132,12 +132,15 @@ chosen. The adapter reports skipped rows as a count and summary, and a failed pa
 Orca answers only in JSON. The adapter reads it with `jq` when installed and otherwise with
 `lib/orca.awk`, a POSIX awk reader that gawk, mawk, and BusyBox awk all run, so the backend
 needs nothing beyond `orca-ide` and a base system. The two are one contract: the same gates
-and byte-identical output for every operation, kept together by tests that run against both;
-the awk reader even mirrors jq's nesting limit. They differ only where jq tolerates input that
-is not well-formed JSON - raw bytes that are not valid UTF-8 (including overlong forms and
-encoded surrogates), and numbers with leading zeros - which the awk reader refuses. Orca's
-encoder emits neither, and a difference can only reject a response, never accept another
-identity.
+and byte-identical output for every operation, kept together by tests that run against both.
+Both refuse nesting past the adapter's own limit of 256 parser-stack slots
+(`KA_ORCA_MAX_PARSE_STACK`, counted as jq 1.6/1.7 count them), which the jq reader checks
+itself so that jq 1.8's higher limit changes nothing. They differ only where jq tolerates
+input that the awk reader refuses: raw bytes that are not valid UTF-8 (including overlong
+forms and encoded surrogates), numbers with leading zeros, and, under jq 1.8 only, a
+repeated object key whose earlier, replaced value is nested past the limit (jq's check sees
+only the value it kept). Orca's encoder emits none of these, and a difference can only
+reject a response, never accept another identity.
 
 Both readers refuse a response over 4 MiB before parsing (`schema:oversize`), and the awk
 reader runs under the same `KEEPALIVE_ORCA_TIMEOUT` deadline as the CLI call it follows

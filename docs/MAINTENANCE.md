@@ -108,7 +108,11 @@ Do not merge changes that weaken these rules:
     reminder; never once per pass.
 52. The jq programs in `orca.sh` and `orca.awk` are one contract. Change both together, keep
     their output byte-identical, and keep the Orca tests passing under both readers. The awk
-    reader may refuse what jq accepts, never the reverse.
+    reader may refuse what jq accepts, never the reverse. Both readers refuse nesting past
+    `KA_ORCA_MAX_PARSE_STACK` (256 parser-stack slots, an object key counting as one) by the
+    adapter's own check, never by the installed jq's limit, which changed from 256 to 10000
+    in jq 1.8. (Under jq 1.8 that check sees parsed values only, so a too-deep earlier value
+    of a repeated key is refused by awk alone: the permitted direction.)
 
 ## Module responsibilities
 

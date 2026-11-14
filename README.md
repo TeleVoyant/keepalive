@@ -13,7 +13,7 @@ Version: **1.1.1** · [Changelog](CHANGELOG.md) · [MIT licensed](LICENSE)
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Process model, identity, state schemas, IPC, scheduler, recovery |
 | [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) | Every environment variable, with defaults and when to change them |
 | [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) | Symptom-first fixes, from `unknown` session names to CPU cost |
-| [`docs/TESTING.md`](docs/TESTING.md) | What the 2331 assertions cover, and how to add one |
+| [`docs/TESTING.md`](docs/TESTING.md) | What the 2352 assertions cover, and how to add one |
 | [`docs/MAINTENANCE.md`](docs/MAINTENANCE.md) | Safety invariants, module map, live checklist, release flow |
 | [`docs/VALIDATION.md`](docs/VALIDATION.md) | Evidence recorded for this release |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Conventions the automated checks enforce |

@@ -39,6 +39,10 @@ Orca 1.4.241 compatibility, Orca without jq, and Orca CLI cost.
 - **No false Orca identity loss.** A `terminal show` reporting no attached PTY or no agent
   identity is now a transient, strike-consuming result (codes 24 and 23) instead of an
   immediate sticky `UNAVAILABLE`; a different non-empty value is still definitive.
+- **Orca nesting limit no longer depends on the jq version.** jq 1.8 (Arch, Fedora,
+  Alpine) parses JSON nested up to 10,000 levels where jq 1.6/1.7 and the built-in awk
+  reader stop at 256 parser-stack slots, so the two readers could disagree on a deeply
+  nested response. The adapter now enforces the 256-slot limit itself in both readers.
 
 ### Changed
 

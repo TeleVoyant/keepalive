@@ -82,9 +82,11 @@ Engineering lessons from this round:
   whole-snapshot outage. Classify rows (unfamiliar type vs. undeliverable) instead.
 - `jq` object construction needs parentheses around `//` alternatives
   (`{a: (.x // .y)}`); bare `//` inside `{}` is a syntax error.
-- jq 1.7 depth limit: it refuses to open `[`/`{` once its parser stack holds 256 entries,
-  and an object member value sits above both the object and its key. `lib/orca.awk`
-  mirrors this with `STACK`.
+- Depth limit: jq 1.6/1.7 refuse to open `[`/`{` once the parser stack holds 256 entries,
+  and an object member value sits above both the object and its key; jq 1.8 raised the
+  limit to 10000 (CI on Arch/Fedora/Alpine broke on it, 2026-11-13). The adapter now owns
+  the limit: `KA_ORCA_MAX_PARSE_STACK` feeds the jq guard (`KA_ORCA_JQ_PARSE_GUARD`,
+  joined to each program by `ka_orca_jq`) and `orca.awk`'s `STACK` check alike.
 - jq 1.7 refuses a lone high surrogate escape but turns a lone low surrogate into U+FFFD;
   its `[[:cntrl:]]` matches C0, DEL, and C1 (U+0080-U+009F).
 - BusyBox awk's per-character `substr` is superlinear in the indexed string's length; walk

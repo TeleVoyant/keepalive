@@ -1,5 +1,24 @@
 # Observed Risks, Gaps, and Open Questions
 
+## Resolved on 2026-11-14: jq 1.8 depth drift broke CI and reader parity
+
+CI on `14b78f0` failed 4 of 8 jobs (Arch, Fedora, Alpine Bash 5.0/5.1), all in
+`tests/test_orca_parity.sh`, and the Orca/awk round's push (`0040a8a`) had failed the same
+way. Those images install jq 1.8.2, whose parser limit is 10,000 instead of jq 1.6/1.7's
+256 stack slots, so jq accepted deep documents that `lib/orca.awk` refuses: 25 assertions
+(row member arrays at depth 249-256, objects at 125-128, envelope `deep-257`). Reproduced
+locally with checksummed upstream jq 1.7.1/1.8.2 binaries. Not only a test artifact: the
+two readers produced different bytes for those inputs. Fix: the adapter enforces
+`KA_ORCA_MAX_PARSE_STACK=256` in both readers (a jq-side tree walk plus `-v max_depth` for
+awk). Measured cost (p4 review: `ka_orca_discover` with a mock CLI, 5 warm-ups, medians of
+5 alternating before/after samples): +0.5-1.0 ms on a typical 7.8 KB five-row list;
++28 ms (jq 1.7.1) / +38 ms (jq 1.8.2) on a maximal 800 KB, 1000-row list (about +9-12%).
+Live Orca response depth was not captured; fixtures peak at 7 slots.
+Accepted residual (permitted direction of invariant 52): under jq 1.8 a repeated key whose
+earlier, replaced value is too deep is refused by awk but accepted by jq, because the jq
+guard walks parsed values. Closing it would need jq `--stream` for every read; Orca never
+repeats keys.
+
 ## Resolved on 2026-11-12: saving configuration restarted every timer
 
 Before: every CONFIGURE (TUI or CLI) set both countdowns to their full intervals, rewound

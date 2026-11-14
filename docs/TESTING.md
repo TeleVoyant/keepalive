@@ -6,8 +6,9 @@ without it the Orca adapter tests run on the built-in awk reader, and with it
 `test_orca_parity.sh` also proves the two readers agree. That constraint is deliberate:
 the tool ships as Bash to hosts that may have very little else installed.
 
-**2331 assertions across 36 files** when Python and `jq` are present (one ownership case
-skips unless the suite runs as root).
+**2352 assertions across 36 files** when Python and `jq` 1.6 or 1.7 are present; 2356 with
+jq 1.8, which also runs the jq-only depth-guard probe (one ownership case skips unless the
+suite runs as root).
 
 ## Running
 
@@ -67,7 +68,7 @@ a trap - the committed tests all have one.
 | `test_konsole_mock.sh` | 20 | Mocked Konsole service/path/UUID/PID discovery, strict validation, qdbus timeout classification, and notification deadlines. |
 | `test_orca_mock.sh` | 52 | Orca CLI/schema normalization, exact multi-field identity, non-destructive schema drift, deadlines, atomic delivery, checkpoint validation, transport dispatch, and per-backend snapshot isolation, on whichever JSON reader is selected. |
 | `test_orca_contract.sh` | 129 | The Orca 1.4.241 adapter contract: every list gate and its `schema:<gate>` reason, skipped pty-less/foreign/colliding rows and their counts, identical-duplicate collapse, order preservation, marker-forgery and field-shift safety, show codes 10-24 including absent PTY (24) and agent (23), error-envelope mapping, single-document receipts, the 4 MiB cap, parse timeout, and doctor's reader line. |
-| `test_orca_parity.sh` | 223 | Reruns the contract and mock files under jq and every available awk (system, gawk, mawk, BusyBox), and a differential corpus through both readers: Unicode escapes, raw UTF-8, duplicate keys, number forms, jq's exact nesting limits, 1000/1001 rows, compact versus pretty-printed input; plus reader selection and the awk-only fail-closed refusals. |
+| `test_orca_parity.sh` | 244 | Reruns the contract and mock files under jq and every available awk (system, gawk, mawk, BusyBox), and a differential corpus through both readers: Unicode escapes, raw UTF-8, duplicate keys, number forms, the shared 256-slot nesting cap (list, show, send, status, error; the awk `max_depth` override and default; the jq guard on its own under jq 1.8), a too-deep repeated key that jq 1.8 may accept but awk must refuse, 1000/1001 rows, compact versus pretty-printed input; plus reader selection and the awk-only fail-closed refusals. |
 | `test_orca_service_integration.sh` | 23 | A real Orca-only daemon, FIFO, and public clients against the mock: discover, create, atomic send, transient outage, sticky incarnation replacement, a pty-less row that no longer stalls discovery, one warning per failure episode, and paced Orca CLI starts. |
 | `test_orca_episodes.sh` | 45 | Orca discovery cadence floor, live health pacing and its REFRESH bypass, strike accounting for codes 23/24, and episode logging: start, reason change, fifteen-minute reminder, recovery (also after a REFRESH), and skipped-row summaries. |
 | `test_recovery.sh` | 11 | Same-login daemon restart countdown recovery, deferred transient identity validation, and dirty-flush persistence. |

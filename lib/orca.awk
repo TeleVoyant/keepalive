@@ -13,7 +13,9 @@
 # Safety: anything not fully understood is refused, never guessed, so a divergence from jq
 # can only reject a response, not accept a different identity. Refusals jq does not make:
 # raw bytes that are not well-formed UTF-8, which Orca's JSON encoder never emits. Nesting
-# is limited exactly as jq 1.7 limits it.
+# is limited to -v max_depth parser-stack slots, the same limit the jq reader enforces
+# (KA_ORCA_MAX_PARSE_STACK in lib/orca.sh), so their depth decisions match; under jq 1.8
+# this reader alone also refuses a too-deep earlier value of a repeated key.
 #
 # Cost: lib/orca.sh caps the response size and runs this under the Orca deadline. Within
 # that, the input is walked one line at a time: no JSON token can span a line break, and
@@ -32,9 +34,10 @@
 
 BEGIN {
     for (i = 1; i < 256; i++) BYTE[sprintf("%c", i)] = i
-    # jq's parser refuses to open an array or object once its stack holds 256 entries, and
-    # an object member's value sits above both the object and its key. STACK mirrors that.
-    MAX_DEPTH = 256
+    # An array or object may open only while fewer than MAX_DEPTH stack slots are in use,
+    # and an object member's value sits above both the object and its key; STACK counts
+    # slots the way jq's parser does. 256 when run on its own; the adapter passes its limit.
+    MAX_DEPTH = max_depth == "" ? 256 : max_depth + 0
     # Every check and projection needs at most 4096 code points of a string. An error code
     # is printed whole, as jq prints it, so op=error keeps everything within the size cap.
     KEEP = op == "error" ? 4194304 : 4096

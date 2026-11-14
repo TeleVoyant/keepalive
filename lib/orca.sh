@@ -20,6 +20,32 @@ KA_ORCA_AWK_PROGRAM=${BASH_SOURCE[0]%/*}/orca.awk
 # like any other unusable response rather than parsed for seconds.
 KA_ORCA_MAX_RESPONSE=4194304
 
+# Deepest nesting either reader accepts, counted as jq's parser counts it: an array or
+# object may open only while fewer than this many stack slots are in use, and an object
+# member's value sits above both the object and its key. This is jq 1.6/1.7's own limit;
+# jq 1.8 raised its limit to 10000, so the jq reader enforces this one itself and the awk
+# reader is given it too, and their depth decisions match on every jq version. One
+# exception, in the permitted direction: the guard sees jq's parsed values, so under jq 1.8
+# it cannot see an earlier value of a repeated key that a later one replaced; awk still
+# refuses that value if it is too deep. Orca never repeats a key.
+KA_ORCA_MAX_PARSE_STACK=256
+# Prepended to every jq program, which reads its input through ka_orca_read_documents.
+# The walk stops at the first slot past the limit, so a refused document costs little.
+KA_ORCA_JQ_PARSE_GUARD='
+def ka_orca_parse_stack_ok($stack):
+    if type == "array" then
+        if $stack >= $max_depth then false
+        else all(.[]; ka_orca_parse_stack_ok($stack + 1)) end
+    elif type == "object" then
+        if $stack >= $max_depth then false
+        else all(.[]; ka_orca_parse_stack_ok($stack + 2)) end
+    else true end;
+def ka_orca_read_documents:
+    [inputs] as $documents |
+    if ($documents | all(.[]; ka_orca_parse_stack_ok(0))) then $documents
+    else error("Orca JSON exceeds the shared parser stack limit") end;
+'
+
 # Role: Resolve the Orca CLI path into REPLY without ever selecting GNOME's orca.
 # Shared by the adapter and `doctor`, which reports the CLI and jq separately.
 ka_orca_locate_cli() {
@@ -118,26 +144,36 @@ ka_orca_find() {
 ka_orca_awk() {
     ka_orca_timeout_resolve
     LC_ALL=C timeout --kill-after=1s "${KA_ORCA_TIMEOUT}s" \
-        "$KA_ORCA_AWK" -v op="$1" -f "$KA_ORCA_AWK_PROGRAM"
+        "$KA_ORCA_AWK" -v op="$1" -v max_depth="$KA_ORCA_MAX_PARSE_STACK" \
+        -f "$KA_ORCA_AWK_PROGRAM"
+}
+
+# Role: Run one jq program (-r or -e, then the program) on stdin under the shared depth limit.
+# The guard is joined to the program as one argument, so no extra process is started.
+ka_orca_jq() {
+    "$KA_ORCA_JQ" -n "$1" --argjson max_depth "$KA_ORCA_MAX_PARSE_STACK" \
+        "$KA_ORCA_JQ_PARSE_GUARD$2"
 }
 
 # Role: Report whether the selected Orca runtime answers as reachable, for diagnostics only.
+# Both readers answer only 0 or 1, so a refusal looks the same whichever one made it.
 ka_orca_runtime_reachable() {
     local output
     output=$(ka_orca_exec status --json 2>/dev/null) || return 1
     ((${#output} <= KA_ORCA_MAX_RESPONSE)) || return 1
     if [[ $KA_ORCA_PARSER == awk ]]; then
-        ka_orca_awk status >/dev/null 2>&1 <<<"$output"
-        return
+        ka_orca_awk status >/dev/null 2>&1 <<<"$output" || return 1
+        return 0
     fi
     # Exactly one document: with several, -e would judge only the last one.
-    "$KA_ORCA_JQ" -n -e '
-        [inputs] as $documents |
+    ka_orca_jq -e '
+        ka_orca_read_documents as $documents |
         ($documents | length) == 1 and
         ($documents[0] | type) == "object" and
         $documents[0].ok == true and
         $documents[0].result.runtime.reachable == true
-    ' >/dev/null 2>&1 <<<"$output"
+    ' >/dev/null 2>&1 <<<"$output" || return 1
+    return 0
 }
 
 # Role: Resolve the deadline for one Orca CLI operation without trusting raw arithmetic input.
@@ -280,7 +316,7 @@ ka_orca_discover() {
     if [[ ${KA_ORCA_PARSER:-} == awk ]]; then
         rows=$(ka_orca_awk list 2>/dev/null <<<"$output") || rc=$?
     else
-        rows=$("$KA_ORCA_JQ" -n -r '
+        rows=$(ka_orca_jq -r '
         # Keep these limits in step with ka_orca_checkpoint_binding_valid: discovery is
         # the first place untrusted provider fields enter the manager arrays.
         def text_ok($maximum):
@@ -334,7 +370,7 @@ ka_orca_discover() {
             elif any(.result.terminals[]; base_ok | not) then "row-type"
             elif any(.result.terminals[] | select(candidate); binding_types_ok | not) then "binding-type"
             else "" end;
-        [inputs] as $documents |
+        ka_orca_read_documents as $documents |
         if ($documents | length) != 1 then "#SCHEMA\tdocument-count"
         else $documents[0] |
             (try envelope_failure catch "shape") as $failure |
@@ -437,8 +473,8 @@ ka_orca_error_code() {
         return 0
     fi
     # One document only, as everywhere else: several would print several codes.
-    REPLY=$("$KA_ORCA_JQ" -n -r '
-        [inputs] as $documents |
+    REPLY=$(ka_orca_jq -r '
+        ka_orca_read_documents as $documents |
         if ($documents | length) == 1 and ($documents[0] | type) == "object" and
             ($documents[0].error | type) == "object" and
             ($documents[0].error.code | type) == "string"
@@ -490,7 +526,7 @@ ka_orca_validate_target() {
     if [[ ${KA_ORCA_PARSER:-} == awk ]]; then
         row=$(ka_orca_awk show 2>/dev/null <<<"$output") || rc=$?
     else
-        row=$("$KA_ORCA_JQ" -n -r '
+        row=$(ka_orca_jq -r '
         def text_ok($maximum):
             (type == "string") and length > 0 and length <= $maximum and
             (test("[[:cntrl:]]") | not);
@@ -512,7 +548,7 @@ ka_orca_validate_target() {
                 (.writable | type == "boolean") and
                 (.orphaned | type == "boolean") and
                 (.agentIdentity | absent_or_text(128)));
-        [inputs] as $documents |
+        ka_orca_read_documents as $documents |
         if ($documents | length) == 1 and ($documents[0] | try valid catch false) then
             $documents[0] |
             ._meta.runtimeId as $runtime |
@@ -625,8 +661,8 @@ ka_orca_deliver() {
         ka_orca_awk send >/dev/null 2>&1 <<<"$output" || return 1
         return 0
     fi
-    "$KA_ORCA_JQ" -n -e '
-        [inputs] as $documents |
+    ka_orca_jq -e '
+        ka_orca_read_documents as $documents |
         ($documents | length) == 1 and
         ($documents[0] | .ok == true and .result.send.accepted == true)
     ' >/dev/null 2>&1 <<<"$output" || return 1
