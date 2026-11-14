@@ -5,17 +5,15 @@ Usage: pty-drive.py <cols> <rows> <settle-seconds> <keys> -- <command> [args...]
 
 <keys> is a comma-separated list. Each item is either a literal string, one of the names
 below, "@text", which waits until "text" has appeared in the output before continuing,
-or CAPTURE/STOP, which kills and reaps the child after the preceding barrier.
-Waiting on expected output instead of guessing with sleeps is what makes these tests
-deterministic: a fixed settle races against however long the client takes to draw.
+or CAPTURE/STOP, which kills and reaps the child after the preceding barrier. Before
+single-key input, the driver waits for Bash to put the PTY into noncanonical mode. Text
+for a recognized line prompt is sent in canonical mode, where it is buffered until Enter.
 
-Prints the child's exit status as "exit=<n>" (or "exit=TIMEOUT") on stderr, and the
-raw terminal output on stdout, so a shell test can assert on either.
-
-This exists because the TUI's key handling, navigation, and `set -e` behaviour are
-invisible to a suite that only calls functions directly: three real defects once hid
-behind a fully green run.
+Prints the child's exit status as "exit=<n>" on stderr, and raw terminal output on stdout.
+The settle-seconds argument is kept for caller compatibility and controls the upper bound
+for event polling; it never causes a fixed delay before or after input.
 """
+import fcntl
 import os
 import pty
 import select
@@ -23,7 +21,6 @@ import signal
 import struct
 import sys
 import termios
-import fcntl
 import time
 
 NAMED_KEYS = {
@@ -43,9 +40,100 @@ NAMED_KEYS = {
     'PASTE': b'\x1b[200~',
     'CTRLD': b'\x04',
 }
+PROMPT_LABELS = (
+    'Custom interval in minutes',
+    'New message',
+    'Edit message',
+    'Secondary message',
+    'Secondary interval in minutes',
+)
 
 
-def drive(cols, rows, settle, keys, command, timeout=40.0):
+# Role: Read currently available PTY output without introducing an intentional delay.
+def pump(fd, captured, timeout):
+    try:
+        readable, _, _ = select.select([fd], [], [], timeout)
+    except InterruptedError:
+        return True
+    if not readable:
+        return True
+    try:
+        chunk = os.read(fd, 65536)
+    except OSError:
+        return False
+    if not chunk:
+        return False
+    captured.extend(chunk)
+    return True
+
+
+# Role: Wait for new screen output after the previous key or output barrier.
+def wait_for(fd, captured, scan, needle, timeout, poll):
+    encoded = needle.encode()
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        found = captured.find(encoded, scan['pos'])
+        if found >= 0:
+            scan['barrier_start'] = scan['pos']
+            scan['barrier_end'] = found + len(encoded)
+            scan['pos'] = len(captured)
+            return True
+        if not pump(fd, captured, poll):
+            return False
+    return False
+
+
+# Role: Finish a captured terminal frame after its text barrier matched mid-render.
+def wait_for_frame_end(fd, captured, scan, timeout, poll):
+    start = scan.get('barrier_end', len(captured))
+    frame_start = scan.get('barrier_start', start)
+    if b'\x1b[' not in captured[frame_start:start]:
+        return True
+    end_marker = b'\x1b[J'
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if end_marker in captured[start:]:
+            return True
+        if not pump(fd, captured, poll):
+            return False
+    return False
+
+
+# Role: Wait for canonical line input or an active noncanonical single-key read.
+def wait_for_mode(pid, fd, captured, canonical, timeout, poll):
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        try:
+            active = bool(termios.tcgetattr(fd)[3] & termios.ICANON)
+        except OSError:
+            return False
+        if active == canonical:
+            return True
+        try:
+            reaped, _ = os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            return False
+        if reaped:
+            return False
+        if not pump(fd, captured, poll):
+            return False
+    return False
+
+
+# Role: Stop and reap a child process, ignoring the race where it already exited.
+def stop_child(pid):
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    try:
+        os.waitpid(pid, 0)
+    except ChildProcessError:
+        pass
+
+
+# Role: Run one scripted PTY session with output barriers and terminal-read readiness.
+def drive(cols, rows, poll, keys, command, timeout=40.0):
     pid, fd = pty.fork()
     if pid == 0:
         os.environ['TERM'] = 'xterm-256color'
@@ -53,97 +141,90 @@ def drive(cols, rows, settle, keys, command, timeout=40.0):
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack('HHHH', rows, cols, 0, 0))
 
     captured = bytearray()
-
-    def pump(duration):
-        end = time.time() + duration
-        while time.time() < end:
-            readable, _, _ = select.select([fd], [], [], 0.05)
-            if not readable:
-                continue
-            try:
-                chunk = os.read(fd, 65536)
-            except OSError:
-                return False
-            if not chunk:
-                return False
-            captured.extend(chunk)
-        return True
-
-    # Waits must look only at output produced since the last key, not at the whole
-    # transcript: a screen drawn once at startup would otherwise satisfy every later
-    # wait instantly, turning them back into unsynchronised sleeps.
     scan = {'pos': 0}
-
-    def wait_for(needle, limit=30.0):
-        end = time.time() + limit
-        while time.time() < end:
-            if needle in captured[scan['pos']:].decode('utf-8', 'replace'):
-                scan['pos'] = len(captured)
-                return True
-            if not pump(0.1):
-                return False
-        return False
-
-    # Let the first frame settle before sending anything.
-    pump(max(settle, 1.0))
+    line_input = False
+    line_text = ''
+    line_echoed = False
     sent_any = False
     status = None
-    for key in keys:
-        if isinstance(key, tuple):
-            if key[0] == 'stop':
-                # CAPTURE/STOP is only valid after its preceding output barrier. Kill and
-                # reap immediately so the capture cannot spend the normal 40 s timeout.
+
+    for item in keys:
+        if item in ('CAPTURE', 'STOP'):
+            if not wait_for_frame_end(fd, captured, scan, 30.0, poll):
+                status = 'WAIT-TIMEOUT:frame-end'
+                break
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                status = 'CAPTURE-FAILED'
+            else:
                 try:
-                    os.kill(pid, signal.SIGKILL)
-                except ProcessLookupError:
+                    os.waitpid(pid, 0)
+                except ChildProcessError:
                     status = 'CAPTURE-FAILED'
                 else:
-                    try:
-                        os.waitpid(pid, 0)
-                    except ChildProcessError:
-                        status = 'CAPTURE-FAILED'
-                    else:
-                        status = 'CAPTURED'
-                break
-            if not wait_for(key[1]):
-                # Report the missed synchronisation instead of sending the rest of the
-                # keys blind, which surfaces later as a confusing exit timeout.
-                #
-                # A wait that fails before any key was sent means the client never got as
-                # far as drawing, which is an environment problem - a slow or busy daemon -
-                # rather than anything the keys did. Naming it separately lets a caller
-                # retry that case without also retrying a key that wrongly exited a view.
+                    status = 'CAPTURED'
+            break
+
+        if item.startswith('@'):
+            needle = item[1:]
+            if not wait_for(fd, captured, scan, needle, 30.0, poll):
                 label = 'WAIT-TIMEOUT:' if sent_any else 'START-TIMEOUT:'
-                status = label + key[1]
+                status = label + needle
                 break
+            if any(label in needle for label in PROMPT_LABELS):
+                line_input = True
+                line_text = ''
+                line_echoed = False
+            elif line_input and line_text and needle in line_text:
+                line_echoed = True
             continue
+
+        key = NAMED_KEYS.get(item, item.encode())
+        if line_input and key in (b'\r', b'\n') and line_text and not line_echoed:
+            if not wait_for(fd, captured, scan, line_text, 30.0, poll):
+                status = 'WAIT-TIMEOUT:line-input-echo'
+                break
+            line_echoed = True
+        if not wait_for_mode(pid, fd, captured, line_input, 30.0, poll):
+            label = 'WAIT-TIMEOUT:' if sent_any else 'START-TIMEOUT:'
+            status = label + 'read-ready'
+            break
         sent_any = True
         scan['pos'] = len(captured)
-        os.write(fd, key)
-        if not pump(settle):
+        try:
+            os.write(fd, key)
+        except OSError:
+            status = 'WAIT-TIMEOUT:write-key'
             break
+        if line_input and key in (b'\r', b'\n'):
+            line_input = False
+            line_text = ''
+            line_echoed = False
+        elif line_input:
+            line_text += item
+
     if status is not None and status != 'CAPTURED':
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        try:
-            os.waitpid(pid, 0)
-        except ChildProcessError:
-            pass
-    if status is None:
-        pump(settle)
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            reaped, raw = os.waitpid(pid, os.WNOHANG)
+        stop_child(pid)
+    elif status is None:
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            try:
+                reaped, raw = os.waitpid(pid, os.WNOHANG)
+            except ChildProcessError:
+                status = 'EXIT-UNKNOWN'
+                break
             if reaped:
                 status = os.waitstatus_to_exitcode(raw)
                 break
-            pump(0.1)
+            if not pump(fd, captured, poll):
+                # The PTY has closed but the child is not yet reaped; pace the
+                # exit poll instead of spinning on an immediate EOF.
+                time.sleep(poll)
         if status is None:
-            os.kill(pid, signal.SIGKILL)
-            os.waitpid(pid, 0)
+            stop_child(pid)
             status = 'TIMEOUT'
+
     try:
         os.close(fd)
     except OSError:
@@ -151,21 +232,15 @@ def drive(cols, rows, settle, keys, command, timeout=40.0):
     return status, bytes(captured)
 
 
+# Role: Parse the fixture-compatible arguments and publish status plus raw terminal bytes.
 def main():
     separator = sys.argv.index('--')
     cols, rows = int(sys.argv[1]), int(sys.argv[2])
-    settle = float(sys.argv[3])
+    poll = min(max(float(sys.argv[3]), 0.001), 0.05)
     raw_keys = sys.argv[4]
     command = sys.argv[separator + 1:]
-    keys = []
-    for item in (raw_keys.split(',') if raw_keys else []):
-        if item in ('CAPTURE', 'STOP'):
-            keys.append(('stop', ''))
-        elif item.startswith('@'):
-            keys.append(('wait', item[1:]))
-        else:
-            keys.append(NAMED_KEYS.get(item, item.encode()))
-    status, output = drive(cols, rows, settle, keys, command)
+    keys = raw_keys.split(',') if raw_keys else []
+    status, output = drive(cols, rows, poll, keys, command)
     sys.stderr.write('exit=%s\n' % status)
     sys.stdout.buffer.write(output)
     return 0 if status == 0 or status == 'CAPTURED' else 1

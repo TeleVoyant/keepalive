@@ -87,6 +87,11 @@ Engineering lessons from this round:
   limit to 10000 (CI on Arch/Fedora/Alpine broke on it, 2026-11-13). The adapter now owns
   the limit: `KA_ORCA_MAX_PARSE_STACK` feeds the jq guard (`KA_ORCA_JQ_PARSE_GUARD`,
   joined to each program by `ka_orca_jq`) and `orca.awk`'s `STACK` check alike.
+- An output barrier does not prove a Bash TUI is listening: the frame can land ~6 ms before
+  `read -rsn1` clears ICANON. `tests/fixtures/pty-drive.py` now also waits on the PTY's
+  termios mode before each key. Keep such fixes in the shared fixture; limiting a worker to
+  one test file produced a 170-line duplicate driver (2026-11-14). CI images can lack
+  `diff` (Arch); compare trees with `find`/`sort -z`/`sha256sum`.
 - jq 1.7 refuses a lone high surrogate escape but turns a lone low surrogate into U+FFFD;
   its `[[:cntrl:]]` matches C0, DEL, and C1 (U+0080-U+009F).
 - BusyBox awk's per-character `substr` is superlinear in the indexed string's length; walk

@@ -81,27 +81,23 @@ assert_true 'a recognized AI session is discovered before the TUI assertions' \
     grep -q AVAILABLE <<<"$listing"
 
 # Role: Run the TUI with a scripted key sequence and report only the exit status.
-# Every sequence waits for the manager to be drawn first, then waits for it again before
-# quitting. Sending keys on a fixed delay races the client's startup and its redraws,
-# which made these assertions intermittently report a timeout.
+# The shared PTY driver waits for fresh output and the terminal mode expected by each
+# input, including canonical buffering for line prompts.
 tui_exit() {
     local keys=$1 settle=${2:-0.3} result
     # The second manager frame is an output barrier after startup, so the first real
     # action is not sent during the client's initial terminal-mode transition.
     result=$(python3 "$DRIVER" 110 40 "$settle" "@navigate,@navigate,${keys}" -- "$TEST_ROOT/keepalive" 2>&1 >/dev/null |
         sed -n 's/^exit=//p')
-    # Retry only a plain exit timeout, and only once. Bash's `read -n1` reconfigures the
-    # terminal for every keystroke, and tcsetattr can discard input arriving in that
-    # window; a human types far too slowly to hit it, a scripted driver occasionally does,
-    # and the dropped key is always the final quit.
-    #
-    # A client that never drew at all reports START-TIMEOUT and is retried for the same
-    # reason: it says nothing about the keys.
+    # Retry only START-TIMEOUT, which means no input was sent and the client never reached
+    # its first manager frame. A plain TIMEOUT follows the entire sequence: Configure may
+    # already have committed before a final quit key was missed, so replaying it can change
+    # the state that later assertions inspect.
     #
     # This cannot mask the defect these assertions exist for: a key that wrongly exits the
     # client shows up as WAIT-TIMEOUT on the following redraw wait, which is never retried,
     # and a genuinely broken quit key times out on both attempts.
-    if [[ $result == TIMEOUT || $result == START-TIMEOUT:* ]]; then
+    if [[ $result == START-TIMEOUT:* ]]; then
         result=$(python3 "$DRIVER" 110 40 "$settle" "@navigate,@navigate,${keys}" -- "$TEST_ROOT/keepalive" 2>&1 >/dev/null |
             sed -n 's/^exit=//p')
     fi

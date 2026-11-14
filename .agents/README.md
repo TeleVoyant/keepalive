@@ -25,7 +25,10 @@ maintainer or coding agent needs in order to continue safely.
   single-document responses, paced Orca CLI starts, quieter episode logging, and
   `lib/orca.awk` so Orca works without `jq`), and the **settings-editor round** (`54fcc26`,
   2026-11-12: one-screen TUI settings editor with live countdowns, and countdown-preserving
-  CONFIGURE; DEVELOPMENT.md has the details). Both rounds are under `[Unreleased]` in
+  CONFIGURE; DEVELOPMENT.md has the details), the **jq depth fix** (`b270c0a`, 2026-11-14:
+  one 256-slot nesting limit in both Orca readers, whatever the jq version), and the
+  2026-11-14 CI test fixes (no `diff` dependency; PTY driver waits for terminal-mode
+  readiness; RISKS.md has both). These rounds are under `[Unreleased]` in
   CHANGELOG.md; the version string is still 1.1.1. GitHub CI is green on `7b723f9` and
   `418e2e6` (8 jobs: ShellCheck, Ubuntu, Debian, Fedora, Arch, non-root Debian, Bash 5.0
   and 5.1) - the first green CI since before 1.1.0.

@@ -1,5 +1,30 @@
 # Observed Risks, Gaps, and Open Questions
 
+## Resolved on 2026-11-14: two test-only CI failures behind the depth drift
+
+CI on `b270c0a` still failed Arch and Debian 12; both were test defects, not product ones.
+
+- **Arch:** `tests/test_service_integration.sh` called `diff -qr`, and the Arch image has no
+  diffutils. It now compares the two trees with `find`, `sort -z` and `sha256sum`
+  (`profile_trees_equal`). Verified in local Arch, Fedora and Alpine containers.
+- **Debian 12:** `tests/test_tui_pty.sh` failed with `WAIT-TIMEOUT:Settings\ saved.` then
+  `expected=60 actual=1800`. The driver sent a key as soon as a frame matched, and Bash
+  enters its next `read -rsn1` about 6 ms later; on a busy runner the order raced. Under
+  CPU-0 contention the old driver passed 0/3 runs; with readiness waits in
+  `tests/fixtures/pty-drive.py`, 3/3 (and 5/5 idle). The old whole-sequence retry after a
+  plain `TIMEOUT` could also replay a Configure that had already saved; it is gone.
+- **Key loss ruled out for the canonical gap:** 200/200 keys written while ICANON was still
+  on (child stopped after each frame, idle and under contention) were processed by the real
+  `ka_tui_read_key`. Bash uses `TCSADRAIN`; N_TTY hands buffered bytes to the next
+  noncanonical read.
+
+Open, unreproduced (source-derived, not measured): at the exact moment `read -t` times out,
+Bash 5.0-5.2 can return a timeout status with the byte it just read already stored in the
+variable. `ka_tui_read_key` (`lib/tui/screen.sh`) treats any nonzero status as "no key", so
+such a byte would be dropped; same for the Escape follow-up and sequence-byte reads. The
+proposed fix is to treat a nonzero status as "no key" only when the variable is empty. Not
+applied; awaiting a decision.
+
 ## Resolved on 2026-11-14: jq 1.8 depth drift broke CI and reader parity
 
 CI on `14b78f0` failed 4 of 8 jobs (Arch, Fedora, Alpine Bash 5.0/5.1), all in
@@ -1135,14 +1160,17 @@ timing. Measured after hardening: roughly one harness timeout in fifteen full ru
 behavioural assertion.
 
 Mitigations in place: the driver synchronises on expected output rather than sleeps and
-scans only output produced since the last key; a wait that fails *before any key is sent*
-is reported as `START-TIMEOUT` and retried once, because it means the client never drew and
-says nothing about the keys; a plain exit `TIMEOUT` is retried once, because bash's
-`read -n1` reconfigures the terminal per keystroke and `tcsetattr` can discard input
-arriving in that window.
+scans only output produced since the last key; before each key it waits for the terminal
+mode the client will read in (ICANON off for `read -n1`, on for a line prompt, with the
+typed text echoed before Enter); a wait that fails *before any key is sent* is reported as
+`START-TIMEOUT` and retried once, because it means the client never drew and says nothing
+about the keys.
 
 Deliberately not retried: `WAIT-TIMEOUT`, which is what a key wrongly exiting a view looks
-like. That keeps the defect these tests exist for detectable.
+like, and a plain exit `TIMEOUT`, because the sequence may already have saved settings and a
+replay would start from changed state. (An older note here said `tcsetattr` can discard
+input during bash's per-key mode switch. It cannot: Bash 5.0-5.2 use `TCSADRAIN`, and
+Linux N_TTY releases buffered canonical bytes to the next noncanonical read.)
 
 ## Mitigated, format unchanged: positional TSV parsing around empty fields
 

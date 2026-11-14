@@ -107,9 +107,14 @@ Two fixtures support it:
   scripted key sequence. Keys may be literal text, a named key such as `PGDN` or `F5`, or
   `@text`, which **waits until that text appears** before continuing. Waiting on output
   instead of sleeping is what makes these tests deterministic; a fixed delay races
-  whatever the client is doing. It distinguishes `START-TIMEOUT` (the client never drew,
-  so the environment was slow) from `WAIT-TIMEOUT` (a key produced the wrong result),
-  which lets the test retry the first without masking the second.
+  whatever the client is doing. Before each key it also waits for the terminal mode the
+  client will read in: noncanonical for a single-key `read -n1`, canonical for a line
+  prompt (whose typed text must echo before Enter is sent). A redraw can finish a few
+  milliseconds before Bash enters its next `read`, so an output barrier alone does not
+  prove the client is listening. It distinguishes `START-TIMEOUT` (the client never drew,
+  so the environment was slow, and no key was sent) from `WAIT-TIMEOUT` (a key produced
+  the wrong result), which lets the test retry the first without masking the second. A
+  plain exit `TIMEOUT` is never retried: the sequence may already have saved settings.
 - **`tests/fixtures/vt-render.py`** replays a capture through a minimal VT - cursor
   positioning, erase-in-display, erase-in-line, scrolling - to produce the screen a user
   would actually see. This catches the class of bug where a frame redraws shorter content

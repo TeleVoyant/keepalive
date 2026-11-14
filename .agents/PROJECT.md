@@ -162,7 +162,7 @@ developer check.
 | `tests/*` | Dependency-free unit, mock integration, layout, and lint tests. |
 | `tests/fixtures/qdbus-mock` | Scriptable stand-in for the Konsole D-Bus surface. |
 | `tests/fixtures/orca-mock` | Scriptable stand-in for Orca terminal list/show/send JSON. |
-| `tests/fixtures/pty-drive.py` | Drives a command under a real pty with scripted keys and output waits. Optional. |
+| `tests/fixtures/pty-drive.py` | Drives a command under a real pty with scripted keys, output waits, and terminal-mode readiness waits. Optional. |
 | `tests/fixtures/vt-render.py` | Renders a capture into the screen a user would see, catching stale frame tails. Optional. |
 | `docs/*` | Architecture, configuration, troubleshooting, testing, maintenance, validation. |
 | `CHANGELOG.md` | Release history. Checked by `dev-check.sh` against `KEEPALIVE_VERSION`. |

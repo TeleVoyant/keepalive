@@ -162,6 +162,21 @@ HELPER
     run_test_user env "${envs[@]}" bash "$helper" "$TEST_ROOT" "$uuid" "$profile_update" "$main_interval"
 }
 
+# Role: Compare profile file paths and bytes recursively without depending on diffutils.
+profile_trees_equal() {
+    local original=$1 snapshot=$2 index original_hash snapshot_hash
+    local -a original_files=() snapshot_files=()
+    mapfile -d '' -t original_files < <(cd "$original" && find . -type f -print0 | sort -z)
+    mapfile -d '' -t snapshot_files < <(cd "$snapshot" && find . -type f -print0 | sort -z)
+    (( ${#original_files[@]} == ${#snapshot_files[@]} )) || return 1
+    for ((index = 0; index < ${#original_files[@]}; index++)); do
+        [[ ${original_files[$index]} == "${snapshot_files[$index]}" ]] || return 1
+        original_hash=$(sha256sum < "$original/${original_files[$index]}") || return 1
+        snapshot_hash=$(sha256sum < "$snapshot/${snapshot_files[$index]}") || return 1
+        [[ $original_hash == "$snapshot_hash" ]] || return 1
+    done
+}
+
 # Role: Stop background service/AI processes created by this integration test.
 cleanup_integration() {
     local pid=''
@@ -200,7 +215,7 @@ cp -a -- "$profile_path" "$profile_snapshot"
 response=$(create_target_via_ipc "$old_uuid" 0 120)
 assert_eq $'OK\tok' "$response" 'CREATE request crosses real FIFO/service process boundary'
 assert_true 'CREATE profile_update=0 leaves persistent profile bytes unchanged' \
-    diff -qr -- "$profile_path" "$profile_snapshot"
+    profile_trees_equal "$profile_path" "$profile_snapshot"
 list=$(run_keepalive list)
 rc=0; [[ $list == *Avela* && $list == *ACTIVE* ]] || rc=1
 assert_eq 0 "$rc" 'created target becomes ACTIVE in another client process'
