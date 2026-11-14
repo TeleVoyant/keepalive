@@ -29,9 +29,10 @@ maintainer or coding agent needs in order to continue safely.
   one 256-slot nesting limit in both Orca readers, whatever the jq version), and the
   2026-11-14 CI test fixes (no `diff` dependency; PTY driver waits for terminal-mode
   readiness; RISKS.md has both). These rounds are under `[Unreleased]` in
-  CHANGELOG.md; the version string is still 1.1.1. GitHub CI is green on `7b723f9` and
-  `418e2e6` (8 jobs: ShellCheck, Ubuntu, Debian, Fedora, Arch, non-root Debian, Bash 5.0
-  and 5.1) - the first green CI since before 1.1.0.
+  CHANGELOG.md; the version string is still 1.1.1. GitHub CI is green on `7b723f9`,
+  `418e2e6` and the CI test fixes `fd47d14` (8 jobs: ShellCheck, Ubuntu, Debian, Fedora,
+  Arch, non-root Debian, Bash 5.0 and 5.1); it failed on `0040a8a` through `b270c0a`
+  (jq 1.8 depth drift, then the two test defects in RISKS.md).
 - Previous releases: `v1.1.0` at `cf27db4`, `v1.0.0` at `2ea6951`; Orca integration at
   `ea3d6f3`.
 - Product version: `1.1.1`
