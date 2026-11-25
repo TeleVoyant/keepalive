@@ -480,7 +480,7 @@ function emit_row(row, runtime,    title, name, path, parts, count, i) {
 
 # --- op=show, send, status, error --------------------------------------------------------
 
-function show_op(    root, runtime, term, handle, pty, inc, agent, connected, writable, orphaned) {
+function show_op(    root, runtime, term, handle, pty, inc, agent, connected, writable, orphaned, exit_kind) {
     if (roots != 1) return 0
     root = ROOT[1]
     if (kind(root) != "object" || !is_true(member(root, "ok"))) return 0
@@ -497,13 +497,15 @@ function show_op(    root, runtime, term, handle, pty, inc, agent, connected, wr
     if (!text_ok(member(term, "tabId"), 256) || !text_ok(member(term, "leafId"), 256)) return 0
     if (!is_bool(connected) || !is_bool(writable) || !is_bool(orphaned)) return 0
     if (!absent_or_text(agent, 128)) return 0
+    exit_kind = member(member(term, "exitCause"), "kind")
     print tsv(STR[handle]) "\t" ((present(pty) && present(inc)) ? "1" : "0") "\t" \
         (present(pty) ? tsv(STR[pty]) : "-") "\t" (present(inc) ? tsv(STR[inc]) : "-") "\t" \
         tsv(STR[member(term, "worktreeId")]) "\t" tsv(STR[runtime]) "\t" \
         tsv(STR[member(term, "executionHostId")]) "\t" tsv(STR[member(term, "tabId")]) "\t" \
         tsv(STR[member(term, "leafId")]) "\t" (present(agent) ? "1" : "0") "\t" \
         (present(agent) ? tsv(STR[agent]) : "-") "\t" \
-        STR[connected] "\t" STR[writable] "\t" STR[orphaned]
+        STR[connected] "\t" STR[writable] "\t" STR[orphaned] "\t" \
+        (kind(exit_kind) == "string" && STR[exit_kind] == "operator_close" ? "true" : "false")
     return 1
 }
 

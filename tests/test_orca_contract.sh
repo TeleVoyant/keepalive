@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Orca 1.4.241 fixture and normalized adapter contract corpus.
+# Orca fixture corpus and normalized adapter contract, including 1.4.274 compatibility.
 set -Eeuo pipefail
 source "${BASH_SOURCE[0]%/*}/testlib.sh"
 test_env_setup
@@ -83,7 +83,65 @@ assert_no_empty_fields() {
     assert_eq 0 "$empty" "$label"
 }
 
-# A live-shaped response has the authoritative 1.4.241 list/show fields.
+# The 1.4.274 fixtures reconstruct read-only status/list/show fields captured from the
+# installed CLI; every private value is replaced with a synthetic placeholder. The two
+# prompt receipts are synthetic and source-derived from the installed 1.4.274 terminal.send
+# contract: prompt.stages advances from input_accepted to turn_started. Older corpus and
+# malformed fixtures below remain unchanged.
+fixture_dir="$TEST_ROOT/tests/fixtures/orca-corpus"
+export FAKE_ORCA_STATUS_JSON_FILE="$fixture_dir/status-1.4.274-synthetic.json"
+assert_true '1.4.274 status envelope remains reachable' ka_orca_runtime_reachable
+assert_true '1.4.274 status retains appVersion and remote update metadata' \
+    grep -Fq '"appVersion":"1.4.274"' "$fixture_dir/status-1.4.274-synthetic.json"
+assert_true '1.4.274 status retains additive capabilities' \
+    grep -Fq '"capabilities":["synthetic-capability.v1"]' "$fixture_dir/status-1.4.274-synthetic.json"
+unset FAKE_ORCA_STATUS_JSON_FILE
+
+export FAKE_ORCA_LIST_JSON_FILE="$fixture_dir/list-1.4.274-synthetic.json"
+latest_discovery=$(ka_orca_discover)
+assert_eq 9 "$(printf '%s\n' "$latest_discovery" | sed '/^#/d;/^$/d' | wc -l)" \
+    '1.4.274 additive list fields preserve all nine agent candidates'
+assert_eq '#COMPLETE' "$(printf '%s\n' "$latest_discovery" | tail -n1)" \
+    '1.4.274 reconstructed list completes'
+assert_true '1.4.274 list retains hostScope' \
+    grep -Fq '"hostScope"' "$fixture_dir/list-1.4.274-synthetic.json"
+assert_true '1.4.274 list retains topologyRevisions' \
+    grep -Fq '"topologyRevisions"' "$fixture_dir/list-1.4.274-synthetic.json"
+assert_true '1.4.274 terminal rows retain additive branch, timestamp, and preview fields' \
+    grep -Fq '"branch":"synthetic-branch"' "$fixture_dir/list-1.4.274-synthetic.json"
+assert_true '1.4.274 list timestamp and preview fields are synthetic' \
+    grep -Fq '"lastOutputAt":0,"preview":"synthetic terminal preview"' \
+        "$fixture_dir/list-1.4.274-synthetic.json"
+assert_true '1.4.274 show additive pane metadata retains the captured JSON types' \
+    grep -Fq '"paneRuntimeId":0,"rendererGraphEpoch":0,"agentWait":null' \
+        "$fixture_dir/show-1.4.274-synthetic.json"
+unset FAKE_ORCA_LIST_JSON_FILE
+
+ORCA_HANDLE=term-fixture-1 ORCA_PTY=pty-fixture-1 ORCA_INCARNA=inc-fixture-1
+ORCA_WORKTREE=repo::/work/orca-fixture-1 ORCA_RUNTIME=runtime-fixture ORCA_HOST=local
+ORCA_TAB=tab-fixture-1 ORCA_LEAF=leaf-fixture-1 ORCA_AGENT=codex
+export FAKE_ORCA_SHOW_JSON_FILE="$fixture_dir/show-1.4.274-synthetic.json"
+assert_true '1.4.274 show with paneRuntimeId, rendererGraphEpoch, and agentWait validates' \
+    ka_orca_validate_target "$ORCA_HANDLE" "$ORCA_PTY" "$ORCA_INCARNA" \
+    "$ORCA_WORKTREE" "$ORCA_RUNTIME" "$ORCA_HOST" "$ORCA_TAB" "$ORCA_LEAF" "$ORCA_AGENT"
+unset FAKE_ORCA_SHOW_JSON_FILE
+
+for stage_fixture in send-prompt-input-accepted-1.4.274-synthetic.json \
+    send-prompt-turn-started-1.4.274-synthetic.json; do
+    stage_path="$fixture_dir/$stage_fixture"
+    assert_true "$stage_fixture includes the documented input acceptance stage" \
+        grep -Fq '"input_accepted"' "$stage_path"
+    if [[ $stage_fixture == *turn-started* ]]; then
+        assert_true '1.4.274 turn-started receipt includes its additive submission stage' \
+            grep -Fq '"turn_started"' "$stage_path"
+    fi
+    export FAKE_ORCA_RESPONSE_FILE="$stage_path"
+    assert_true "adapter accepts source-derived $stage_fixture receipt" \
+        ka_orca_deliver term-fixture-1 MESSAGE_ENTER synthetic-prompt 0
+done
+unset FAKE_ORCA_RESPONSE_FILE
+
+# A live-shaped response has the authoritative list/show fields.
 export FAKE_ORCA_LIVE_FIVE_FILE=/dev/null
 live_json=$("$KEEPALIVE_ORCA_CLI" terminal list --limit 1000 --json)
 if [[ $parser == jq && -n ${KEEPALIVE_JQ:-} ]]; then
@@ -309,6 +367,37 @@ export FAKE_ORCA_PTY="$ORCA_PTY" FAKE_ORCA_INCARNATION="$ORCA_INCARNA"
 export FAKE_ORCA_WORKTREE="$ORCA_WORKTREE" FAKE_ORCA_HOST=local FAKE_ORCA_TAB=tab-3333
 export FAKE_ORCA_LEAF=leaf-4444 FAKE_ORCA_AGENT=codex
 assert_show_rc 0 'valid show'
+
+# Confirmed operator_close only proves this target ended when all retained identity fields
+# match and Orca reports the closed terminal state; all other exit causes stay transient.
+ORCA_HANDLE=term-fixture-1 ORCA_PTY=pty-fixture-1 ORCA_INCARNA=inc-fixture-1
+ORCA_WORKTREE=repo::/work/orca-fixture-1 ORCA_RUNTIME=runtime-fixture ORCA_HOST=local
+ORCA_TAB=tab-fixture-1 ORCA_LEAF=leaf-fixture-1 ORCA_AGENT=codex
+export FAKE_ORCA_SHOW_JSON_FILE="$fixture_dir/show-operator-close.json"
+assert_show_rc 10 'confirmed operator_close with matching retained identity and absent agent is definitive'
+export FAKE_ORCA_SHOW_JSON_FILE="$fixture_dir/show-operator-close-wrong-incarnation.json"
+assert_show_rc 12 'operator_close cannot override a different incarnation'
+export FAKE_ORCA_SHOW_JSON_FILE="$fixture_dir/show-orphaned-unconfirmed.json"
+assert_show_rc 23 'orphaned terminal without recognized cause remains transient'
+assert_true 'unconfirmed orphan result consumes transient handling' ka_orca_validation_is_transient 23
+export FAKE_ORCA_SHOW_JSON_FILE="$fixture_dir/show-operator-close-connected.json"
+assert_show_rc 23 'operator_close on connected terminal is not definitive'
+assert_true 'connected close candidate remains transient' ka_orca_validation_is_transient 23
+export FAKE_ORCA_SHOW_JSON_FILE="$fixture_dir/show-operator-close-writable.json"
+assert_show_rc 23 'operator_close on writable terminal is not definitive'
+assert_true 'writable close candidate remains transient' ka_orca_validation_is_transient 23
+export FAKE_ORCA_SHOW_JSON_FILE="$fixture_dir/show-live-malformed-exit-cause.json"
+assert_show_rc 0 'malformed exitCause kind does not invalidate a live row'
+export FAKE_ORCA_SHOW_JSON_FILE="$fixture_dir/show-live-unknown-exit-cause.json"
+assert_show_rc 0 'unknown exitCause kind does not invalidate a live row'
+unset FAKE_ORCA_SHOW_JSON_FILE
+
+ORCA_HANDLE=term_mock-agent ORCA_PTY='repo::/work/Orca-Project@@pty-1' ORCA_INCARNA=incarnation-2222
+ORCA_WORKTREE='repo::/work/Orca-Project' ORCA_RUNTIME=runtime-1111 ORCA_HOST=local
+ORCA_TAB=tab-3333 ORCA_LEAF=leaf-4444 ORCA_AGENT=codex
+export FAKE_ORCA_HANDLE=term_mock-agent FAKE_ORCA_PTY="$ORCA_PTY"
+export FAKE_ORCA_INCARNATION="$ORCA_INCARNA" FAKE_ORCA_WORKTREE="$ORCA_WORKTREE"
+export FAKE_ORCA_HOST=local FAKE_ORCA_TAB=tab-3333 FAKE_ORCA_LEAF=leaf-4444 FAKE_ORCA_AGENT=codex
 enable_switch SHOW_NO_PTY; assert_show_rc 24 'no PTY show'; disable_switch SHOW_NO_PTY
 enable_switch SHOW_NO_AGENT; assert_show_rc 23 'no agent show'; disable_switch SHOW_NO_AGENT
 enable_switch SHOW_EMPTY_AGENT; assert_show_rc 23 'empty agent show'; disable_switch SHOW_EMPTY_AGENT

@@ -1,5 +1,18 @@
 # Development and Operations Memory
 
+## Orca v1.4.274 qualification — 2026-11-25
+
+- Live status, discovery, and identity validation passed with jq and awk. A disposable
+  Orca shell received both Enter and text followed by Enter through the checkout adapter.
+- After closing that shell, Orca's `terminal show` retained the PTY and incarnation and
+  reported `exitCause.kind=operator_close`. Both readers now recognize that cause when
+  the stored terminal binding matches and the terminal is disconnected, non-writable,
+  and orphaned. That check returns 10. The tests cover earlier and current JSON shapes,
+  including source-derived agent prompt receipts.
+- The existing journal contained intermittent `schema:not-json` episodes that recovered.
+  The adapter discards the response at that gate, so those records do not establish a
+  cause. The installed service and its configuration were left in place.
+
 ## Settings-editor round — 2026-11-12 (committed as `54fcc26`, installed 2026-11-13)
 
 Trigger: the user found configuration editing clumsy and asked for a redesign: pick any

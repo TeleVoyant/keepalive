@@ -92,6 +92,12 @@ The TUI itself may be launched from any terminal emulator. Backends are auto-det
 
 Orca is evolving, so every Orca-specific command, JSON path, schema check, and error-code mapping lives in [`lib/orca.sh`](lib/orca.sh). The rest of the daemon sees a small normalized `terminal-v1` adapter contract through [`lib/transport.sh`](lib/transport.sh). A future Orca CLI change should normally require edits to that adapter and its mock fixture, not to timers, IPC, or scheduler code.
 
+Keepalive reads live JSON from the installed Orca CLI. The `status`, `terminal list`, and `terminal show` response formats have been verified against Orca v1.4.274. [Orca v1.4.274 release](https://github.com/stablyai/orca/releases/tag/v1.4.274) · [Orca CLI reference](https://orca.dev/docs/cli/reference)
+
+Delivery succeeds when the CLI receipt reports input acceptance through `result.send.accepted`, for both Enter and text followed by Enter. Orca can also report prompt stages such as `turn_started` for text followed by Enter in an agent terminal.
+
+Orca can retain a closed terminal's identity in `terminal show`. Keepalive uses the reported `operator_close` exit cause to mark a disconnected, non-writable, orphaned target unavailable once its stored terminal binding matches.
+
 Discovery accepts only connected, writable, non-orphaned terminals with a non-empty `agentIdentity`. It binds each target to the Orca runtime, terminal handle, PTY, process incarnation, worktree, execution host, tab, leaf, and agent identity. Unknown or incomplete JSON fails the backend pass closed and preserves its prior snapshot. An unfamiliar validation response is transient rather than evidence of identity loss, preventing schema drift from making a target sticky `UNAVAILABLE`.
 
 On Linux the executable is intentionally resolved as `orca-ide`, never bare `orca`, because `orca` commonly names the GNOME screen reader.

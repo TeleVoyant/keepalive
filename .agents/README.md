@@ -46,8 +46,9 @@ maintainer or coding agent needs in order to continue safely.
   **2026-10-02 fix round**, which adds scheduler ownership, IPC/profile/output safety,
   CLI configure/status, release tooling, and final classifier/discovery hardening. Measured
   results are in RISKS.md; method and safety rules in DEVELOPMENT.md.
-- Tests: 36 files, 2352 assertions (`./tests/run.sh`; dev-check is the final gate) as of the
-  2026-11-14 jq depth fix (2356 under jq 1.8); 1.1.1 itself shipped with 31 files and 1519.
+- Tests: 36 files, 2378 assertions with jq 1.7 as of the 2026-11-25 Orca v1.4.274 check.
+  The final gate is `./scripts/dev-check.sh`. The 1.1.1 release shipped with 31 files and
+  1519 assertions.
 - Installed on the development host from `54fcc26` (2026-11-13): the installer reloaded
   both ACTIVE Orca keep-alives with their countdowns continuing (secondary state kept),
   quarantine stayed empty, and `doctor` passed with both backends reachable. Earlier, the
@@ -78,8 +79,8 @@ these notes deliberately do not duplicate it:
 - [`../docs/CONFIGURATION.md`](../docs/CONFIGURATION.md): every environment knob with its
   default and the reasoning for it.
 - [`../docs/TROUBLESHOOTING.md`](../docs/TROUBLESHOOTING.md): symptom-first diagnosis.
-- [`../docs/TESTING.md`](../docs/TESTING.md): what each of the 2352 assertions covers and
-  the conventions for adding one.
+- [`../docs/TESTING.md`](../docs/TESTING.md): test coverage and the conventions for adding
+  assertions.
 - [`../CONTRIBUTING.md`](../CONTRIBUTING.md): the conventions the automated checks
   enforce.
 
