@@ -1,5 +1,20 @@
 # Observed Risks, Gaps, and Open Questions
 
+## Resolved on 2026-11-26: operator_close shortcut and split-emoji discovery outages
+
+- `6115d90` made a matching-binding `terminal show` with `exitCause.kind=operator_close`,
+  connected=false, writable=false and orphaned=true return 10: immediate sticky UNAVAILABLE
+  with the reason "Orca terminal handle is stale or gone", even with no agent identity
+  (pre-commit: 23, or 21 with the agent present). Reverted; see DEVELOPMENT.md.
+- Recurring `schema:not-json` passes came from lone high-surrogate escapes in Orca titles
+  (likely, ~85%; mechanism proven). Now normalized before both readers. Still open: raw
+  invalid UTF-8 (CESU bytes) is accepted by jq and refused by awk - permitted by invariant
+  52 and not emitted by Orca's JSON encoder. The journal still records only the gate name,
+  not the response bytes, so a future episode with another cause would again need a live
+  capture to diagnose.
+- Upstream fix proposal (not filed): make Orca's OSC title clipping avoid splitting a
+  surrogate pair (`src/shared/agent-status/title/osc-title-extraction.ts`).
+
 ## Resolved on 2026-11-14: two test-only CI failures behind the depth drift
 
 CI on `b270c0a` still failed Arch and Debian 12; both were test defects, not product ones.

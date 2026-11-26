@@ -49,7 +49,110 @@ BEGIN {
 
 { LINES[++line_count] = $0 }
 
+# Role: Replace lone high-surrogate escapes in one line's display-only string values.
+# Only a "title", "preview" or "message" value whose key is on the same line is rewritten
+# (Orca prints one member per line); no identity field has one of those names. Identity strings are never touched, so two malformed IDs cannot
+# become equal and still fail closed in the reader. A line over SANITIZE_MAX_LINE bytes is
+# returned unchanged, so the result never depends on how fast this awk is.
+function normalize_json_line(text,    n, i, j, slash_count, code, out, copy_start, c, in_string,
+        display, string_start, last_string, key, last_sig) {
+    if (text !~ /\\u[dD][89aAbB][0-9a-fA-F][0-9a-fA-F]/) return text
+    n = length(text)
+    if (n > SANITIZE_MAX_LINE) return text
+    i = 1; copy_start = 1; out = ""; in_string = 0; display = 0
+    last_string = ""; key = ""; last_sig = ""
+    while (i <= n) {
+        c = substr(text, i, 1)
+        if (!in_string) {
+            if (c == "\"") {
+                in_string = 1
+                string_start = i + 1
+                display = last_sig == ":" && (key == "title" || key == "preview" || key == "message")
+            } else if (c == ":") {
+                key = last_string
+                last_sig = c
+            } else if (c != " " && c != "\t" && c != "\r") {
+                key = ""
+                last_sig = c
+            }
+            i++
+            continue
+        }
+        if (c == "\"") {
+            last_string = substr(text, string_start, i - string_start)
+            in_string = 0
+            last_sig = c
+            i++
+            continue
+        }
+        if (c != "\\") {
+            i++
+            continue
+        }
+        j = i
+        while (substr(text, j, 1) == "\\") j++
+        slash_count = j - i
+        if (display && slash_count % 2 == 1 && substr(text, j, 1) == "u") {
+            code = substr(text, j + 1, 4)
+            if (is_high_hex(code) && !is_low_escape(text, j + 5)) {
+                out = out substr(text, copy_start, i - copy_start) \
+                    substr(text, i, slash_count - 1) "\\ufffd"
+                i = j + 5
+                copy_start = i
+                continue
+            }
+        }
+        if (slash_count % 2 == 1 && substr(text, j, 1) == "\"") {
+            i = j + 1
+            continue
+        }
+        i = j
+    }
+    return out substr(text, copy_start)
+}
+
+# Role: Recognize exactly four hexadecimal digits in the D800-DBFF surrogate range.
+function is_high_hex(code,    first, second, third, fourth) {
+    if (length(code) != 4) return 0
+    first = substr(code, 1, 1); second = substr(code, 2, 1)
+    third = substr(code, 3, 1); fourth = substr(code, 4, 1)
+    return (first == "d" || first == "D") && index("89abAB", second) > 0 &&
+        is_hex_digit(third) && is_hex_digit(fourth)
+}
+
+# Role: Recognize a low-surrogate escape immediately after a high-surrogate escape.
+function is_low_escape(text, start,    code) {
+    if (substr(text, start, 2) != "\\u") return 0
+    code = substr(text, start + 2, 4)
+    if (length(code) != 4 || !(substr(code, 1, 1) == "d" || substr(code, 1, 1) == "D"))
+        return 0
+    return index("cdefCDEF", substr(code, 2, 1)) > 0 &&
+        is_hex_digit(substr(code, 3, 1)) && is_hex_digit(substr(code, 4, 1))
+}
+
+# Role: Test one byte against the ASCII hexadecimal digits accepted by JSON escapes.
+function is_hex_digit(c) {
+    return index("0123456789abcdefABCDEF", c) > 0
+}
+
 END {
+    if (op == "sanitize") {
+        # A pretty-printed Orca member line is far shorter; a title is at most 1024 units.
+        SANITIZE_MAX_LINE = 65536
+        # Total bytes of candidate lines this pass may walk. Over it, nothing is rewritten, so
+        # the outcome is the same on every awk however slow (BusyBox walks bytes slowly) and
+        # the walk always finishes well inside the Orca deadline.
+        SANITIZE_MAX_WORK = 262144
+        sanitize_work = 0
+        for (sanitize_line = 1; sanitize_line <= line_count; sanitize_line++)
+            if (length(LINES[sanitize_line]) <= SANITIZE_MAX_LINE &&
+                    LINES[sanitize_line] ~ /\\u[dD][89aAbB][0-9a-fA-F][0-9a-fA-F]/)
+                sanitize_work += length(LINES[sanitize_line])
+        for (sanitize_line = 1; sanitize_line <= line_count; sanitize_line++)
+            if (sanitize_work > SANITIZE_MAX_WORK) print LINES[sanitize_line]
+            else print normalize_json_line(LINES[sanitize_line])
+        exit
+    }
     line = 1; json = line_count ? LINES[1] "\n" : ""
     n = length(json); pos = 1; nodes = 0; roots = 0; STACK = 0
     parsed = parse_stream()

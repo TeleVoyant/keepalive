@@ -28,7 +28,10 @@ maintainer or coding agent needs in order to continue safely.
   CONFIGURE; DEVELOPMENT.md has the details), the **jq depth fix** (`b270c0a`, 2026-11-14:
   one 256-slot nesting limit in both Orca readers, whatever the jq version), and the
   2026-11-14 CI test fixes (no `diff` dependency; PTY driver waits for terminal-mode
-  readiness; RISKS.md has both). These rounds are under `[Unreleased]` in
+  readiness; RISKS.md has both), `6115d90` (2026-11-25, another agent: Orca 1.4.274
+  fixtures plus an `operator_close` shortcut to UNAVAILABLE), and the **2026-11-26 Orca
+  correction round** (reverts that shortcut; shared lone-high-surrogate normalization for
+  both readers; DEVELOPMENT.md and RISKS.md). These rounds are under `[Unreleased]` in
   CHANGELOG.md; the version string is still 1.1.1. GitHub CI is green on `7b723f9`,
   `418e2e6` and the CI test fixes `fd47d14` (8 jobs: ShellCheck, Ubuntu, Debian, Fedora,
   Arch, non-root Debian, Bash 5.0 and 5.1); it failed on `0040a8a` through `b270c0a`
@@ -46,10 +49,11 @@ maintainer or coding agent needs in order to continue safely.
   **2026-10-02 fix round**, which adds scheduler ownership, IPC/profile/output safety,
   CLI configure/status, release tooling, and final classifier/discovery hardening. Measured
   results are in RISKS.md; method and safety rules in DEVELOPMENT.md.
-- Tests: 36 files, 2378 assertions with jq 1.7 as of the 2026-11-25 Orca v1.4.274 check.
+- Tests: 36 files, 2507 assertions with jq 1.7 as of the 2026-11-26 Orca correction round.
   The final gate is `./scripts/dev-check.sh`. The 1.1.1 release shipped with 31 files and
   1519 assertions.
-- Installed on the development host from `54fcc26` (2026-11-13): the installer reloaded
+- `6115d90` was installed on the development host on 2026-11-25; the 2026-11-26 round is
+  not installed yet. Installed earlier from `54fcc26` (2026-11-13): the installer reloaded
   both ACTIVE Orca keep-alives with their countdowns continuing (secondary state kept),
   quarantine stayed empty, and `doctor` passed with both backends reachable. Earlier, the
   1.1.1 install (2026-10-02) reloaded the one ACTIVE Orca keep-alive with its countdown,

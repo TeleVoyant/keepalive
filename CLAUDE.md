@@ -48,7 +48,10 @@ Module layering (details in `docs/MAINTENANCE.md#module-responsibilities`):
   change both together and keep their output byte-identical. Nesting is capped by
   `KA_ORCA_MAX_PARSE_STACK` (256 parser-stack slots; an object key takes a slot), which the
   jq reader enforces itself because jq 1.8 raised its own limit to 10000; never rely on the
-  installed jq's limit.
+  installed jq's limit. Every response first goes through `ka_orca_normalize_response_set`,
+  so both readers parse the same bytes: a lone high-surrogate escape (Orca emits one when it
+  cuts a long title) becomes `\ufffd` in `title`/`preview`/`message` values only; identity
+  fields are never rewritten.
 - One odd Orca row must never fail a whole discovery pass: understood-but-undeliverable rows
   (no PTY, foreign host, shared incarnation) are skipped and counted; only an unknown envelope or
   a JSON type Orca never emits fails closed (`schema:<gate>`).

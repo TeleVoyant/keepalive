@@ -27,6 +27,13 @@ Orca 1.4.241 compatibility, Orca without jq, and Orca CLI cost.
 
 ### Fixed
 
+- **A split emoji in one Orca title no longer stops discovery and keep-alives.** Orca cuts a
+  terminal title longer than 1024 UTF-16 units at a fixed point and can leave half of an
+  emoji, an escape such as `\ud83d` that both readers refused. While such a title lasted,
+  every discovery pass failed with `schema:not-json` and every keep-alive to that pane was
+  skipped. This is the likely cause of the recurring `schema:not-json` episodes, which
+  logged no response bytes. A shared step now replaces that half with U+FFFD in titles,
+  previews and messages before either reader runs; identity fields are never rewritten.
 - **Orca discovery no longer fails whole passes on one pane.** An agent pane with no
   attached PTY, a foreign or SSH route without an execution host, or split/mirrored panes
   sharing one PTY each made every `terminal list` pass report `reason=schema` and froze the

@@ -161,6 +161,8 @@ ka_orca_runtime_reachable() {
     local output
     output=$(ka_orca_exec status --json 2>/dev/null) || return 1
     ((${#output} <= KA_ORCA_MAX_RESPONSE)) || return 1
+    ka_orca_normalize_response_set "$output"
+    output=$REPLY
     if [[ $KA_ORCA_PARSER == awk ]]; then
         ka_orca_awk status >/dev/null 2>&1 <<<"$output" || return 1
         return 0
@@ -180,6 +182,33 @@ ka_orca_runtime_reachable() {
 ka_orca_timeout_resolve() {
     ka_tunable KEEPALIVE_ORCA_TIMEOUT 3
     KA_ORCA_TIMEOUT=$REPLY
+}
+
+# Role: Normalize malformed UTF-16 display escapes once before any Orca JSON reader sees them.
+# The glob pre-check keeps ordinary responses on the zero-process path; failed normalization
+# leaves the original response for the existing reader and its existing schema gate.
+ka_orca_normalize_response_set() {
+    local response=$1 normalizer=${KA_ORCA_AWK:-} normalized
+    REPLY=$response
+    case $response in
+        *'\u'[dD][89aAbB][0-9a-fA-F][0-9a-fA-F]*) ;;
+        *) return 0 ;;
+    esac
+    # Under jq, use the awk the awk reader would select (KEEPALIVE_AWK, else PATH), so the
+    # input both readers see never depends on which one is in use.
+    if [[ -z $normalizer ]]; then
+        ka_orca_locate_awk || { REPLY=$response; return 0; }
+        normalizer=$REPLY
+    fi
+    ka_orca_timeout_resolve
+    # Both helpers above overwrite REPLY; a failed normalization must hand on the original.
+    REPLY=$response
+    if normalized=$(LC_ALL=C timeout --kill-after=1s "${KA_ORCA_TIMEOUT}s" \
+        "$normalizer" -v op=sanitize -f "$KA_ORCA_AWK_PROGRAM" \
+        <<<"$response" 2>/dev/null); then
+        REPLY=$normalized
+    fi
+    return 0
 }
 
 # Role: Run one Orca CLI command under a hard deadline.
@@ -312,6 +341,8 @@ ka_orca_discover() {
         printf '#INCOMPLETE\tschema:oversize\n'
         return 0
     fi
+    ka_orca_normalize_response_set "$output"
+    output=$REPLY
     rc=0
     if [[ ${KA_ORCA_PARSER:-} == awk ]]; then
         rows=$(ka_orca_awk list 2>/dev/null <<<"$output") || rc=$?
@@ -468,6 +499,8 @@ ka_orca_error_code() {
     local json=$1
     REPLY=unknown
     ((${#json} <= KA_ORCA_MAX_RESPONSE)) || return 0
+    ka_orca_normalize_response_set "$json"
+    json=$REPLY
     if [[ ${KA_ORCA_PARSER:-} == awk ]]; then
         REPLY=$(ka_orca_awk error 2>/dev/null <<<"$json" || printf unknown)
         return 0
@@ -522,6 +555,8 @@ ka_orca_validate_target() {
     # Exactly one document is accepted: with several, the first row would be read and the
     # rest ignored. lib/orca.awk is the same program for hosts without jq.
     ((${#output} <= KA_ORCA_MAX_RESPONSE)) || return 22
+    ka_orca_normalize_response_set "$output"
+    output=$REPLY
     rc=0
     if [[ ${KA_ORCA_PARSER:-} == awk ]]; then
         row=$(ka_orca_awk show 2>/dev/null <<<"$output") || rc=$?
@@ -660,6 +695,8 @@ ka_orca_deliver() {
     fi
     # Exactly one accepted receipt; with several documents -e would judge only the last.
     ((${#output} <= KA_ORCA_MAX_RESPONSE)) || return 1
+    ka_orca_normalize_response_set "$output"
+    output=$REPLY
     if [[ ${KA_ORCA_PARSER:-} == awk ]]; then
         ka_orca_awk send >/dev/null 2>&1 <<<"$output" || return 1
         return 0

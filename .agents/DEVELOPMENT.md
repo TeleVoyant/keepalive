@@ -1,17 +1,41 @@
 # Development and Operations Memory
 
-## Orca v1.4.274 qualification — 2026-11-25
+## Orca correction round — 2026-11-26 (Orca CLI 1.4.277 installed)
 
-- Live status, discovery, and identity validation passed with jq and awk. A disposable
-  Orca shell received both Enter and text followed by Enter through the checkout adapter.
-- After closing that shell, Orca's `terminal show` retained the PTY and incarnation and
-  reported `exitCause.kind=operator_close`. Both readers now recognize that cause when
-  the stored terminal binding matches and the terminal is disconnected, non-writable,
-  and orphaned. That check returns 10. The tests cover earlier and current JSON shapes,
-  including source-derived agent prompt receipts.
-- The existing journal contained intermittent `schema:not-json` episodes that recovered.
-  The adapter discards the response at that gate, so those records do not establish a
-  cause. The installed service and its configuration were left in place.
+Trigger: the user found that `6115d90` (2026-11-25, "Orca v1.4.274 qualification") went
+beyond its goal - parser compatibility with the current Orca - and suspected glitches.
+Four Codex workers audited it; reports were kept outside the repo.
+
+- Kept from `6115d90`: the synthetic 1.4.274 status/list/show/send fixtures and their
+  tests. Live 1.4.277 status, list and show passed both readers (list output compared
+  byte-identical; status and show compared by result). No 1.4.277 parser change was needed.
+- Reverted: `exitCause.kind=operator_close` + disconnected/non-writable/orphaned returned
+  10 (sticky UNAVAILABLE, logged as "handle is stale or gone") even with no agent identity.
+  Upstream Orca sets `operator_close` when teardown was *requested* and leaves PTY death
+  uncertified when the host cannot report it (SSH, `host_status_unavailable`), so it is not
+  identity evidence; it broke invariants 23 and 49. Closed panes are 21/23 again (strike
+  budget). Invariant 49, ARCHITECTURE.md and an `orca.sh` comment now say why.
+- Fixed: recurring `schema:not-json` discovery failures (journal: 3,022 failed passes from
+  Oct 31 to Nov 25, including a Nov 15-17 episode that never recovered). Orca cuts OSC
+  titles over 1024 UTF-16 units into a 512-unit prefix and suffix
+  (`osc-title-extraction.ts`), which can leave a lone high surrogate; `JSON.stringify`
+  emits it as `\ud83d`, which jq 1.7 and the awk reader refuse. One such title failed
+  every discovery pass and every pre-send `terminal show` of that pane (code 22, send
+  skipped). `ka_orca_normalize_response_set` now rewrites lone high-surrogate escapes to
+  `\ufffd` (backslash parity respected) before either reader, with a Bash pattern
+  pre-check so ordinary responses start no extra process. A proofread caught three flaws in
+  the first version, now fixed: it rewrote identity strings too (two malformed IDs could
+  collide; now only same-line `title`/`preview`/`message` values), in jq mode it used a
+  different awk than the awk reader (now `ka_orca_locate_awk`, so BusyBox speed cannot make
+  the readers disagree; lines over 64 KiB, and responses whose candidate lines total over
+  256 KiB, are left unchanged), and a timeout left REPLY holding the timeout value instead
+  of the response. A second proofread found the per-line cap alone still let a 4 MiB
+  multi-line response time out on BusyBox only; the total cap closed it. Mechanism reproduced end to
+  end; attribution of the historical episodes is about 85% (the journal keeps no bytes).
+- Lessons: `schema:not-json` also covers a reader refusing valid-looking JSON, not only
+  non-JSON output. A shared normalization step keeps invariant 52 intact; a reader-only
+  tolerance would not. Whole-tree ShellCheck takes over two minutes (`keepalive` alone
+  ~45 s); it is slow, not stalled.
 
 ## Settings-editor round — 2026-11-12 (committed as `54fcc26`, installed 2026-11-13)
 

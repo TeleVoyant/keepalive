@@ -64,6 +64,20 @@ assert_discovery_gate() {
     assert_eq $'#INCOMPLETE\t'"$expected" "$output" "$label"
 }
 
+# Role: Check a surrogate-escape list fixture yields every eligible row and the expected title.
+assert_surrogate_discovery_title() {
+    local fixture=$1 expected=$2 label=$3 output rows row
+    local actual_title
+    export FAKE_ORCA_LIST_JSON_FILE="$fixture_dir/$fixture"
+    output=$(ka_orca_discover)
+    rows=$(printf '%s\n' "$output" | sed '/^#/d;/^$/d' | wc -l)
+    assert_true "$label retains the one eligible agent row" test "$rows" -eq 1
+    assert_eq '#COMPLETE' "$(printf '%s\n' "$output" | tail -n1)" "$label completes discovery"
+    row=$(printf '%s\n' "$output" | sed '/^#/d;/^$/d')
+    IFS=$'\t' read -r _ _ actual_title _ _ _ _ _ _ _ _ _ <<<"$row"
+    assert_eq "$expected" "$actual_title" "$label display title"
+}
+
 # Role: Assert one exact show validation return code.
 assert_show_rc() {
     local expected=$1 label=$2
@@ -81,6 +95,57 @@ assert_no_empty_fields() {
         done
     done <<<"$row"
     assert_eq 0 "$empty" "$label"
+}
+
+# Role: Write one JSON fixture with a lone high escape in the selected string field.
+write_high_escape_field() {
+    local source=$1 field=$2 destination=$3
+    sed "s/\"$field\"[[:space:]]*:[[:space:]]*\"[^\"]*\"/\"$field\":\"\\\\ud83d\"/" \
+        "$source" >"$destination"
+}
+
+# Role: Compare the normalizer's shared REPLY register without putting large JSON in argv.
+reply_matches_expected() {
+    [[ $REPLY == "$EXPECTED_RESPONSE" ]]
+}
+
+# Role: Create one exact-size compact list line with a lone high escape in its title.
+make_line_cap_list() {
+    local destination=$1 target_bytes=$2 prefix suffix filler
+    prefix='{"id":"line-cap","ok":true,"result":{"terminals":[{"handle":"cap-handle","ptyId":"cap-pty","incarnationId":"cap-inc","worktreeId":"repo::/cap","worktreePath":"/cap","executionHostId":"local","tabId":"cap-tab","leafId":"cap-leaf","agentIdentity":"codex","title":"'
+    suffix='","connected":true,"writable":true,"orphaned":false}],"truncated":false,"totalCount":1},"_meta":{"runtimeId":"runtime-cap"}}'
+    filler=$((target_bytes - ${#prefix} - 6 - ${#suffix}))
+    ((filler >= 0)) || return 1
+    {
+        printf '%s' "$prefix"
+        printf '%*s' "$filler" '' | tr ' ' a
+        printf '\\ud83d%s\n' "$suffix"
+    } >"$destination"
+}
+
+# Role: Build a valid five-row list with candidate display lines near the aggregate work cap.
+make_aggregate_work_list() {
+    local destination=$1 target_bytes=$2 extra_high=$3 index row_prefix row_suffix filler
+    {
+        printf '%s\n' '{"id":"aggregate-cap","ok":true,"result":{"terminals":['
+        for index in 1 2 3 4 5; do
+            row_prefix='{"handle":"aggregate-handle-'"$index"'","ptyId":"aggregate-pty-'"$index"'","incarnationId":"aggregate-inc-'"$index"'","worktreeId":"repo::/aggregate","worktreePath":"/aggregate","executionHostId":"local","tabId":"aggregate-tab-'"$index"'","leafId":"aggregate-leaf-'"$index"'","agentIdentity":"codex","title":"'
+            row_suffix='\ud83d","connected":true,"writable":true,"orphaned":false}'
+            if ((index <= 4)); then
+                filler=$((target_bytes - ${#row_prefix} - ${#row_suffix}))
+                ((filler >= 0)) || return 1
+                printf '%s' "$row_prefix"
+                printf '%*s' "$filler" '' | tr ' ' a
+                printf '%s\n' "$row_suffix"
+            elif ((extra_high == 1)); then
+                printf '%s%s\n' "$row_prefix" "$row_suffix"
+            else
+                printf '%ssafe","connected":true,"writable":true,"orphaned":false}\n' "$row_prefix"
+            fi
+            ((index == 5)) || printf ',\n'
+        done
+        printf '%s\n' '],"truncated":false,"totalCount":5},"_meta":{"runtimeId":"runtime-aggregate"}}'
+    } >"$destination"
 }
 
 # The 1.4.274 fixtures reconstruct read-only status/list/show fields captured from the
@@ -118,6 +183,224 @@ assert_true '1.4.274 show fixture contains pane metadata with the expected JSON 
         "$fixture_dir/show-1.4.274-synthetic.json"
 unset FAKE_ORCA_LIST_JSON_FILE
 
+assert_surrogate_discovery_title list-lone-high-title.json $'\uFFFD' 'lone high title'
+assert_surrogate_discovery_title list-escaped-backslash-title.json '\\ud83d' 'escaped backslash'
+assert_surrogate_discovery_title list-triple-backslash-title.json $'\\\\\uFFFD' 'odd backslash parity'
+assert_surrogate_discovery_title list-paired-surrogates-title.json $'\U0001F600' 'valid surrogate pair'
+assert_surrogate_discovery_title list-lone-low-title.json $'\uFFFD' 'lone low surrogate'
+assert_surrogate_discovery_title list-uppercase-high-title.json $'\uFFFD' 'uppercase high surrogate'
+assert_surrogate_discovery_title list-high-title-at-end.json $'end \uFFFD' 'high surrogate at string end'
+assert_surrogate_discovery_title list-back-to-back-high-titles.json $'\uFFFD\uFFFD' 'back-to-back high surrogates'
+assert_surrogate_discovery_title list-high-then-non-surrogate-unicode-title.json \
+    $'\uFFFDA' 'high followed by non-surrogate unicode escape'
+unset FAKE_ORCA_LIST_JSON_FILE
+
+# Identity fields are never eligible display values: their malformed escape must remain
+# unparseable instead of being rewritten into a different but plausible binding.
+ORCA_HANDLE=term-codex ORCA_PTY=repo::/work/corpus@@pty-1 ORCA_INCARNA=inc-corpus-1
+ORCA_WORKTREE=repo::/work/corpus ORCA_RUNTIME=runtime-corpus ORCA_HOST=local
+ORCA_TAB=tab-corpus-1 ORCA_LEAF=leaf-corpus-1 ORCA_AGENT=codex
+for identity_field in handle ptyId incarnationId agentIdentity; do
+    identity_list="$TEST_TMP/list-identity-$identity_field.json"
+    write_high_escape_field "$fixture_dir/list-lone-high-title.json" "$identity_field" "$identity_list"
+    export FAKE_ORCA_LIST_JSON_FILE=$identity_list
+    assert_discovery_gate schema:not-json "lone high in list $identity_field fails closed"
+
+    identity_show="$TEST_TMP/show-identity-$identity_field.json"
+    write_high_escape_field "$fixture_dir/show-lone-high-title.json" "$identity_field" "$identity_show"
+    export FAKE_ORCA_SHOW_JSON_FILE=$identity_show
+    assert_show_rc 22 "lone high in show $identity_field is schema code 22"
+done
+unset FAKE_ORCA_LIST_JSON_FILE FAKE_ORCA_SHOW_JSON_FILE
+
+# The normalizer's key scope is deliberately line-local and applies only to scalar display values.
+scope_response=$'{"title":\n"\\ud83d"}'
+ka_orca_normalize_response_set "$scope_response"
+assert_eq "$scope_response" "$REPLY" 'display value on the line after its key stays unchanged'
+scope_response='{"title" : "\ud83d"}'
+ka_orca_normalize_response_set "$scope_response"
+assert_eq '{"title" : "\ufffd"}' "$REPLY" 'spaces around a display key colon are accepted'
+scope_response='{"title":["\ud83d"]}'
+ka_orca_normalize_response_set "$scope_response"
+assert_eq "$scope_response" "$REPLY" 'array contents under title are not display scalar values'
+scope_response='{"branch":"\ud83d","title":"\ud83d"}'
+ka_orca_normalize_response_set "$scope_response"
+assert_eq '{"branch":"\ud83d","title":"\ufffd"}' "$REPLY" \
+    'compact line rewrites title but leaves a non-display key unchanged'
+scope_response='{"preview":"\ud83d","message":"\ud83e"}'
+ka_orca_normalize_response_set "$scope_response"
+assert_eq '{"preview":"\ufffd","message":"\ufffd"}' "$REPLY" \
+    'preview and message display values are normalized on their key line'
+
+# The byte line cap makes refusal deterministic before a pathological compact line is scanned.
+cap_under_file="$TEST_TMP/line-cap-under.json"
+cap_over_file="$TEST_TMP/line-cap-over.json"
+make_line_cap_list "$cap_under_file" 65535
+make_line_cap_list "$cap_over_file" 65537
+cap_under=$(<"$cap_under_file")
+EXPECTED_RESPONSE=${cap_under/'\ud83d'/'\ufffd'}
+ka_orca_normalize_response_set "$cap_under"
+assert_true 'a 65535-byte line is rewritten below the sanitizer cap' reply_matches_expected
+export FAKE_ORCA_LIST_JSON_FILE=$cap_under_file
+assert_eq '#COMPLETE' "$(ka_orca_discover | tail -n1)" \
+    'a lone high on a line just under the cap completes discovery'
+cap_over=$(<"$cap_over_file")
+EXPECTED_RESPONSE=$cap_over
+ka_orca_normalize_response_set "$cap_over"
+assert_true 'a 65537-byte line is passed through unchanged above the sanitizer cap' reply_matches_expected
+export FAKE_ORCA_LIST_JSON_FILE=$cap_over_file
+assert_discovery_gate schema:not-json 'an over-cap lone high deterministically refuses the list'
+unset FAKE_ORCA_LIST_JSON_FILE
+
+# The aggregate cap sums only candidate lines at or below the per-line cap.
+aggregate_under_file="$TEST_TMP/aggregate-work-under.json"
+aggregate_over_file="$TEST_TMP/aggregate-work-over.json"
+make_aggregate_work_list "$aggregate_under_file" 65535 0
+aggregate_under=$(<"$aggregate_under_file")
+aggregate_under_work=$(LC_ALL=C awk '/\\u[dD][89aAbB][0-9a-fA-F][0-9a-fA-F]/ { total += length($0) } END { print total + 0 }' \
+    "$aggregate_under_file")
+assert_eq 262140 "$aggregate_under_work" 'aggregate candidate lines total four bytes under the work cap'
+EXPECTED_RESPONSE=${aggregate_under//'\ud83d'/'\ufffd'}
+ka_orca_normalize_response_set "$aggregate_under"
+assert_true 'aggregate work just under 262144 bytes rewrites every candidate line' reply_matches_expected
+export FAKE_ORCA_LIST_JSON_FILE=$aggregate_under_file
+aggregate_under_output=$(ka_orca_discover)
+assert_eq 5 "$(printf '%s\n' "$aggregate_under_output" | sed '/^#/d;/^$/d' | wc -l)" \
+    'aggregate work just under the cap keeps all five rows'
+assert_eq '#COMPLETE' "$(printf '%s\n' "$aggregate_under_output" | tail -n1)" \
+    'aggregate work just under the cap completes discovery'
+
+make_aggregate_work_list "$aggregate_over_file" 65536 1
+aggregate_over=$(<"$aggregate_over_file")
+aggregate_over_work=$(LC_ALL=C awk '/\\u[dD][89aAbB][0-9a-fA-F][0-9a-fA-F]/ { total += length($0) } END { print total + 0 }' \
+    "$aggregate_over_file")
+aggregate_extra_line=$(LC_ALL=C awk 'NR == 10 { print length($0); exit }' "$aggregate_over_file")
+assert_eq 262144 "$((aggregate_over_work - aggregate_extra_line))" \
+    'four maximum-size candidate lines consume exactly the aggregate cap'
+assert_true 'one additional candidate line pushes work just over 262144 bytes' \
+    test "$aggregate_over_work" -gt 262144
+EXPECTED_RESPONSE=$aggregate_over
+ka_orca_normalize_response_set "$aggregate_over"
+assert_true 'aggregate work over the cap passes every candidate line through unchanged' reply_matches_expected
+export FAKE_ORCA_LIST_JSON_FILE=$aggregate_over_file
+assert_discovery_gate schema:not-json 'aggregate work over the cap fails closed'
+unset FAKE_ORCA_LIST_JSON_FILE
+
+# Count actual wrapper execs, proving the ordinary response path forks neither parser nor timeout.
+process_shim_dir="$TEST_TMP/no-normalizer-process-bin"
+process_log="$TEST_TMP/no-normalizer-process.log"
+mkdir -p "$process_shim_dir"
+real_awk=$(command -v awk)
+real_timeout=$(command -v timeout)
+process_original_keepalive_awk=${KEEPALIVE_AWK:-}
+process_original_ka_orca_awk=$KA_ORCA_AWK
+cat >"$process_shim_dir/awk" <<'SH'
+#!/usr/bin/env bash
+printf 'awk\n' >>"$NORMALIZER_PROCESS_LOG"
+exec "$NORMALIZER_REAL_AWK" "$@"
+SH
+cat >"$process_shim_dir/timeout" <<'SH'
+#!/usr/bin/env bash
+printf 'timeout\n' >>"$NORMALIZER_PROCESS_LOG"
+exec "$NORMALIZER_REAL_TIMEOUT" "$@"
+SH
+chmod 700 "$process_shim_dir/awk" "$process_shim_dir/timeout"
+saved_path=$PATH
+PATH="$process_shim_dir:$PATH"
+KEEPALIVE_AWK=$process_shim_dir/awk KA_ORCA_AWK=''
+export PATH KEEPALIVE_AWK KA_ORCA_AWK NORMALIZER_PROCESS_LOG=$process_log NORMALIZER_REAL_AWK=$real_awk
+export NORMALIZER_REAL_TIMEOUT=$real_timeout
+ka_orca_normalize_response_set '{"ordinary":"response"}'
+PATH=$saved_path
+KEEPALIVE_AWK=$process_original_keepalive_awk KA_ORCA_AWK=$process_original_ka_orca_awk
+export PATH KEEPALIVE_AWK KA_ORCA_AWK
+assert_eq '{"ordinary":"response"}' "$REPLY" 'ordinary response is returned unchanged'
+assert_true 'ordinary response starts no extra awk or timeout process' test ! -e "$process_log"
+unset NORMALIZER_PROCESS_LOG NORMALIZER_REAL_AWK NORMALIZER_REAL_TIMEOUT
+
+# A jq reader still delegates normalization to ka_orca_locate_awk's KEEPALIVE_AWK choice.
+original_keepalive_awk=${KEEPALIVE_AWK:-}
+if [[ $parser == jq ]]; then
+    selection_log="$TEST_TMP/jq-normalizer-awk.log"
+    selection_shim="$TEST_TMP/jq-normalizer-awk"
+    selected_real_awk=$(command -v awk)
+    cat >"$selection_shim" <<'SH'
+#!/usr/bin/env bash
+printf 'used\n' >>"$JQ_NORMALIZER_AWK_LOG"
+exec "$JQ_NORMALIZER_REAL_AWK" "$@"
+SH
+    chmod 700 "$selection_shim"
+    export JQ_NORMALIZER_AWK_LOG=$selection_log JQ_NORMALIZER_REAL_AWK=$selected_real_awk
+    KEEPALIVE_ORCA_PARSER=jq KEEPALIVE_AWK=$selection_shim
+    export KEEPALIVE_ORCA_PARSER KEEPALIVE_AWK
+    KA_ORCA_CLI=''; KA_ORCA_JQ=''; KA_ORCA_AWK=''
+    assert_true 'jq mode resolves its selected normalizer awk' ka_orca_find
+    ka_orca_normalize_response_set '{"title":"\ud83d"}'
+    assert_eq '{"title":"\ufffd"}' "$REPLY" 'jq mode normalizes with the selected awk'
+    assert_eq 1 "$(wc -l <"$selection_log")" 'jq mode invoked KEEPALIVE_AWK once'
+    KEEPALIVE_AWK=$original_keepalive_awk
+    KEEPALIVE_ORCA_PARSER=$parser
+    export KEEPALIVE_AWK KEEPALIVE_ORCA_PARSER
+    KA_ORCA_CLI=''; KA_ORCA_JQ=''; KA_ORCA_AWK=''
+    ka_orca_find
+else
+    test_skip 'jq mode uses KEEPALIVE_AWK for normalization' 'jq reader is not selected'
+fi
+unset JQ_NORMALIZER_AWK_LOG JQ_NORMALIZER_REAL_AWK
+
+# Failed and timed-out sanitizer calls preserve the original bytes for the selected reader.
+selected_reader_awk=$KA_ORCA_AWK
+if [[ $parser == awk ]]; then normalizer_real_awk=$selected_reader_awk; else normalizer_real_awk=$(command -v awk); fi
+normalizer_failure_shim="$TEST_TMP/normalizer-failure-awk"
+cat >"$normalizer_failure_shim" <<'SH'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+for argument in "$@"; do
+    if [[ $argument == op=sanitize ]]; then
+        if [[ ${NORMALIZER_FAILURE_MODE:-exit} == timeout ]]; then sleep 2; fi
+        exit 1
+    fi
+done
+exec "$NORMALIZER_FAILURE_REAL_AWK" "$@"
+SH
+chmod 700 "$normalizer_failure_shim"
+KEEPALIVE_AWK=$normalizer_failure_shim
+if [[ $parser == awk ]]; then KA_ORCA_AWK=$normalizer_failure_shim; else KA_ORCA_AWK=''; fi
+KEEPALIVE_ORCA_TIMEOUT=1
+NORMALIZER_FAILURE_REAL_AWK=$normalizer_real_awk
+NORMALIZER_FAILURE_MODE='exit'
+export KEEPALIVE_AWK KA_ORCA_AWK KEEPALIVE_ORCA_TIMEOUT NORMALIZER_FAILURE_REAL_AWK NORMALIZER_FAILURE_MODE
+failure_response=$(<"$fixture_dir/list-lone-high-title.json")
+EXPECTED_RESPONSE=$failure_response
+ka_orca_normalize_response_set "$failure_response"
+assert_true 'exit-1 normalizer failure preserves the original REPLY' reply_matches_expected
+export FAKE_ORCA_LIST_JSON_FILE="$fixture_dir/list-lone-high-title.json"
+assert_discovery_gate schema:not-json 'reader sees the unnormalized response after exit-1'
+NORMALIZER_FAILURE_MODE=timeout
+export NORMALIZER_FAILURE_MODE
+failure_response=$(<"$fixture_dir/show-lone-high-title.json")
+EXPECTED_RESPONSE=$failure_response
+ka_orca_normalize_response_set "$failure_response"
+assert_true 'timed-out normalizer preserves the original REPLY' reply_matches_expected
+export FAKE_ORCA_SHOW_JSON_FILE="$fixture_dir/show-lone-high-title.json"
+assert_show_rc 22 'reader returns no-normalization show code after timeout'
+unset FAKE_ORCA_LIST_JSON_FILE FAKE_ORCA_SHOW_JSON_FILE KEEPALIVE_ORCA_TIMEOUT
+KEEPALIVE_AWK=$original_keepalive_awk
+KA_ORCA_AWK=$selected_reader_awk
+export KEEPALIVE_AWK KA_ORCA_AWK
+unset NORMALIZER_FAILURE_MODE NORMALIZER_FAILURE_REAL_AWK
+
+export FAKE_ORCA_STATUS_JSON_FILE="$fixture_dir/status-lone-high-display.json"
+assert_true 'status with lone high display text remains reachable' ka_orca_runtime_reachable
+unset FAKE_ORCA_STATUS_JSON_FILE
+export FAKE_ORCA_RESPONSE_FILE="$fixture_dir/send-lone-high-display.json"
+assert_true 'send receipt with lone high display text remains accepted' \
+    ka_orca_deliver term-codex MESSAGE_ENTER synthetic-prompt 0
+unset FAKE_ORCA_RESPONSE_FILE
+error_lone_high=$(<"$fixture_dir/error-lone-high-message.json")
+ka_orca_error_code "$error_lone_high"
+assert_eq terminal_handle_stale "$REPLY" 'error code survives lone high display message'
+
 ORCA_HANDLE=term-fixture-1 ORCA_PTY=pty-fixture-1 ORCA_INCARNA=inc-fixture-1
 ORCA_WORKTREE=repo::/work/orca-fixture-1 ORCA_RUNTIME=runtime-fixture ORCA_HOST=local
 ORCA_TAB=tab-fixture-1 ORCA_LEAF=leaf-fixture-1 ORCA_AGENT=codex
@@ -126,6 +409,16 @@ assert_true '1.4.274 show with paneRuntimeId, rendererGraphEpoch, and agentWait 
     ka_orca_validate_target "$ORCA_HANDLE" "$ORCA_PTY" "$ORCA_INCARNA" \
     "$ORCA_WORKTREE" "$ORCA_RUNTIME" "$ORCA_HOST" "$ORCA_TAB" "$ORCA_LEAF" "$ORCA_AGENT"
 unset FAKE_ORCA_SHOW_JSON_FILE
+
+ORCA_HANDLE=term-codex ORCA_PTY=repo::/work/corpus@@pty-1 ORCA_INCARNA=inc-corpus-1
+ORCA_WORKTREE=repo::/work/corpus ORCA_RUNTIME=runtime-corpus ORCA_HOST=local
+ORCA_TAB=tab-corpus-1 ORCA_LEAF=leaf-corpus-1 ORCA_AGENT=codex
+export FAKE_ORCA_SHOW_JSON_FILE="$fixture_dir/show-lone-high-title.json"
+assert_show_rc 0 'show with lone high display title validates'
+unset FAKE_ORCA_SHOW_JSON_FILE
+ORCA_HANDLE=term-fixture-1 ORCA_PTY=pty-fixture-1 ORCA_INCARNA=inc-fixture-1
+ORCA_WORKTREE=repo::/work/orca-fixture-1 ORCA_RUNTIME=runtime-fixture ORCA_HOST=local
+ORCA_TAB=tab-fixture-1 ORCA_LEAF=leaf-fixture-1 ORCA_AGENT=codex
 
 for stage_fixture in send-prompt-input-accepted-1.4.274-synthetic.json \
     send-prompt-turn-started-1.4.274-synthetic.json; do

@@ -142,6 +142,19 @@ repeated object key whose earlier, replaced value is nested past the limit (jq's
 only the value it kept). Orca's encoder emits none of these, and a difference can only
 reject a response, never accept another identity.
 
+Both readers also get the same input. Orca can emit a lone high-surrogate escape such as
+`\ud83d`: it cuts a terminal title longer than 1024 UTF-16 units at a fixed point, which can
+split an emoji. jq 1.7 and the awk reader both refuse such an escape, so while that title
+lasted, every discovery pass and every pre-send check of that pane failed. (Probably the cause
+of the recurring `schema:not-json` episodes seen until 2026-11-25; their bytes were not kept.)
+`ka_orca_normalize_response_set` replaces a lone high-surrogate escape with `\ufffd`
+before either reader runs, but only inside a `title`, `preview` or `message` value whose key
+is on the same line (Orca prints one member per line). Identity strings are never rewritten,
+so a malformed ID still fails closed instead of possibly matching another. A line over
+64 KiB, or a response whose candidate lines total over 256 KiB, is left alone, so the result
+never depends on how fast the host's awk is. A Bash pattern check keeps
+every other response free of the extra awk process.
+
 Both readers refuse a response over 4 MiB before parsing (`schema:oversize`), and the awk
 reader runs under the same `KEEPALIVE_ORCA_TIMEOUT` deadline as the CLI call it follows
 (`schema:parse-timeout`). It walks the input line by line, because BusyBox awk's

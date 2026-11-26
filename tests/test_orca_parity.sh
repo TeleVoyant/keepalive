@@ -12,8 +12,13 @@ export KEEPALIVE_ORCA_CLI="$TEST_ROOT/tests/fixtures/orca-mock"
 run_reader_test() {
     local parser=$1 binary=$2 script=$3 label=$4 output
     output="$TEST_TMP/${label//[^A-Za-z0-9_.-]/_}.out"
-    if env KEEPALIVE_ORCA_PARSER="$parser" KEEPALIVE_AWK="$binary" \
-        KEEPALIVE_JQ="${KEEPALIVE_JQ:-}" bash "$script" >"$output" 2>&1; then
+    local awk_binary=$binary jq_binary=${KEEPALIVE_JQ:-}
+    # A jq run pins jq, not awk: the shared response normalization still uses a real awk.
+    if [[ $parser == jq ]]; then
+        awk_binary='' jq_binary=$binary
+    fi
+    if env KEEPALIVE_ORCA_PARSER="$parser" KEEPALIVE_AWK="$awk_binary" \
+        KEEPALIVE_JQ="$jq_binary" bash "$script" >"$output" 2>&1; then
         assert_true "$label passes under $parser reader ($binary)" true
     else
         cat "$output"
@@ -25,7 +30,7 @@ run_reader_test() {
 build_no_jq_path() {
     local directory=$1 name source
     mkdir -p "$directory"
-    for name in bash awk python3 env mktemp mkdir chmod cat cp rm readlink realpath stat id getent \
+    for name in bash awk python3 env mktemp mkdir chmod cat cp mv rm readlink realpath stat id getent flock \
         touch uname grep sed tail head wc tr cut timeout sleep date dirname basename sort find; do
         source=$(command -v "$name" || true)
         [[ -n $source && ! -e $directory/$name ]] && ln -s "$source" "$directory/$name"
@@ -40,6 +45,31 @@ run_no_jq_probe() {
         KEEPALIVE_ORCA_ENABLED=1 KEEPALIVE_ORCA_PARSER=auto bash "$probe" >"$output" 2>&1
 }
 
+# Role: Build a five-row list near the aggregate sanitizer work cap for jq/awk comparison.
+make_aggregate_work_list() {
+    local destination=$1 target_bytes=$2 extra_high=$3 index row_prefix row_suffix filler
+    {
+        printf '%s\n' '{"id":"aggregate-cap","ok":true,"result":{"terminals":['
+        for index in 1 2 3 4 5; do
+            row_prefix='{"handle":"aggregate-handle-'"$index"'","ptyId":"aggregate-pty-'"$index"'","incarnationId":"aggregate-inc-'"$index"'","worktreeId":"repo::/aggregate","worktreePath":"/aggregate","executionHostId":"local","tabId":"aggregate-tab-'"$index"'","leafId":"aggregate-leaf-'"$index"'","agentIdentity":"codex","title":"'
+            row_suffix='\ud83d","connected":true,"writable":true,"orphaned":false}'
+            if ((index <= 4)); then
+                filler=$((target_bytes - ${#row_prefix} - ${#row_suffix}))
+                ((filler >= 0)) || return 1
+                printf '%s' "$row_prefix"
+                printf '%*s' "$filler" '' | tr ' ' a
+                printf '%s\n' "$row_suffix"
+            elif ((extra_high == 1)); then
+                printf '%s%s\n' "$row_prefix" "$row_suffix"
+            else
+                printf '%ssafe","connected":true,"writable":true,"orphaned":false}\n' "$row_prefix"
+            fi
+            ((index == 5)) || printf ',\n'
+        done
+        printf '%s\n' '],"truncated":false,"totalCount":5},"_meta":{"runtimeId":"runtime-aggregate"}}'
+    } >"$destination"
+}
+
 # Role: Generate compact, pretty-printed, duplicate-key, and boundary JSON files for reader checks.
 build_corpus() {
     local directory=$1 base row shell index deep
@@ -48,6 +78,10 @@ build_corpus() {
     shell='{"handle":"term-shell","ptyId":"shell-pty","incarnationId":"shell-inc","worktreeId":"repo::/work/corpus","worktreePath":"/work/corpus","executionHostId":"local","tabId":"tab-shell","leafId":"leaf-shell","title":"Shell","connected":true,"writable":true,"orphaned":false}'
     row='{"handle":"term-codex","ptyId":"repo::/work/corpus@@pty-1","incarnationId":"inc-corpus-1","worktreeId":"repo::/work/corpus","worktreePath":"/work/corpus","executionHostId":"local","tabId":"tab-corpus-1","leafId":"leaf-corpus-1","agentIdentity":"codex","title":"Corpus Codex","connected":true,"writable":true,"orphaned":false}'
     printf '%s\n' '{"id":"corpus-list","ok":true,"result":{"terminals":['"$base,$shell"'],"truncated":false,"totalCount":2,"hostScope":{"hostIds":["local"],"omittedHostIds":[]},"topologyRevisions":{"corpus":1}},"_meta":{"runtimeId":"runtime-corpus"}}' >"$directory/list-valid.json"
+    for field in handle ptyId incarnationId agentIdentity; do
+        sed "s/\"$field\":[[:space:]]*\"[^\"]*\"/\"$field\":\"\\\\ud83d\"/" \
+            "$directory/list-valid.json" >"$directory/list-identity-$field.json"
+    done
     printf '%s\n' '{"id":"corpus-list","ok":true,"result":{"terminals":['"${row/"ptyId":"repo::\/work\/corpus@@pty-1"/"ptyId":null}"','"${row/"incarnationId":"inc-corpus-1"/"incarnationId":null}"'],"truncated":false,"totalCount":2},"_meta":{"runtimeId":"runtime-corpus"}}' >"$directory/list-ptyless.json"
     printf '%s\n' '{"id":"corpus-list","ok":true,"result":{"terminals":['"$row,$row"'],"truncated":false,"totalCount":2},"_meta":{"runtimeId":"runtime-corpus"}}' >"$directory/list-exact-duplicate.json"
     printf '%s\n' '{"id":"corpus-list","ok":true,"result":{"terminals":['"$row"',{"handle":"term-other","ptyId":"pty-other","incarnationId":"inc-corpus-1","worktreeId":"repo::/work/corpus","worktreePath":"/work/corpus","executionHostId":"local","tabId":"tab-other","leafId":"leaf-other","agentIdentity":"codex","title":"Other","connected":true,"writable":true,"orphaned":false}],"truncated":false,"totalCount":2},"_meta":{"runtimeId":"runtime-corpus"}}' >"$directory/list-collision.json"
@@ -65,6 +99,14 @@ build_corpus() {
     whitespace_json=${whitespace_json//,/,$'\n'}
     printf '%s\n' "$whitespace_json" >"$directory/list-whitespace.json"
     printf '%s\n' '{"ok":true,"result":{"terminal":{"handle":"term-codex","ptyId":"repo::/work/corpus@@pty-1","incarnationId":"inc-corpus-1","worktreeId":"repo::/work/corpus","worktreePath":"/work/corpus","executionHostId":"local","tabId":"tab-corpus-1","leafId":"leaf-corpus-1","agentIdentity":"codex","connected":true,"writable":true,"orphaned":false}},"_meta":{"runtimeId":"runtime-corpus"}}' >"$directory/show-valid.json"
+    for field in handle ptyId incarnationId agentIdentity; do
+        sed "s/\"$field\":[[:space:]]*\"[^\"]*\"/\"$field\":\"\\\\ud83d\"/" \
+            "$directory/show-valid.json" >"$directory/show-identity-$field.json"
+    done
+    printf '{"title":\n"\\ud83d"}\n' >"$directory/normalizer-next-line.json"
+    printf '%s\n' '{"title" : "\ud83d"}' >"$directory/normalizer-spaced-key.json"
+    printf '%s\n' '{"title":["\ud83d"]}' >"$directory/normalizer-title-array.json"
+    printf '%s\n' '{"branch":"\ud83d","title":"\ud83d"}' >"$directory/normalizer-compact-identity.json"
     printf '%s\n' '{"ok":true,"result":{"terminal":{"handle":"term-codex","ptyId":null,"incarnationId":null,"worktreeId":"repo::/work/corpus","worktreePath":"/work/corpus","executionHostId":"local","tabId":"tab-corpus-1","leafId":"leaf-corpus-1","agentIdentity":"codex","connected":true,"writable":true,"orphaned":false}},"_meta":{"runtimeId":"runtime-corpus"}}' >"$directory/show-no-pty.json"
     printf '%s\n' '{"ok":true,"result":{"terminal":{"handle":"term-codex","ptyId":"pty","incarnationId":"inc-corpus-1","worktreeId":"repo::/work/corpus","worktreePath":"/work/corpus","executionHostId":"local","tabId":"tab-corpus-1","leafId":"leaf-corpus-1","connected":true,"writable":true,"orphaned":false}},"_meta":{"runtimeId":"runtime-corpus"}}' >"$directory/show-no-agent.json"
     printf '%s\n' '{"ok":true,"result":{"terminal":{"handle":"term-codex","ptyId":[],"incarnationId":"inc-corpus-1","worktreeId":"repo::/work/corpus","worktreePath":"/work/corpus","executionHostId":"local","tabId":"tab-corpus-1","leafId":"leaf-corpus-1","agentIdentity":"codex","connected":true,"writable":true,"orphaned":false}},"_meta":{"runtimeId":"runtime-corpus"}}' >"$directory/show-wrong-type.json"
@@ -245,6 +287,8 @@ import sys
 pathlib.Path(sys.argv[1]).write_text(" " * 4194305 + "{}\n", encoding="ascii")
 PY
     printf '{"id":"corpus-list","ok":true,"result":{"terminals":[{"handle":"term-codex","ptyId":"pty","incarnationId":"inc","worktreeId":"wt","worktreePath":"/work","executionHostId":"local","tabId":"tab","leafId":"leaf","agentIdentity":"codex","title":"raw\xff","connected":true,"writable":true,"orphaned":false}],"truncated":false,"totalCount":1},"_meta":{"runtimeId":"runtime-corpus"}}\n' >"$directory/raw-invalid-utf8.json"
+    make_aggregate_work_list "$directory/list-work-cap-under.json" 65535 0
+    make_aggregate_work_list "$directory/list-work-cap-over.json" 65536 1
 }
 
 # Role: Run one adapter operation in a fresh shell and record stdout plus return status.
@@ -596,7 +640,12 @@ test_env_setup
 source_core
 export KEEPALIVE_ORCA_ENABLED=1 KEEPALIVE_ORCA_CLI="$FAKE_ORCA_STUB" \
     KEEPALIVE_ORCA_PARSER="$PARSER_NAME" FAKE_ORCA_INPUT="$FAKE_ORCA_INPUT"
-if [[ $PARSER_NAME == jq ]]; then export KEEPALIVE_JQ="$PARSER_BINARY"; else export KEEPALIVE_AWK="$PARSER_BINARY"; fi
+if [[ $PARSER_NAME == jq ]]; then
+    export KEEPALIVE_JQ="$PARSER_BINARY"
+    unset KEEPALIVE_AWK
+else
+    export KEEPALIVE_AWK="$PARSER_BINARY"
+fi
 KA_ORCA_CLI=''; KA_ORCA_JQ=''; KA_ORCA_AWK=''
 ka_orca_find
 operation=$1
@@ -617,12 +666,38 @@ case $operation in
         ka_orca_error_code "$json"
         printf '%s\n' "$REPLY"
         ;;
+    normalize)
+        json=$(cat -- "$FAKE_ORCA_INPUT")
+        ka_orca_normalize_response_set "$json"
+        printf '%s\n' "$REPLY"
+        ;;
     *) exit 2 ;;
 esac
 SH
     chmod 700 "$FAKE_ORCA_PROBE"
 
+    for path in "$corpus"/normalizer-*.json; do
+        assert_probe_parity normalize "$path" "normalizer byte parity $(basename "$path")"
+    done
     assert_probe_parity list "$corpus/list-valid.json" 'valid list corpus'
+    assert_probe_parity list "$corpus/list-work-cap-under.json" \
+        'aggregate candidate work just under the cap'
+    assert_probe_parity list "$corpus/list-work-cap-over.json" \
+        'aggregate candidate work over the cap refuses identically'
+    for path in "$corpus"/list-identity-*.json; do
+        assert_probe_parity list "$path" "identity escape refusal parity $(basename "$path")"
+    done
+    for path in "$TEST_ROOT"/tests/fixtures/orca-corpus/list-lone-high-title.json \
+        "$TEST_ROOT"/tests/fixtures/orca-corpus/list-escaped-backslash-title.json \
+        "$TEST_ROOT"/tests/fixtures/orca-corpus/list-triple-backslash-title.json \
+        "$TEST_ROOT"/tests/fixtures/orca-corpus/list-paired-surrogates-title.json \
+        "$TEST_ROOT"/tests/fixtures/orca-corpus/list-lone-low-title.json \
+        "$TEST_ROOT"/tests/fixtures/orca-corpus/list-uppercase-high-title.json \
+        "$TEST_ROOT"/tests/fixtures/orca-corpus/list-high-title-at-end.json \
+        "$TEST_ROOT"/tests/fixtures/orca-corpus/list-back-to-back-high-titles.json \
+        "$TEST_ROOT"/tests/fixtures/orca-corpus/list-high-then-non-surrogate-unicode-title.json; do
+        assert_probe_parity list "$path" "surrogate list corpus $(basename "$path")"
+    done
     assert_probe_parity list "$corpus/list-ptyless.json" 'pty-less list corpus'
     assert_probe_parity list "$corpus/list-collision.json" 'conflicting collision list corpus'
     assert_probe_parity list "$corpus/list-exact-duplicate.json" 'exact duplicate list corpus'
@@ -644,17 +719,28 @@ SH
     assert_duplicate_key_depth "$JQ_BIN" "$SYSTEM_AWK" \
         "$corpus/list-duplicate-deep-key.json" "$corpus/list-one-row-valid.json"
     assert_probe_parity show "$corpus/show-valid.json" 'valid show corpus'
+    for path in "$corpus"/show-identity-*.json; do
+        assert_probe_parity show "$path" "show identity escape refusal parity $(basename "$path")"
+    done
+    assert_probe_parity show "$TEST_ROOT/tests/fixtures/orca-corpus/show-lone-high-title.json" \
+        'surrogate show corpus'
     assert_probe_parity show "$corpus/show-no-pty.json" 'no-PTY show corpus'
     assert_probe_parity show "$corpus/show-no-agent.json" 'no-agent show corpus'
     assert_probe_parity show "$corpus/show-wrong-type.json" 'wrong-type show corpus'
     assert_probe_parity show "$corpus/show-multi-document.json" 'multi-document show corpus'
     assert_probe_parity send "$corpus/send-valid.json" 'valid send corpus'
+    assert_probe_parity send "$TEST_ROOT/tests/fixtures/orca-corpus/send-lone-high-display.json" \
+        'surrogate send receipt corpus'
     assert_probe_parity send "$corpus/send-rejected.json" 'rejected send corpus'
     assert_probe_parity send "$corpus/send-multi-document.json" 'multi-document send corpus'
     assert_probe_parity status "$corpus/status-reachable.json" 'reachable status corpus'
+    assert_probe_parity status "$TEST_ROOT/tests/fixtures/orca-corpus/status-lone-high-display.json" \
+        'surrogate status corpus'
     assert_probe_parity status "$corpus/status-unreachable.json" 'unreachable status corpus'
     assert_probe_parity status "$corpus/status-multi-document.json" 'multi-document status corpus'
     assert_probe_parity error "$corpus/error-stale.json" 'stale error corpus'
+    assert_probe_parity error "$TEST_ROOT/tests/fixtures/orca-corpus/error-lone-high-message.json" \
+        'surrogate error-envelope corpus'
     assert_probe_parity error "$corpus/error-unknown.json" 'unknown error corpus'
     assert_probe_parity error "$corpus/error-multi-document.json" 'multi-document error corpus'
     assert_probe_parity error "$corpus/malformed.json" 'malformed error corpus'

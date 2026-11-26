@@ -114,7 +114,9 @@ Do not merge changes that weaken these rules:
     `KA_ORCA_MAX_PARSE_STACK` (256 parser-stack slots, an object key counting as one) by the
     adapter's own check, never by the installed jq's limit, which changed from 256 to 10000
     in jq 1.8. (Under jq 1.8 that check sees parsed values only, so a too-deep earlier value
-    of a repeated key is refused by awk alone: the permitted direction.)
+    of a repeated key is refused by awk alone: the permitted direction.) Every Orca response
+    goes through `ka_orca_normalize_response_set` before either reader, so both parse the
+    same bytes; it rewrites display values only, never an identity field.
 
 ## Module responsibilities
 

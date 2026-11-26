@@ -150,7 +150,7 @@ refused the whole response:
 | `reason=` | Meaning |
 |---|---|
 | `command-<status>` | `orca-ide` itself failed; `command-124` is the `KEEPALIVE_ORCA_TIMEOUT` deadline. Usually Orca is closed or restarting. |
-| `schema:not-json`, `schema:document-count`, `schema:not-object` | stdout was not exactly one JSON object - something printed around it. |
+| `schema:not-json`, `schema:document-count`, `schema:not-object` | stdout was not exactly one JSON object - something printed around it, or the reader refused the JSON itself (for example nesting past the limit). |
 | `schema:not-ok`, `schema:runtime-id`, `schema:terminals` | The envelope is not the one the adapter knows. |
 | `schema:truncation-marker`, `schema:truncated` | The completeness marker is missing, or more than 1000 terminals were reported. |
 | `schema:total-count` | `totalCount` is missing or disagrees with the rows returned. |
