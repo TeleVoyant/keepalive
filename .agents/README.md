@@ -52,8 +52,11 @@ maintainer or coding agent needs in order to continue safely.
 - Tests: 36 files, 2507 assertions with jq 1.7 as of the 2026-11-26 Orca correction round.
   The final gate is `./scripts/dev-check.sh`. The 1.1.1 release shipped with 31 files and
   1519 assertions.
-- `6115d90` was installed on the development host on 2026-11-25; the 2026-11-26 round is
-  not installed yet. Installed earlier from `54fcc26` (2026-11-13): the installer reloaded
+- Installed on the development host from `82e5f2c` (2026-11-26, Orca CLI 1.4.277): `doctor`
+  passed with both backends reachable (Orca reader jq), five Orca sessions AVAILABLE, no
+  ACTIVE targets to carry over (the host had rebooted that morning, which clears runtime
+  state), quarantine empty. `6115d90` had been installed 2026-11-25. Installed earlier
+  from `54fcc26` (2026-11-13): the installer reloaded
   both ACTIVE Orca keep-alives with their countdowns continuing (secondary state kept),
   quarantine stayed empty, and `doctor` passed with both backends reachable. Earlier, the
   1.1.1 install (2026-10-02) reloaded the one ACTIVE Orca keep-alive with its countdown,
