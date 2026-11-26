@@ -188,7 +188,11 @@ PTY, or with no agent identity, proves no other identity: Orca reports the first
 PTY has exited or is not yet attached, and omits the agent both for a plain shell and when
 its agent evidence conflicts. Each is its own transient result. Periodic health counts it
 toward the strike budget, so a momentary gap is ridden out while a pane that stays that
-way ends UNAVAILABLE; a pre-send check with that result skips the send without a strike. Delivery uses one atomic `terminal send --text ... --enter` request.
+way ends UNAVAILABLE; a pre-send check with that result skips the send without a strike.
+Orca 1.4.274+ can also retain a closed pane in `terminal show` with
+`exitCause.kind=operator_close`. The adapter ignores that field: Orca sets it when teardown
+was requested, including when the host could not confirm the process exited, so a closed
+pane is the ordinary disconnected (21) or agent-less (23) transient result. Delivery uses one atomic `terminal send --text ... --enter` request.
 
 ### Position-aware classifier contract
 

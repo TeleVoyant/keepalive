@@ -99,7 +99,9 @@ Do not merge changes that weaken these rules:
     them all. Health and pre-send then validate the stored handle live.
 49. An Orca pane that reports no attached PTY or no agent identity is transient - counted
     toward the strike budget by periodic health, a skipped send before delivery - and never
-    immediate identity loss; only a different non-empty value is.
+    immediate identity loss; only a different non-empty value is. Orca's `exitCause`, even
+    `operator_close`, is not identity evidence: it records requested teardown, not
+    certified process death, so it never shortcuts the strike budget.
 50. Pace the expensive Orca CLI starts - periodic discovery and live health fallback - on
     their own floors (`KEEPALIVE_ORCA_DISCOVERY_INTERVAL`,
     `KEEPALIVE_ORCA_LIVE_HEALTH_INTERVAL`). Never pace pre-send validation or a client's

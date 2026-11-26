@@ -86,14 +86,15 @@ assert_no_empty_fields() {
 # The 1.4.274 fixtures reconstruct read-only status/list/show fields captured from the
 # installed CLI; every private value is replaced with a synthetic placeholder. The two
 # prompt receipts are synthetic and source-derived from the installed 1.4.274 terminal.send
-# contract: prompt.stages advances from input_accepted to turn_started. Older corpus and
-# malformed fixtures below remain unchanged.
+# contract: prompt.stages advances from input_accepted to turn_started. The live 1.4.277
+# status, list, and show envelopes have the same structure. The older corpus fixtures remain
+# unchanged; the exitCause cases further down are synthetic.
 fixture_dir="$TEST_ROOT/tests/fixtures/orca-corpus"
 export FAKE_ORCA_STATUS_JSON_FILE="$fixture_dir/status-1.4.274-synthetic.json"
 assert_true '1.4.274 status envelope remains reachable' ka_orca_runtime_reachable
-assert_true '1.4.274 status retains appVersion and remote update metadata' \
+assert_true '1.4.274 status fixture contains appVersion' \
     grep -Fq '"appVersion":"1.4.274"' "$fixture_dir/status-1.4.274-synthetic.json"
-assert_true '1.4.274 status retains additive capabilities' \
+assert_true '1.4.274 status fixture contains additive capabilities' \
     grep -Fq '"capabilities":["synthetic-capability.v1"]' "$fixture_dir/status-1.4.274-synthetic.json"
 unset FAKE_ORCA_STATUS_JSON_FILE
 
@@ -103,16 +104,16 @@ assert_eq 9 "$(printf '%s\n' "$latest_discovery" | sed '/^#/d;/^$/d' | wc -l)" \
     '1.4.274 additive list fields preserve all nine agent candidates'
 assert_eq '#COMPLETE' "$(printf '%s\n' "$latest_discovery" | tail -n1)" \
     '1.4.274 reconstructed list completes'
-assert_true '1.4.274 list retains hostScope' \
+assert_true '1.4.274 list fixture contains hostScope' \
     grep -Fq '"hostScope"' "$fixture_dir/list-1.4.274-synthetic.json"
-assert_true '1.4.274 list retains topologyRevisions' \
+assert_true '1.4.274 list fixture contains topologyRevisions' \
     grep -Fq '"topologyRevisions"' "$fixture_dir/list-1.4.274-synthetic.json"
-assert_true '1.4.274 terminal rows retain additive branch, timestamp, and preview fields' \
+assert_true '1.4.274 list fixture contains branch, timestamp, and preview fields' \
     grep -Fq '"branch":"synthetic-branch"' "$fixture_dir/list-1.4.274-synthetic.json"
-assert_true '1.4.274 list timestamp and preview fields are synthetic' \
+assert_true '1.4.274 list fixture uses synthetic timestamp and preview values' \
     grep -Fq '"lastOutputAt":0,"preview":"synthetic terminal preview"' \
         "$fixture_dir/list-1.4.274-synthetic.json"
-assert_true '1.4.274 show additive pane metadata retains the captured JSON types' \
+assert_true '1.4.274 show fixture contains pane metadata with the expected JSON types' \
     grep -Fq '"paneRuntimeId":0,"rendererGraphEpoch":0,"agentWait":null' \
         "$fixture_dir/show-1.4.274-synthetic.json"
 unset FAKE_ORCA_LIST_JSON_FILE
@@ -129,10 +130,10 @@ unset FAKE_ORCA_SHOW_JSON_FILE
 for stage_fixture in send-prompt-input-accepted-1.4.274-synthetic.json \
     send-prompt-turn-started-1.4.274-synthetic.json; do
     stage_path="$fixture_dir/$stage_fixture"
-    assert_true "$stage_fixture includes the documented input acceptance stage" \
+    assert_true "$stage_fixture fixture contains the input acceptance stage" \
         grep -Fq '"input_accepted"' "$stage_path"
     if [[ $stage_fixture == *turn-started* ]]; then
-        assert_true '1.4.274 turn-started receipt includes its additive submission stage' \
+        assert_true 'turn-started receipt fixture contains the additional submission stage' \
             grep -Fq '"turn_started"' "$stage_path"
     fi
     export FAKE_ORCA_RESPONSE_FILE="$stage_path"
@@ -368,24 +369,24 @@ export FAKE_ORCA_WORKTREE="$ORCA_WORKTREE" FAKE_ORCA_HOST=local FAKE_ORCA_TAB=ta
 export FAKE_ORCA_LEAF=leaf-4444 FAKE_ORCA_AGENT=codex
 assert_show_rc 0 'valid show'
 
-# Confirmed operator_close only proves this target ended when all retained identity fields
-# match and Orca reports the closed terminal state; all other exit causes stay transient.
+# Orca 1.4.274+ may keep a closed pane in terminal show with exitCause.kind=operator_close.
+# That records a requested close, not certified process death, so the adapter ignores
+# exitCause: a closed pane gets the ordinary transient results and the strike budget.
 ORCA_HANDLE=term-fixture-1 ORCA_PTY=pty-fixture-1 ORCA_INCARNA=inc-fixture-1
 ORCA_WORKTREE=repo::/work/orca-fixture-1 ORCA_RUNTIME=runtime-fixture ORCA_HOST=local
 ORCA_TAB=tab-fixture-1 ORCA_LEAF=leaf-fixture-1 ORCA_AGENT=codex
 export FAKE_ORCA_SHOW_JSON_FILE="$fixture_dir/show-operator-close.json"
-assert_show_rc 10 'confirmed operator_close with matching retained identity and absent agent is definitive'
+assert_show_rc 23 'operator_close with matching binding and no agent stays transient'
+export FAKE_ORCA_SHOW_JSON_FILE="$fixture_dir/show-operator-close-agent.json"
+assert_show_rc 21 'operator_close with matching binding and agent stays transient'
 export FAKE_ORCA_SHOW_JSON_FILE="$fixture_dir/show-operator-close-wrong-incarnation.json"
 assert_show_rc 12 'operator_close cannot override a different incarnation'
 export FAKE_ORCA_SHOW_JSON_FILE="$fixture_dir/show-orphaned-unconfirmed.json"
 assert_show_rc 23 'orphaned terminal without recognized cause remains transient'
-assert_true 'unconfirmed orphan result consumes transient handling' ka_orca_validation_is_transient 23
 export FAKE_ORCA_SHOW_JSON_FILE="$fixture_dir/show-operator-close-connected.json"
 assert_show_rc 23 'operator_close on connected terminal is not definitive'
-assert_true 'connected close candidate remains transient' ka_orca_validation_is_transient 23
 export FAKE_ORCA_SHOW_JSON_FILE="$fixture_dir/show-operator-close-writable.json"
 assert_show_rc 23 'operator_close on writable terminal is not definitive'
-assert_true 'writable close candidate remains transient' ka_orca_validation_is_transient 23
 export FAKE_ORCA_SHOW_JSON_FILE="$fixture_dir/show-live-malformed-exit-cause.json"
 assert_show_rc 0 'malformed exitCause kind does not invalidate a live row'
 export FAKE_ORCA_SHOW_JSON_FILE="$fixture_dir/show-live-unknown-exit-cause.json"

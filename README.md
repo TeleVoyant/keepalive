@@ -13,7 +13,7 @@ Version: **1.1.1** · [Changelog](CHANGELOG.md) · [MIT licensed](LICENSE)
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Process model, identity, state schemas, IPC, scheduler, recovery |
 | [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) | Every environment variable, with defaults and when to change them |
 | [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) | Symptom-first fixes, from `unknown` session names to CPU cost |
-| [`docs/TESTING.md`](docs/TESTING.md) | What the 2352 assertions cover, and how to add one |
+| [`docs/TESTING.md`](docs/TESTING.md) | What the assertions cover, and how to add one |
 | [`docs/MAINTENANCE.md`](docs/MAINTENANCE.md) | Safety invariants, module map, live checklist, release flow |
 | [`docs/VALIDATION.md`](docs/VALIDATION.md) | Evidence recorded for this release |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Conventions the automated checks enforce |
@@ -92,11 +92,11 @@ The TUI itself may be launched from any terminal emulator. Backends are auto-det
 
 Orca is evolving, so every Orca-specific command, JSON path, schema check, and error-code mapping lives in [`lib/orca.sh`](lib/orca.sh). The rest of the daemon sees a small normalized `terminal-v1` adapter contract through [`lib/transport.sh`](lib/transport.sh). A future Orca CLI change should normally require edits to that adapter and its mock fixture, not to timers, IPC, or scheduler code.
 
-Keepalive reads live JSON from the installed Orca CLI. The `status`, `terminal list`, and `terminal show` response formats have been verified against Orca v1.4.274. [Orca v1.4.274 release](https://github.com/stablyai/orca/releases/tag/v1.4.274) · [Orca CLI reference](https://orca.dev/docs/cli/reference)
+Keepalive reads live JSON from the installed Orca CLI. The `status`, `terminal list`, and `terminal show` response formats have been verified against Orca v1.4.274 and v1.4.277, with both JSON readers. [Orca v1.4.277 release](https://github.com/stablyai/orca/releases/tag/v1.4.277) · [Orca CLI reference](https://orca.dev/docs/cli/reference)
 
 Delivery succeeds when the CLI receipt reports input acceptance through `result.send.accepted`, for both Enter and text followed by Enter. Orca can also report prompt stages such as `turn_started` for text followed by Enter in an agent terminal.
 
-Orca can retain a closed terminal's identity in `terminal show`. Keepalive uses the reported `operator_close` exit cause to mark a disconnected, non-writable, orphaned target unavailable once its stored terminal binding matches.
+Orca can retain a closed terminal in `terminal show` with an `exitCause` such as `operator_close`. Keepalive ignores it: that cause records a requested close, not confirmed process exit, so a closed pane is handled like any other unreachable one and ends `UNAVAILABLE` through the strike budget.
 
 Discovery accepts only connected, writable, non-orphaned terminals with a non-empty `agentIdentity`. It binds each target to the Orca runtime, terminal handle, PTY, process incarnation, worktree, execution host, tab, leaf, and agent identity. Unknown or incomplete JSON fails the backend pass closed and preserves its prior snapshot. An unfamiliar validation response is transient rather than evidence of identity loss, preventing schema drift from making a target sticky `UNAVAILABLE`.
 

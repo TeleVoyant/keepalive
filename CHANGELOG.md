@@ -27,9 +27,6 @@ Orca 1.4.241 compatibility, Orca without jq, and Orca CLI cost.
 
 ### Fixed
 
-- **Confirmed Orca terminal exits.** If Orca v1.4.274 retains the matching terminal
-  binding and reports `operator_close` for a disconnected, non-writable, orphaned
-  terminal, Keepalive marks the target unavailable on that validation check.
 - **Orca discovery no longer fails whole passes on one pane.** An agent pane with no
   attached PTY, a foreign or SSH route without an execution host, or split/mirrored panes
   sharing one PTY each made every `terminal list` pass report `reason=schema` and froze the

@@ -487,7 +487,7 @@ ka_orca_validate_target() {
     local handle=$1 expected_pty=$2 expected_incarnation=$3 expected_worktree=$4
     local expected_runtime=$5 expected_host=$6 expected_tab=$7 expected_leaf=$8 expected_agent=$9
     local output rc row actual_handle pty_present pty incarnation worktree runtime host tab leaf
-    local agent_present agent connected writable orphaned operator_closed
+    local agent_present agent connected writable orphaned
 
     if output=$(ka_orca_exec terminal show --terminal "$handle" --json 2>/dev/null); then
         :
@@ -564,9 +564,7 @@ ka_orca_validate_target() {
                 .executionHostId, .tabId, .leafId,
                 (if .agentIdentity | present then "1" else "0" end),
                 (if .agentIdentity | present then .agentIdentity else "-" end),
-                (.connected | tostring), (.writable | tostring), (.orphaned | tostring),
-                (if (.exitCause | type) == "object" then .exitCause.kind == "operator_close"
-                 else false end | tostring)
+                (.connected | tostring), (.writable | tostring), (.orphaned | tostring)
             ] | @tsv
         else
             error("unsupported Orca terminal show schema")
@@ -576,7 +574,7 @@ ka_orca_validate_target() {
     ((rc == 0)) || return 22
     [[ -n $row ]] || return 21
     IFS=$'\t' read -r actual_handle pty_present pty incarnation worktree runtime host tab leaf \
-        agent_present agent connected writable orphaned operator_closed <<<"$row"
+        agent_present agent connected writable orphaned <<<"$row"
 
     [[ $runtime == "$expected_runtime" ]] || return 11
     [[ $actual_handle == "$handle" ]] || return 10
@@ -585,12 +583,11 @@ ka_orca_validate_target() {
     [[ $pty == "$expected_pty" ]] || return 13
     [[ $worktree == "$expected_worktree" && $host == "$expected_host" ]] || return 14
     [[ $tab == "$expected_tab" && $leaf == "$expected_leaf" ]] || return 16
-    # Orca can retain a closed pane's binding and report its confirmed PTY exit in show.
-    if [[ $operator_closed == true && $connected == false && $writable == false && $orphaned == true ]]; then
-        return 10
-    fi
     [[ $agent_present == 1 ]] || return 23
     [[ $agent == "$expected_agent" ]] || return 15
+    # Deliberately ignores Orca's exitCause (1.4.274+). Even operator_close records only that
+    # teardown was requested; Orca leaves PTY death uncertified when the host cannot report
+    # it, so a closed pane goes through the strike budget like any other unreachable one.
     [[ $connected == true && $writable == true && $orphaned != true ]] || return 21
     return 0
 }
